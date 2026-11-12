@@ -1,0 +1,1043 @@
+package webapp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/reearth/ygo/cluster"
+
+	"github.com/runbear-io/beardrive/internal/remote"
+)
+
+func TestWave2ReceiptSourcesShareOneCap(t *testing.T) {
+	r := httptest.NewRequest("GET", "/?r=query:2,other:3&r=last:4,overflow:5", nil)
+	r.Header.Add(receiptHeader, "header:1")
+	got := parseReceipts(r)
+	if len(got) != 4 || got[0].String() != "header:1" || got[3].String() != "last:4" {
+		t.Fatalf("receipts: %+v", got)
+	}
+	r = httptest.NewRequest("GET", "/?r=bad:0,no%20device:2,good:3", nil)
+	if got = parseReceipts(r); len(got) != 1 || got[0].String() != "good:3" {
+		t.Fatalf("invalid receipt accepted: %+v", got)
+	}
+}
+
+func TestWave2RawFrameQueryReceiptRevalidates(t *testing.T) {
+	a, b, p, _ := newRYOWHubPair(t)
+	base := "/api/p/" + p.ID
+	writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=site/index.html", []byte("<p>old</p>"), nil), "seed")
+	b.call(t, "GET", base+"/tree", nil, nil)
+	receipt := writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=site/index.html", []byte("<p>new</p>"), nil), "edit")
+	token, err := b.s.signFrame(context.Background(), frameClaims{Project: p.ID, Dir: "site", Email: "editor@example.com", Expires: time.Now().Add(time.Hour).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, v, err := b.s.projectVolume(p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", base+"/raw/"+token+"/site/index.html?path=outside.html&r="+url.QueryEscape(receipt), nil)
+	req.SetPathValue("project", p.ID)
+	req.SetPathValue("token", token)
+	req.SetPathValue("path", "site/index.html")
+	req.Header.Set("If-None-Match", `"`+shaOf("<p>old</p>")+`"`)
+	rec := httptest.NewRecorder()
+	b.s.handleRaw(v, rec, req)
+	if rec.Code != 200 || rec.Body.String() != "<p>new</p>" {
+		t.Fatalf("raw receipt: %d %s", rec.Code, rec.Body)
+	}
+	if rec.Header().Get("Cache-Control") != "private, no-cache" || !strings.Contains(strings.Join(rec.Header().Values("Vary"), ","), receiptHeader) {
+		t.Fatalf("frame caching: %v", rec.Header())
+	}
+}
+
+func TestWave2FreshShareRefoldsAndUnwrapsWiki(t *testing.T) {
+	a, b, p, be := newRYOWHubPair(t)
+	repo := newFileShareRepo(filepath.Join(t.TempDir(), "shares.json"))
+	var err error
+	a.s.Shares, err = NewShareDB(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.s.Shares, err = NewShareDB(newFileShareRepo(repo.path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "/api/p/" + p.ID
+	b.call(t, "GET", base+"/tree", nil, nil) // cached empty fold predates the file
+	writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=note.md", []byte("# Public\n[[private|Readable & safe]]\n"), nil), "create")
+	sh, err := a.s.Shares.Create(p.ID, "note.md", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/s/"+sh.Token, nil)
+	req.SetPathValue("token", sh.Token)
+	rec := httptest.NewRecorder()
+	b.s.handleShared(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `<span class="wiki-text">Readable &amp; safe</span>`) || strings.Contains(rec.Body.String(), `href="wiki:`) {
+		t.Fatalf("fresh public share: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "sandbox") {
+		t.Fatal("share lost sandbox")
+	}
+	// A still-live share record whose file is absent costs only one fresh fold.
+	missing, err := a.s.Shares.Create(p.ID, "deleted.md", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := be.journalLists.Load()
+	for range 8 {
+		req := httptest.NewRequest("GET", "/s/"+missing.Token, nil)
+		req.SetPathValue("token", missing.Token)
+		rec := httptest.NewRecorder()
+		b.s.handleShared(rec, req)
+		if rec.Code != 404 {
+			t.Fatalf("missing share: %d", rec.Code)
+		}
+	}
+	if n := be.journalLists.Load() - before; n > 1 {
+		t.Fatalf("negative share caused %d journal listings", n)
+	}
+	_, v, _ := b.s.projectVolume(p.ID)
+	for i := range maxUnseenReceipts + 20 {
+		v.unseenMu.Lock()
+		v.shareMiss = insertUnseen(v.shareMiss, fmt.Sprint(i), time.Now(), receiptMissCooldown)
+		v.unseenMu.Unlock()
+	}
+	if len(v.shareMiss) > 256 {
+		t.Fatal("unbounded share miss cache")
+	}
+}
+
+func TestWave2RestoreOlderAuthoredBlobIntoSiblingLiveRoom(t *testing.T) {
+	// Drive snapshots explicitly; timer snapshots must not obscure causal order.
+	fastRoom(t, time.Hour, time.Hour)
+	a, b, p := newHubPair(t)
+	ha, hb := a.Handler(), b.Handler()
+	base := "/api/p/" + p.ID
+	room := p.ID + "/notes.md"
+	putContent(t, ha, base+"/upload/content?path=notes.md", "base\n", "")
+	doc := liveRoom(t, b, room, true)
+	typeInto(doc, "version two\n")
+	b.snapshotRoom(context.Background(), room)
+	v2 := doc.GetText("body").ToString()
+	sha2 := shaOf(v2)
+	typeInto(doc, "version three\n")
+	b.snapshotRoom(context.Background(), room)
+	if !b.contains(context.Background(), doc, p.ID, sha2) {
+		t.Fatal("test did not retain v2 Yjs history")
+	}
+	head := b.roomHeadRecord(context.Background(), p.ID, "notes.md")
+	restoreVia(t, ha, p.ID, "notes.md", sha2)
+	_, fi, have, err := b.roomFile(context.Background(), room)
+	if err != nil || !have || fileWin(fi, "notes.md") <= head.Win || fi.Blob == head.SHA {
+		t.Fatalf("restore provenance not newer: %+v %+v %v", fi, head, err)
+	}
+	b.snapshotRoom(context.Background(), room)
+	if got := doc.GetText("body").ToString(); got != v2 {
+		t.Fatalf("room undid restore: %q, want %q", got, v2)
+	}
+	if got := get(t, hb, base+"/file?path=notes.md").Body.String(); got != v2 {
+		t.Fatalf("storage undid restore: %q", got)
+	}
+	typeInto(doc, "after restore\n")
+	b.snapshotRoom(context.Background(), room)
+	if got := get(t, hb, base+"/file?path=notes.md").Body.String(); got != v2+"after restore\n" {
+		t.Fatalf("post-restore edit: %q", got)
+	}
+	if n := conflictCopies(t, hb, p.ID); n != 0 {
+		t.Fatalf("clean restore parked %d copies", n)
+	}
+}
+
+func TestWave2MetadataAtomicity(t *testing.T) {
+	for _, backend := range metaBackends(t) {
+		t.Run(backend.name, func(t *testing.T) {
+			backend.reset(t)
+			a, b := backend.open(t), backend.open(t)
+			defer a.Close()
+			defer b.Close()
+			oa, err := NewOrgDB(a.Orgs())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ob, err := NewOrgDB(b.Orgs())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, remove := range []bool{false, true} {
+				o, err := oa.Create(fmt.Sprint("owners-", remove), "alice@example.com")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := oa.AddMember(o.ID, "bob@example.com", RoleOwner); err != nil {
+					t.Fatal(err)
+				}
+				start := make(chan struct{})
+				errs := make(chan error, 2)
+				for i, db := range []*OrgDB{oa, ob} {
+					email := []string{"alice@example.com", "bob@example.com"}[i]
+					go func(db *OrgDB, email string) {
+						<-start
+						if remove {
+							errs <- db.RemoveMember(o.ID, email)
+						} else {
+							errs <- db.SetRole(o.ID, email, RoleMember)
+						}
+					}(db, email)
+				}
+				close(start)
+				successes := 0
+				for range 2 {
+					err := <-errs
+					if err == nil {
+						successes++
+					} else if !errors.Is(err, ErrLastOwner) {
+						t.Fatal(err)
+					}
+				}
+				if successes != 1 {
+					t.Fatalf("concurrent owner mutations: %d successes", successes)
+				}
+				got, _ := oa.Get(o.ID)
+				if oa.ownerCount(got) != 1 {
+					t.Fatalf("owners after race: %+v", got.Members)
+				}
+			}
+			// Deterministic personal orgs coalesce without overwriting memberships.
+			start := make(chan struct{})
+			ids := make(chan string, 2)
+			errs := make(chan error, 2)
+			for _, db := range []*OrgDB{oa, ob} {
+				go func(db *OrgDB) {
+					<-start
+					o, err := db.CreatePersonal("Personal", "PERSON@example.com ")
+					ids <- o.ID
+					errs <- err
+				}(db)
+			}
+			close(start)
+			for range 2 {
+				if err := <-errs; err != nil {
+					t.Fatal(err)
+				}
+			}
+			if x, y := <-ids, <-ids; x != y {
+				t.Fatalf("personal org split: %s %s", x, y)
+			}
+			pa, err := NewProjectDB(a.Projects())
+			if err != nil {
+				t.Fatal(err)
+			}
+			pb, err := NewProjectDB(b.Projects())
+			if err != nil {
+				t.Fatal(err)
+			}
+			start = make(chan struct{})
+			ids = make(chan string, 12)
+			errs = make(chan error, 12)
+			for i := range 12 {
+				db := pa
+				if i%2 != 0 {
+					db = pb
+				}
+				go func(db *ProjectDB, i int) {
+					<-start
+					name := "Project"
+					if i%2 != 0 {
+						name = "project"
+					}
+					p, _, err := db.GetOrCreate(name, "org-unique")
+					ids <- p.ID
+					errs <- err
+				}(db, i)
+			}
+			close(start)
+			id := ""
+			for range 12 {
+				if err := <-errs; err != nil {
+					t.Fatal(err)
+				}
+				got := <-ids
+				if id != "" && got != id {
+					t.Fatalf("duplicate project %s != %s", got, id)
+				}
+				id = got
+			}
+			sa, err := NewShareDB(a.Shares())
+			if err != nil {
+				t.Fatal(err)
+			}
+			sb, err := NewShareDB(b.Shares())
+			if err != nil {
+				t.Fatal(err)
+			}
+			sh, err := sa.Create(id, "note.md", "", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sb.Get(sh.Token)
+			if !sa.Revoke(sh.Token) {
+				t.Fatal("revoke failed")
+			}
+			if _, _, err := sb.SetExpiry(sh.Token, time.Hour); !errors.Is(err, ErrShareNotFound) {
+				t.Fatalf("expiry after revoke: %v", err)
+			}
+			if err := b.Shares().(shareExpiryUpdater).UpdateExpiry(sh.Token, time.Now()); !errors.Is(err, ErrShareNotFound) {
+				t.Fatalf("store resurrected revoked share: %v", err)
+			}
+			authA, err := NewBuiltinAuth(a.Accounts(), false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authB, err := NewBuiltinAuth(b.Accounts(), false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := authA.SetPolicy(false, true); err != nil {
+				t.Fatal(err)
+			}
+			if !authB.Policy().RequireApproval {
+				t.Fatal("sibling did not refresh saved signup policy")
+			}
+			// Startup config defaults remain effective when DB holds no new override.
+			authB.RequireVerification = true
+			if !authB.Policy().RequireVerification {
+				t.Fatal("unchanged policy undid pinned startup default")
+			}
+			la, err := NewReadLedger(a.Reads(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lb, err := NewReadLedger(b.Reads(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			la.Record(id, "note.md", ReadKindShare, "same-actor")
+			lb.Record(id, "note.md", ReadKindShare, "same-actor")
+			if err := la.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := lb.Close(); err != nil {
+				t.Fatal(err)
+			}
+			// Refresh has no sleep: reset the throttle as if two seconds elapsed.
+			la.mu.Lock()
+			la.lastRefresh = time.Time{}
+			la.mu.Unlock()
+			if got := la.Heat(id, "", time.Time{})["note.md"].Share; got != 2 {
+				t.Fatalf("additive sibling count=%d", got)
+			}
+			la.Record(id, "note.md", ReadKindShare, "unflushed")
+			la.mu.Lock()
+			la.lastRefresh = time.Time{}
+			la.mu.Unlock()
+			if got := la.ShareOpens(id)["note.md"].Count; got != 3 {
+				t.Fatalf("refresh lost or duplicated local delta: %d", got)
+			}
+			if err := la.Close(); err != nil {
+				t.Fatal(err)
+			}
+			lb.mu.Lock()
+			lb.lastRefresh = time.Time{}
+			lb.mu.Unlock()
+			if got := lb.Heat(id, "", time.Time{})["note.md"].Share; got != 3 {
+				t.Fatalf("refresh after flush=%d", got)
+			}
+		})
+	}
+}
+
+// Each child opens a distinct repo instance in a distinct OS process, so a
+// process-local mutex cannot make this pass.
+func TestWave2FileWriteWorker(t *testing.T) {
+	dir := os.Getenv("BDRIVE_WAVE2_FILE_TEST")
+	if dir == "" {
+		return
+	}
+	r := newFileShareRepo(filepath.Join(dir, "shares.json"))
+	for i := range 12 {
+		if err := r.Put(Share{Token: fmt.Sprintf("%s-%d", os.Getenv("BDRIVE_WAVE2_WORKER"), i), Path: "file.md"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestWave2FileMetadataCrossProcessWrites(t *testing.T) {
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	for i := range 4 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestWave2FileWriteWorker$")
+			cmd.Env = append(os.Environ(), "BDRIVE_WAVE2_FILE_TEST="+dir, fmt.Sprintf("BDRIVE_WAVE2_WORKER=%d", i))
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				err = fmt.Errorf("child %d: %w: %s", i, err, out)
+			}
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := newFileShareRepo(filepath.Join(dir, "shares.json")).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 48 {
+		t.Fatalf("lost file metadata writes: %d rows, want 48", len(rows))
+	}
+}
+
+func TestWave2DataReenableRebuildsSiblingCache(t *testing.T) {
+	a, b, p := newHubPair(t)
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), "data.db")
+	xa, err := OpenDataIndex("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xa.Close()
+	xb, err := OpenDataIndex("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xb.Close()
+	a.Data, b.Data = xa, xb
+	if err := a.Projects.SetData(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := xa.start(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	putContent(t, a.Handler(), "/api/p/"+p.ID+"/upload/content?path=doc.json", `{"answer":42}`, "")
+	st := a.dataProjectState(p.ID)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if err := a.dataPass(ctx, p.ID, st); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.known) == 0 {
+		t.Fatal("test did not populate cached winners")
+	}
+	if err := b.Projects.SetData(p.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := xb.dropProject(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Projects.SetData(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := xb.start(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.dataPass(ctx, p.ID, st); err != nil {
+		t.Fatal(err)
+	}
+	known, err := xa.known(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := known["doc.json"]; !ok {
+		t.Fatal("sibling's old cached winner skipped re-index after off/on")
+	}
+}
+
+func TestWave2PinnedSignupPolicySurvivesSiblingRefresh(t *testing.T) {
+	for _, backend := range metaBackends(t) {
+		t.Run(backend.name, func(t *testing.T) {
+			backend.reset(t)
+			sa, sb := backend.open(t), backend.open(t)
+			defer sa.Close()
+			defer sb.Close()
+			a, err := NewBuiltinAuth(sa.Accounts(), false, &Mailer{Host: "smtp.example"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := a.SetPolicy(false, true); err != nil {
+				t.Fatal(err)
+			}
+			b, err := NewBuiltinAuth(sb.Accounts(), false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			approval := true
+			b.PinPolicy(nil, &approval)
+			approval = false // the pin must own its value, not the config pointer
+			if err := a.SetPolicy(false, false); err != nil {
+				t.Fatal(err)
+			}
+			if policy := b.Policy(); !policy.RequireApproval || !b.RequireApproval {
+				t.Fatal("sibling refresh removed the server-config approval pin")
+			}
+			u, err := b.signup("pending@example.com", "Pending", "password1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if u.Status != statusPending {
+				t.Fatalf("signup status = %q, want pending", u.Status)
+			}
+			if err := b.SetPolicy(false, false); err == nil || !strings.Contains(err.Error(), "require_approval is pinned to true") {
+				t.Fatalf("removing the approval pin: %v", err)
+			}
+			if err := b.SetPolicy(false, true); err != nil {
+				t.Fatalf("setting the pinned value: %v", err)
+			}
+			verification := false
+			b.PinPolicy(&verification, nil)
+			verification = true
+			if err := a.SetPolicy(true, false); err != nil {
+				t.Fatal(err)
+			}
+			if policy := b.Policy(); policy.RequireVerification || policy.RequireApproval {
+				t.Fatalf("per-field pin or unpinned sibling refresh failed: %+v", policy)
+			}
+			if err := b.SetPolicy(true, false); err == nil || !strings.Contains(err.Error(), "require_verification is pinned to false") {
+				t.Fatalf("removing the verification pin: %v", err)
+			}
+			verification = true
+			b.PinPolicy(&verification, nil)
+			if err := b.SetPolicy(true, false); err == nil || !strings.Contains(err.Error(), "smtp") {
+				t.Fatalf("effective pinned policy skipped mailer validation: %v", err)
+			}
+		})
+	}
+}
+
+func TestWave2DataReenableWithPartialSiblingChunkRebuildsRemainingFiles(t *testing.T) {
+	a, b, p := newHubPair(t)
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), "data.db")
+	xa, err := OpenDataIndex("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xa.Close()
+	xb, err := OpenDataIndex("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xb.Close()
+	a.Data, b.Data = xa, xb
+	if err := a.Projects.SetData(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := xa.start(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"a.json", "b.json", "c.json"} {
+		putContent(t, a.Handler(), "/api/p/"+p.ID+"/upload/content?path="+path, `{"answer":42}`, "")
+	}
+	st := a.dataProjectState(p.ID)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if err := a.dataPass(ctx, p.ID, st); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.known) != 3 {
+		t.Fatalf("initial cached winners = %d, want 3", len(st.known))
+	}
+	oldEpoch := st.knownEpoch
+	first := dataRow{path: "a.json"}
+	if err := xa.w.QueryRowContext(ctx, xa.q(`SELECT win, sha, doc FROM data_items WHERE project = ? AND path = ?`), p.ID, first.path).
+		Scan(&first.win, &first.sha, &first.doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Projects.SetData(p.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := xb.dropProject(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Projects.SetData(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := xb.start(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if refused, err := xb.write(ctx, p.ID, []dataRow{first}); err != nil || refused != 0 {
+		t.Fatalf("write sibling's first chunk: refused=%d err=%v", refused, err)
+	}
+	partial, err := xb.known(ctx, p.ID)
+	if err != nil || len(partial) != 1 {
+		t.Fatalf("sibling's partial build: rows=%d err=%v", len(partial), err)
+	}
+	if err := a.dataPass(ctx, p.ID, st); err != nil {
+		t.Fatal(err)
+	}
+	if st.knownEpoch == oldEpoch || len(st.known) != 3 {
+		t.Fatalf("cached rebuild: epoch=%d old=%d rows=%d", st.knownEpoch, oldEpoch, len(st.known))
+	}
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/api/p/"+p.ID+"/data/query", strings.NewReader(`{"pattern":"*.json"}`)))
+	var answer dataAnswer
+	if rec.Code != http.StatusOK {
+		t.Fatalf("query: %d %s", rec.Code, rec.Body)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+		t.Fatal(err)
+	}
+	if len(answer.Rows) != 3 || !answer.Complete {
+		t.Fatalf("partial sibling rebuild skipped files: rows=%d complete=%v", len(answer.Rows), answer.Complete)
+	}
+}
+
+func TestWave2DataPassInitializesLegacyEnabledProject(t *testing.T) {
+	a, _, p := newHubPair(t)
+	putContent(t, a.Handler(), "/api/p/"+p.ID+"/upload/content?path=legacy.json", `{"answer":42}`, "")
+	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	a.Data = x
+	if err := a.Projects.SetData(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, _, exists, err := x.passFence(ctx, p.ID); err != nil || exists {
+		t.Fatalf("legacy project already has a state row: exists=%v err=%v", exists, err)
+	}
+	st := a.dataProjectState(p.ID)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if err := a.dataPass(ctx, p.ID, st); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := x.readTx(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if complete, _, err := x.state(ctx, tx, p.ID); err != nil || !complete {
+		t.Fatalf("legacy pass did not complete: complete=%v err=%v", complete, err)
+	}
+	if len(st.known) != 1 {
+		t.Fatalf("legacy cached winners = %d, want 1", len(st.known))
+	}
+}
+
+func TestWave2DataBuildEpochFencesCompletion(t *testing.T) {
+	for name, open := range dataBackends(t) {
+		t.Run(name, func(t *testing.T) {
+			x := open(t)
+			ctx := context.Background()
+			project := "wave2-epoch-" + name
+			if err := x.start(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+			// A clock ahead of the next process must not make start reuse or
+			// decrease an epoch. Give both builds the same generation as well.
+			future := time.Now().Add(time.Hour).UnixNano()
+			if _, err := x.w.ExecContext(ctx, x.q(`UPDATE data_projects SET gen = 7, epoch = ? WHERE project = ?`), future, project); err != nil {
+				t.Fatal(err)
+			}
+			if err := x.start(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := x.w.ExecContext(ctx, x.q(`UPDATE data_projects SET gen = 7 WHERE project = ?`), project); err != nil {
+				t.Fatal(err)
+			}
+			gen, epoch, exists, err := x.passFence(ctx, project)
+			if err != nil || !exists || gen != 7 || epoch != future+1 {
+				t.Fatalf("new build fence: gen=%d epoch=%d exists=%v err=%v", gen, epoch, exists, err)
+			}
+			if ok, err := x.finish(ctx, project, gen, future, time.Now()); err != nil || ok {
+				t.Fatalf("old epoch completed a new build: ok=%v err=%v", ok, err)
+			}
+			if ok, err := x.finish(ctx, project, gen, epoch, time.Now()); err != nil || !ok {
+				t.Fatalf("current epoch did not complete: ok=%v err=%v", ok, err)
+			}
+		})
+	}
+}
+
+func TestWave2UnicodeHeadingIDs(t *testing.T) {
+	out, err := RenderMarkdown([]byte("# Body\n## 한글 제목\n## 한글 제목\n## Café\n## Cafe\u0301\n# Body\n# Body-1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"body", "한글-제목", "한글-제목-1", "café", "café-1", "body-1", "body-1-1"} {
+		if !strings.Contains(out, `id="`+id+`"`) {
+			t.Fatalf("missing heading id %q: %s", id, out)
+		}
+	}
+	again, err := RenderMarkdown([]byte("# Body"))
+	if err != nil || !strings.Contains(again, `id="body"`) {
+		t.Fatal("IDs leaked between documents")
+	}
+}
+
+func TestWave2UploadRefusesUnicodeAndCaseTwins(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	base := "/api/p/" + p.ID + "/upload/content?path="
+	for _, path := range []string{"Café.md", "Plan.md"} {
+		if rec := putContent(t, h, base+url.QueryEscape(path), "original", ""); rec.Code != 200 {
+			t.Fatalf("seed %s: %d %s", path, rec.Code, rec.Body)
+		}
+	}
+	for _, path := range []string{"Cafe\u0301.md", "plan.md"} {
+		if rec := putContent(t, h, base+url.QueryEscape(path), "twin", ""); rec.Code != 409 || !strings.Contains(rec.Body.String(), "macOS/Windows") {
+			t.Fatalf("twin %s: %d %s", path, rec.Code, rec.Body)
+		}
+	}
+	if rec := putContent(t, h, base+url.QueryEscape("Café.md"), "replacement", ""); rec.Code != 200 {
+		t.Fatalf("exact overwrite blocked: %d %s", rec.Code, rec.Body)
+	}
+	// Init must reject the same collision before granting a direct upload.
+	rec := do(t, h, "POST", "/api/p/"+p.ID+"/upload/init", map[string]any{"path": "plan.md", "sha256": shaOf("twin"), "size": 4})
+	if rec.Code != 409 {
+		t.Fatalf("init twin: %d %s", rec.Code, rec.Body)
+	}
+	if got := uploadTwin(map[string]FileInfo{"Plan.md": {}, "plan.md": {}}, "plan.md"); got != "" {
+		t.Fatalf("existing exact twin must remain editable: %q", got)
+	}
+}
+
+func TestWave2DeleteEventsCarryActorAndKind(t *testing.T) {
+	req := httptest.NewRequest("POST", "/", nil)
+	req.Header.Set("X-Bdrive-Device", "device-1")
+	req.Header.Set("X-Bdrive-Device-Name", "Laptop")
+	ev, ok := changeEventFor(req, "browser", []string{"gone.md"}, 0, 1)
+	if !ok || ev.Kind != "delete" || ev.Device != "device-1" {
+		t.Fatalf("delete frame: %+v", ev)
+	}
+	ev.User = "editor@example.com"
+	ev.UserName = "Editor"
+	b, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"user":"editor@example.com"`) {
+		t.Fatal("delete actor missing from wire")
+	}
+}
+
+func TestWave2DirectCommitRefusesTwinButKeepsExactOverwrite(t *testing.T) {
+	f := newFakeRemote(t)
+	f.put("seed", "Plan.md", "old")
+	srv := f.uploadServer(func(be remote.Backend) remote.Backend { return &signingBackend{Backend: be} })
+	h := srv.Handler()
+	// Both checks must run even if callers skip init and call commit directly.
+	for _, door := range []string{"init", "commit"} {
+		rec := do(t, h, "POST", "/api/upload/"+door, initReq("plan.md", "old"))
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s twin: %d %s", door, rec.Code, rec.Body)
+		}
+	}
+	rec := do(t, h, "POST", "/api/upload/commit", initReq("Plan.md", "old"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exact direct commit: %d %s", rec.Code, rec.Body)
+	}
+}
+
+type wave2FailingReadAdder struct {
+	ReadRepo
+	fail bool
+}
+
+func (r *wave2FailingReadAdder) AddBatch(d []ReadStat) error {
+	if r.fail {
+		return os.ErrPermission
+	}
+	return r.ReadRepo.(readAdder).AddBatch(d)
+}
+
+func TestWave2ReadDeltasSurviveFailedFlush(t *testing.T) {
+	repo := &wave2FailingReadAdder{ReadRepo: newFileReadRepo(filepath.Join(t.TempDir(), "reads.json")), fail: true}
+	l, err := NewReadLedger(repo, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Record("p", "a.md", ReadKindHuman, "alice")
+	if err := l.Close(); err == nil {
+		t.Fatal("failed additive flush reported success")
+	}
+	if len(l.pendingDeltas) != 1 {
+		t.Fatal("failed flush discarded its delta")
+	}
+	l.lastRefresh = time.Time{}
+	if got := l.Heat("p", "", time.Time{})["a.md"].Human; got != 1 {
+		t.Fatalf("failed-flush overlay: %d", got)
+	}
+	repo.fail = false
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(l.pendingDeltas) != 0 {
+		t.Fatal("successful flush kept flushed delta")
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := repo.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Count != 1 {
+		t.Fatalf("retry double counted: %+v", stored)
+	}
+}
+
+func TestWave2RelayPeerAdoptsExactWriterSnapshot(t *testing.T) {
+	fastRoom(t, time.Hour, time.Hour)
+	a, b, p := newHubPair(t)
+	relay := cluster.NewMemRelay()
+	for _, s := range []*Server{a, b} {
+		if err := s.useCollabRelay(relay); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+	base := "/api/p/" + p.ID
+	room := p.ID + "/notes.md"
+	putContent(t, a.Handler(), base+"/upload/content?path=notes.md", "base\n", "")
+	da, db := liveRoom(t, a, room, true), liveRoom(t, b, room, true)
+	typeInto(da, "relay version\n")
+	// Deliver exactly the update the relay would, before the writer snapshots.
+	if err := db.ApplyUpdate(da.EncodeStateAsUpdate()); err != nil {
+		t.Fatal(err)
+	}
+	a.snapshotRoom(ctx, room)
+	want := da.GetText("body").ToString()
+	b.snapshotRoom(ctx, room) // equality path precedes the non-holder lease check
+	if got := db.GetText("body").ToString(); got != want {
+		t.Fatalf("relay peer was spliced: %q", got)
+	}
+	if got := b.rooms().base(room); got != shaOf(want) {
+		t.Fatalf("peer did not adopt saved head: %s", got)
+	}
+	if n := conflictCopies(t, b.Handler(), p.ID); n != 0 {
+		t.Fatalf("healthy relay parked %d conflicts", n)
+	}
+}
+
+func TestWave2FileDeviceRegistryUsesOneLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "devices.json")
+	registry, err := OpenDeviceRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Observe and Bind both enter withDeviceLock; a second flock descriptor
+	// there would wait forever on the fileMu lock this goroutine already owns.
+	registry.Observe(DeviceInfo{ID: "observed-device", User: "alice@example.com", Name: "Laptop"})
+	if err := registry.Bind("alice@example.com", DeviceInfo{ID: "bound-device", Name: "Desktop"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenDeviceRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"observed-device", "bound-device"} {
+		if !reopened.MayActAs("alice@example.com", id) || reopened.MayActAs("bob@example.com", id) {
+			t.Fatalf("device %s ownership did not persist", id)
+		}
+	}
+	// The delete path shares that lock too.
+	reopened.Release("alice@example.com")
+	if reopened.AnyOwned() {
+		t.Fatal("release did not remove persisted device rows")
+	}
+}
+
+func TestWave2RemoveIfMatchProtectsConcurrentCopyEdits(t *testing.T) {
+	const path = "notes (conflict copy).md"
+	remove := func(t *testing.T, hub ryowHub, base, match string, headers map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"path": path, "if_match": match})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hub.call(t, "POST", base+"/remove", body, headers)
+	}
+	t.Run("matching version", func(t *testing.T) {
+		a, _, p, _ := newRYOWHubPair(t)
+		base := "/api/p/" + p.ID
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("mine"), nil), "seed")
+		if rec := remove(t, a, base, shaOf("mine"), nil); rec.Code != http.StatusOK {
+			t.Fatalf("matching remove: %d %s", rec.Code, rec.Body)
+		}
+		if rec := a.call(t, "GET", base+"/file?path="+url.QueryEscape(path), nil, nil); rec.Code != http.StatusNotFound {
+			t.Fatalf("removed copy still exists: %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("stale version keeps edited copy", func(t *testing.T) {
+		a, b, p, _ := newRYOWHubPair(t)
+		base := "/api/p/" + p.ID
+		file := base + "/file?path=" + url.QueryEscape(path)
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("mine"), nil), "seed")
+		b.call(t, "GET", file, nil, nil) // B still believes the requested base holds.
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("teammate's edit"), nil), "edit")
+		if rec := remove(t, b, base, shaOf("mine"), nil); rec.Code != http.StatusConflict {
+			t.Fatalf("stale remove: %d %s", rec.Code, rec.Body)
+		}
+		if rec := a.call(t, "GET", file, nil, nil); rec.Code != http.StatusOK || rec.Body.String() != "teammate's edit" {
+			t.Fatalf("edited copy lost: %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("matching version refreshes sibling snapshot", func(t *testing.T) {
+		a, b, p, _ := newRYOWHubPair(t)
+		base := "/api/p/" + p.ID
+		file := base + "/file?path=" + url.QueryEscape(path)
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("old"), nil), "seed")
+		if rec := b.call(t, "GET", file, nil, nil); rec.Code != http.StatusOK || rec.Body.String() != "old" {
+			t.Fatalf("warm sibling snapshot: %d %s", rec.Code, rec.Body)
+		}
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("current"), nil), "edit")
+		if rec := b.call(t, "GET", file, nil, nil); rec.Body.String() != "old" {
+			t.Fatalf("test did not retain a stale sibling snapshot: %s", rec.Body)
+		}
+		if rec := remove(t, b, base, shaOf("current"), nil); rec.Code != http.StatusOK {
+			t.Fatalf("fresh base against cached snapshot: %d %s", rec.Code, rec.Body)
+		}
+		if rec := b.call(t, "GET", file, nil, nil); rec.Code != http.StatusNotFound {
+			t.Fatalf("matching copy not removed: %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("malformed version", func(t *testing.T) {
+		a, _, p, _ := newRYOWHubPair(t)
+		base := "/api/p/" + p.ID
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("mine"), nil), "seed")
+		for _, match := range []string{"bad", strings.Repeat("a", 63), strings.Repeat("A", 64), strings.Repeat("g", 64)} {
+			if rec := remove(t, a, base, match, nil); rec.Code != http.StatusBadRequest {
+				t.Fatalf("malformed version %q: %d %s", match, rec.Code, rec.Body)
+			}
+		}
+		if rec := a.call(t, "GET", base+"/file?path="+url.QueryEscape(path), nil, nil); rec.Body.String() != "mine" {
+			t.Fatalf("malformed request removed copy: %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("header fallback and body precedence", func(t *testing.T) {
+		a, _, p, _ := newRYOWHubPair(t)
+		base := "/api/p/" + p.ID
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("mine"), nil), "seed")
+		if rec := remove(t, a, base, shaOf("stale"), map[string]string{"If-Match": shaOf("mine")}); rec.Code != http.StatusConflict {
+			t.Fatalf("header overrode explicit body: %d %s", rec.Code, rec.Body)
+		}
+		if rec := remove(t, a, base, "", map[string]string{"If-Match": `W/"` + shaOf("mine") + `"`}); rec.Code != http.StatusOK {
+			t.Fatalf("weak quoted header: %d %s", rec.Code, rec.Body)
+		}
+		if rec := remove(t, a, base, shaOf("mine"), nil); rec.Code != http.StatusNotFound {
+			t.Fatalf("missing copy: %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("edit during append CAS", func(t *testing.T) {
+		root, h, p := casHub(t)
+		const copyPath = "copy.md"
+		if rec := putIfMatch(h, p.ID, copyPath, "mine", ""); rec.Code != http.StatusOK {
+			t.Fatalf("seed: %d %s", rec.Code, rec.Body)
+		}
+		root.beforePutIf = func(key string) { theOtherProcessAppends(t, root, key, copyPath, "concurrent edit") }
+		rec := do(t, h, "POST", "/api/p/"+p.ID+"/remove", map[string]string{"path": copyPath, "if_match": shaOf("mine")})
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("CAS stale remove: %d %s", rec.Code, rec.Body)
+		}
+		if root.conflicts == 0 {
+			t.Fatal("append did not exercise a CAS conflict")
+		}
+		if rec := get(t, h, "/api/p/"+p.ID+"/file?path="+copyPath); rec.Code != http.StatusOK || rec.Body.String() != "concurrent edit" {
+			t.Fatalf("CAS removed edited copy: %d %s", rec.Code, rec.Body)
+		}
+	})
+}
+
+func TestWave2ConflictResolutionHeadsProtectNonTextOriginals(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "binary", body: "binary\x00original"},
+		{name: "oversized", body: strings.Repeat("x", 5<<20)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b, p, _ := newRYOWHubPair(t)
+			base := "/api/p/" + p.ID
+			writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=original.md", []byte(tc.body), nil), "original")
+			writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=copy.md", []byte("my version"), nil), "copy")
+			// net/http suppresses HEAD bodies; ResponseRecorder alone does not.
+			server := httptest.NewServer(b.h)
+			defer server.Close()
+			head, err := server.Client().Head(server.URL + base + "/file?path=original.md")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer head.Body.Close()
+			n, _ := head.Body.Read(make([]byte, 1))
+			if head.StatusCode != http.StatusOK || n != 0 || head.Header.Get("ETag") != `"`+shaOf(tc.body)+`"` {
+				t.Fatalf("HEAD must return version without bytes: %d %v body=%d", head.StatusCode, head.Header, n)
+			}
+			changed := tc.body + "\nconcurrent edit"
+			writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=original.md", []byte(changed), nil), "edit")
+			rec := b.call(t, "PUT", base+"/upload/content?path=original.md", []byte("my version"), map[string]string{
+				"If-Match": head.Header.Get("ETag"), "X-Bdrive-Confirm-Shrink": "1",
+			})
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("stale non-text original overwritten: %d %s", rec.Code, rec.Body)
+			}
+			if rec := a.call(t, "GET", base+"/file?path=original.md", nil, nil); rec.Code != http.StatusOK || rec.Body.String() != changed {
+				t.Fatalf("concurrent original lost: status=%d size=%d", rec.Code, rec.Body.Len())
+			}
+			if rec := b.call(t, "GET", base+"/file?path=copy.md", nil, nil); rec.Code != http.StatusOK || rec.Body.String() != "my version" {
+				t.Fatalf("conflict copy lost: %d %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+func TestWave2ParkedConflictResolutionReportsItsActualTarget(t *testing.T) {
+	a, _, p, _ := newRYOWHubPair(t)
+	base := "/api/p/" + p.ID
+	writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=original.md", []byte("base\x00"), nil), "seed")
+	writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=original.md", []byte("theirs\x00"), nil), "edit")
+	rec := a.call(t, "PUT", base+"/upload/content?path=original.md", []byte("mine"), map[string]string{
+		"If-Match": shaOf("base\x00"), "X-Bdrive-Park-On-Conflict": "1",
+	})
+	var out struct {
+		Path   string `json:"path"`
+		Parked string `json:"parked"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Parked == "" {
+		t.Fatalf("parked write not reported: %d %s", rec.Code, rec.Body)
+	}
+	if rec := a.call(t, "GET", base+"/file?path=original.md", nil, nil); rec.Body.String() != "theirs\x00" {
+		t.Fatal("parking replaced original")
+	}
+	if rec := a.call(t, "GET", base+"/file?path="+url.QueryEscape(out.Parked), nil, nil); rec.Body.String() != "mine" {
+		t.Fatalf("parked content missing: %d %s", rec.Code, rec.Body)
+	}
+	// A create-only retry of that conflict name must report its shifted path.
+	shifted := a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(out.Parked), []byte("another version"), map[string]string{
+		"If-None-Match": "*", "X-Bdrive-Park-On-Conflict": "1",
+	})
+	var next struct {
+		Path   string `json:"path"`
+		Parked string `json:"parked"`
+	}
+	if shifted.Code != http.StatusOK || json.Unmarshal(shifted.Body.Bytes(), &next) != nil || next.Parked == "" || next.Path != next.Parked || next.Path == out.Parked {
+		t.Fatalf("shifted write not reported: %d %s", shifted.Code, shifted.Body)
+	}
+	if rec := a.call(t, "GET", base+"/file?path="+url.QueryEscape(out.Parked), nil, nil); rec.Body.String() != "mine" {
+		t.Fatal("shifted retry replaced first copy")
+	}
+}

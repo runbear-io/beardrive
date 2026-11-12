@@ -111,6 +111,33 @@ func acceptsGzip(header string) bool {
 	return false
 }
 
+// addVary appends token to a single comma-joined Vary header so callers using
+// Header.Get("Vary") observe every Vary key rather than only the first slice entry.
+func addVary(h http.Header, token string) {
+	var parts []string
+	found := false
+	for _, raw := range h.Values("Vary") {
+		for _, p := range strings.Split(raw, ",") {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if strings.EqualFold(p, token) {
+				if !found {
+					parts = append(parts, p)
+					found = true
+				}
+				continue
+			}
+			parts = append(parts, p)
+		}
+	}
+	if !found {
+		parts = append(parts, token)
+	}
+	h.Set("Vary", strings.Join(parts, ", "))
+}
+
 type gzipWriter struct {
 	http.ResponseWriter
 	gz *gzip.Writer
@@ -135,7 +162,7 @@ func (g *gzipWriter) decide(code int) {
 	// Accept-Encoding, so any cache holding it has to key on that — true
 	// whichever way the decision below goes.
 	if compressible(h.Get("Content-Type")) {
-		h.Add("Vary", "Accept-Encoding")
+		addVary(h, "Accept-Encoding")
 	}
 	switch {
 	case h.Get("Content-Encoding") != "":

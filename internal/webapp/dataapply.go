@@ -38,10 +38,11 @@ import (
 // dataProject is one project's applier state. mu admits one pass at a time;
 // queued says a background pass is already waiting for it.
 type dataProject struct {
-	mu     sync.Mutex
-	known  map[string]dataKnown // what the index holds; nil until loaded
-	qmu    sync.Mutex
-	queued bool
+	mu         sync.Mutex
+	known      map[string]dataKnown // what the index holds; nil until loaded
+	knownEpoch int64                // build epoch under which known was loaded
+	qmu        sync.Mutex
+	queued     bool
 }
 
 var dataBootSem = make(chan struct{}, 1)
@@ -184,9 +185,21 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 	// Read before the fold: a change that moves it after this is one the
 	// fold may not hold, and then this pass is not the one that catches the
 	// index up (DataIndex.finish).
-	gen, err := s.Data.generation(ctx, id)
+	gen, epoch, exists, err := s.Data.passFence(ctx, id)
 	if err != nil {
 		return err
+	}
+	missing := !exists
+	if missing {
+		// A legacy enabled project may have no state row. Do not restart a
+		// sibling's build if it initialized the row while we were looking.
+		if _, err := s.Data.w.ExecContext(ctx, s.Data.q(`INSERT INTO data_projects (project) VALUES (?) ON CONFLICT (project) DO NOTHING`), id); err != nil {
+			return err
+		}
+		gen, epoch, exists, err = s.Data.passFence(ctx, id)
+		if err != nil || !exists {
+			return err
+		}
 	}
 	_, v, err := s.projectVolume(id)
 	if err != nil {
@@ -200,10 +213,15 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 	if err != nil {
 		return err
 	}
-	if st.known == nil {
+	// A sibling's off/on rebuild can leave only part of the old rows in SQL.
+	// Reload at each build epoch rather than trusting a non-empty index to
+	// mean our cached winners still exist.
+	if missing || st.known == nil || st.knownEpoch != epoch {
+		st.known = nil
 		if st.known, err = s.Data.known(ctx, id); err != nil {
 			return err
 		}
+		st.knownEpoch = epoch
 	}
 
 	type put struct {
@@ -358,7 +376,7 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 	if !complete {
 		return s.Data.lower(ctx, id)
 	}
-	_, err = s.Data.finish(ctx, id, gen, time.Now())
+	_, err = s.Data.finish(ctx, id, gen, epoch, time.Now())
 	return err
 }
 
@@ -544,6 +562,7 @@ func (s *Server) handleProjectData(w http.ResponseWriter, r *http.Request) {
 		st.mu.Lock()
 		err := s.Data.dropProject(r.Context(), id)
 		st.known = nil
+		st.knownEpoch = 0
 		st.mu.Unlock()
 		if err != nil {
 			storageErr(w, http.StatusBadGateway, "could not drop the data index", err)

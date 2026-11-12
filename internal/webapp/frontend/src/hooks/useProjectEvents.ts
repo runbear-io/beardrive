@@ -1,9 +1,9 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { coversProjectReceipts, recordProjectReceipt } from "../api/http";
 import { fileURLFor } from "./useBlob";
 import { applyTreeDeltas } from "./useBrowse";
-import type { ChangeFileDelta, HistoryEntry, Node } from "../api/types";
-
+import type { ChangeFileDelta, Node } from "../api/types";
 /* Live change notification.
    The hub streams "these paths changed" over server-sent events, so a
    teammate's edit lands in about a second — and an OPEN file updates at all,
@@ -52,23 +52,10 @@ type ChangeEvent = {
   agent?: boolean;
   device?: string;
   device_name?: string;
+  receipt?: string;
   people?: { name: string; path?: string }[];
 };
 
-const historyFromDelta = (ev: ChangeEvent, d: ChangeFileDelta): HistoryEntry => ({
-  time: d.time || new Date().toISOString(),
-  kind: d.op === "delete" ? "delete" : "edit",
-  path: d.path,
-  ...(d.size === undefined ? {} : { size: d.size }),
-  user: d.user,
-  user_name: d.user_name,
-  author: d.author,
-  device: {
-    id: ev.device || d.device,
-    name: ev.device_name || d.device,
-  },
-  session: ev.agent ? "live" : undefined,
-});
 
 export function useProjectEvents(
   apiBase: string,
@@ -108,55 +95,64 @@ export function useProjectEvents(
      Per-path bodies are NOT delayed: an open file updating is the thing a
      reader actually notices, and one body is small. */
     const COALESCE_MS = 2_000;
+    // Exceeds the hub's 10s snapshot TTL when an older hub sends a frame with no receipt.
+    const UNFENCED_TREE_MS = 10_500;
     let coalesce: number | null = null;
     let historyCoalesce: number | null = null;
-    let historyIncludeSince = false;
-    const invalidateHistory = (includeSince: boolean) => {
-      if (includeSince) historyIncludeSince = true;
+    let unfencedTreeTimer: number | null = null;
+    let lastUnfencedDeltaAt = 0;
+    let cancelTreeInFlight = false;
+    let cancelTreeAllFenced = true;
+    const cancelRequiredReceipts = new Set<string>();
+    const pendingCancelDeltas: ChangeFileDelta[] = [];
+    const scheduleUnfencedTreeRefetch = () => {
+      if (done) return;
+      if (unfencedTreeTimer) window.clearTimeout(unfencedTreeTimer);
+      const elapsed = lastUnfencedDeltaAt ? Math.max(0, Date.now() - lastUnfencedDeltaAt) : 0;
+      const delay = Math.max(250, UNFENCED_TREE_MS - elapsed);
+      unfencedTreeTimer = window.setTimeout(() => {
+        unfencedTreeTimer = null;
+        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+      }, delay);
+    };
+    const invalidateTreeRespectingFence = () => {
+      const hasLoadedTree = !!qc.getQueryData<Node>(["tree", apiBase]);
+      const windowClear =
+        lastUnfencedDeltaAt === 0 ||
+        Date.now() - lastUnfencedDeltaAt >= UNFENCED_TREE_MS;
+      if (windowClear) {
+        if (unfencedTreeTimer) {
+          window.clearTimeout(unfencedTreeTimer);
+          unfencedTreeTimer = null;
+        }
+        void qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        return;
+      }
+      if (!hasLoadedTree) {
+        void qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+      }
+      scheduleUnfencedTreeRefetch();
+    };
+    const invalidateHistory = () => {
       if (historyCoalesce) return;
       historyCoalesce = window.setTimeout(() => {
-        const since = historyIncludeSince;
         historyCoalesce = null;
-        historyIncludeSince = false;
-        qc.invalidateQueries({
-          queryKey: ["history", apiBase],
-          predicate: since ? undefined : (q) => q.queryKey[2] !== "since",
-        });
-        if (since) {
-          qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
-        }
+        // A change frame describes the current tree, not a journal entry:
+        // no seq, and sometimes no actor. Refetch instead of inventing an
+        // anonymous activity row that can survive beside the real entry.
+        qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history-summary", apiBase] });
+        qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
       }, COALESCE_MS);
-    };
-    const patchSinceHistoryCaches = (ev: ChangeEvent) => {
-      if (!ev.files?.length) return;
-      const additions = ev.files.map((d) => historyFromDelta(ev, d));
-      const merge = (key: readonly unknown[], data: { entries: HistoryEntry[] } | undefined, cap: number) => {
-        if (!data) return;
-        const seen = new Set(
-          data.entries.map((e) => `${e.device?.id || e.device?.name || ""}\0${e.time}\0${e.path}\0${e.kind}`),
-        );
-        const fresh = additions.filter((e) => {
-          const k = `${e.device?.id || e.device?.name || ""}\0${e.time}\0${e.path}\0${e.kind}`;
-          if (seen.has(k)) return false;
-          seen.add(k);
-          return true;
-        });
-        if (fresh.length) qc.setQueryData(key, { ...data, entries: [...fresh, ...data.entries].slice(0, cap) });
-      };
-      for (const [key, data] of qc.getQueriesData<{ entries: HistoryEntry[] }>({ queryKey: ["history", apiBase] })) {
-        if (key[2] === "since") merge(key, data, 100);
-      }
-      for (const [key, data] of qc.getQueriesData<{ entries: HistoryEntry[] }>({ queryKey: ["homeHistory", apiBase] })) {
-        merge(key, data, 200);
-      }
     };
     const invalidateProject = () => {
       if (coalesce) return;
       coalesce = window.setTimeout(() => {
         coalesce = null;
-        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        invalidateTreeRespectingFence();
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history-summary", apiBase] });
         qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         // Mounted only on the Insights view, so other pages pay nothing.
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
@@ -195,6 +191,10 @@ export function useProjectEvents(
         return;
       }
       if (ev.type === "scope") {
+        pendingCancelDeltas.length = 0;
+        if (lastUnfencedDeltaAt > 0 && Date.now() - lastUnfencedDeltaAt < UNFENCED_TREE_MS) {
+          scheduleUnfencedTreeRefetch();
+        }
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
         // These two are keyed on the project id, not apiBase (useHub.ts), and
@@ -208,6 +208,7 @@ export function useProjectEvents(
         // History pages list paths and actors: after a scope change they may
         // name content this reader can no longer see.
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history-summary", apiBase] });
         qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         return;
       }
@@ -219,18 +220,75 @@ export function useProjectEvents(
       window.dispatchEvent(
         new CustomEvent("bdrive:changed", { detail: ev.paths ?? [] }),
       );
+      const recordedReceipts = ev.receipt ? recordProjectReceipt(apiBase, ev.receipt) : [];
+      const hasValidReceipt = recordedReceipts.length > 0;
       const changes = (ev.puts || 0) + (ev.deletes || 0);
-      const oldTree = qc.getQueryData<Node>(["tree", apiBase]);
+      const treeKey = ["tree", apiBase] as const;
+      const oldTree = qc.getQueryData<Node>(treeKey);
+      const treeFetching = qc.getQueryState(treeKey)?.fetchStatus === "fetching";
       const canPatchTree = ev.type === "change" && !ev.more && changes > 0 && !!ev.files?.length && !!oldTree;
-      if (canPatchTree) {
-        qc.setQueryData<Node>(["tree", apiBase], (old) => (old ? applyTreeDeltas(old, ev.files!) : old));
-        if (changes === ev.files!.length) {
-          patchSinceHistoryCaches(ev);
-          invalidateHistory(false);
-        } else {
-          invalidateHistory(true);
+      const cancelAndReplayTree = (
+        deltas: ChangeFileDelta[],
+        fenced: boolean,
+        receipts: string[],
+      ) => {
+        if (!cancelTreeInFlight) {
+          cancelTreeAllFenced = true;
+          cancelRequiredReceipts.clear();
         }
+        if (deltas.length) pendingCancelDeltas.push(...deltas);
+        if (fenced) {
+          for (const tok of receipts) cancelRequiredReceipts.add(tok);
+        } else {
+          cancelTreeAllFenced = false;
+        }
+        if (cancelTreeInFlight) return;
+        cancelTreeInFlight = true;
+        void qc.cancelQueries({ queryKey: treeKey }).then(() => {
+          cancelTreeInFlight = false;
+          const batch = pendingCancelDeltas.splice(0);
+          const required = new Set(cancelRequiredReceipts);
+          const allFenced = cancelTreeAllFenced;
+          cancelRequiredReceipts.clear();
+          cancelTreeAllFenced = true;
+          if (done) return;
+          if (batch.length) {
+            qc.setQueryData<Node>(treeKey, (old) => (old ? applyTreeDeltas(old, batch) : old));
+          }
+          const unfencedWindowClear =
+            lastUnfencedDeltaAt === 0 || Date.now() - lastUnfencedDeltaAt >= UNFENCED_TREE_MS;
+          if (allFenced && unfencedWindowClear && (required.size === 0 || coversProjectReceipts(apiBase, required))) {
+            if (unfencedTreeTimer) {
+              window.clearTimeout(unfencedTreeTimer);
+              unfencedTreeTimer = null;
+            }
+            return qc.invalidateQueries({ queryKey: treeKey });
+          }
+          if (!lastUnfencedDeltaAt) lastUnfencedDeltaAt = Date.now();
+          scheduleUnfencedTreeRefetch();
+        });
+      };
+      if (canPatchTree) {
+        const deltas = ev.files!;
+        if (!hasValidReceipt) {
+          lastUnfencedDeltaAt = Date.now();
+          if (unfencedTreeTimer) scheduleUnfencedTreeRefetch();
+        }
+        qc.setQueryData<Node>(treeKey, (old) => (old ? applyTreeDeltas(old, deltas) : old));
+        if (treeFetching || cancelTreeInFlight) {
+          cancelAndReplayTree(deltas, hasValidReceipt, recordedReceipts);
+        }
+        invalidateHistory();
       } else {
+        if (ev.type === "change" && !hasValidReceipt) {
+          lastUnfencedDeltaAt = Date.now();
+          if (!oldTree || unfencedTreeTimer) scheduleUnfencedTreeRefetch();
+        }
+        const inUnfencedWindow =
+          !!oldTree && lastUnfencedDeltaAt > 0 && Date.now() - lastUnfencedDeltaAt < UNFENCED_TREE_MS;
+        if (inUnfencedWindow && (treeFetching || cancelTreeInFlight)) {
+          cancelAndReplayTree([], false, []);
+        }
         invalidateProject();
       }
       // "resync" means frames were dropped and what was missed is unknowable,
@@ -292,6 +350,10 @@ export function useProjectEvents(
 
     const cleanup = () => {
       done = true;
+      if (coalesce) window.clearTimeout(coalesce);
+      if (historyCoalesce) window.clearTimeout(historyCoalesce);
+      if (unfencedTreeTimer) window.clearTimeout(unfencedTreeTimer);
+      coalesce = historyCoalesce = unfencedTreeTimer = null;
       giveUp.abort(); // drop a still-pending request to lead
       release?.(); // or, if we are leading, pass it to the next tab
       es?.close();

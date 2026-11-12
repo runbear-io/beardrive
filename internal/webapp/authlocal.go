@@ -58,8 +58,11 @@ type BuiltinAuth struct {
 	// why first-claim-on-write could not be. Installed by UseDeviceBinder.
 	BindDevice DeviceBinder
 
-	store AccountRepo
-	ver   versionGate // skips the re-read when the store has not moved
+	store              AccountRepo
+	ver                versionGate // skips the re-read when the store has not moved
+	policySeen         *authPolicy // last saved toggles
+	pinnedVerification *bool       // explicit server configuration wins over saved toggles
+	pinnedApproval     *bool
 
 	// cli serves `bdrive login` — the browser and device flows, shared with
 	// every other provider (see CLIAuth), which is why nothing about them
@@ -135,6 +138,8 @@ func NewBuiltinAuth(store AccountRepo, allowSignup bool, mail *Mailer) (*Builtin
 	if policy != nil {
 		a.RequireVerification = policy.RequireVerification
 		a.RequireApproval = policy.RequireApproval
+		p := *policy
+		a.policySeen = &p
 	}
 	return a, nil
 }
@@ -170,6 +175,24 @@ type authPolicy struct {
 	RequireApproval     bool `json:"require_approval"`
 }
 
+// PinPolicy fixes explicit server-config gates across saved policy changes.
+// Copies keep later changes to the caller's configuration from changing a pin.
+func (a *BuiltinAuth) PinPolicy(requireVerification, requireApproval *bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.pinnedVerification, a.pinnedApproval = nil, nil
+	if requireVerification != nil {
+		v := *requireVerification
+		a.pinnedVerification = &v
+		a.RequireVerification = v
+	}
+	if requireApproval != nil {
+		v := *requireApproval
+		a.pinnedApproval = &v
+		a.RequireApproval = v
+	}
+}
+
 // SetPolicy updates the tunable gating toggles and persists them.
 //
 // The prospective policy goes through the startup validator FIRST. The hub
@@ -181,11 +204,17 @@ type authPolicy struct {
 // caller of this and a second caller would arrive without the check; the
 // handler only had the mailer half of the rule anyway.
 func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pinnedVerification != nil && requireVerification != *a.pinnedVerification {
+		return fmt.Errorf("require_verification is pinned to %v in the server configuration", *a.pinnedVerification)
+	}
+	if a.pinnedApproval != nil && requireApproval != *a.pinnedApproval {
+		return fmt.Errorf("require_approval is pinned to %v in the server configuration", *a.pinnedApproval)
+	}
 	if err := a.signupPolicyError(requireVerification, requireApproval); err != nil {
 		return err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	// Persist first: a gating change the store refused must not un-gate the
 	// hub in memory, which is the widening direction — new signups become
 	// active across a restart the store never agreed to.
@@ -194,6 +223,7 @@ func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error
 	}
 	a.RequireVerification = requireVerification
 	a.RequireApproval = requireApproval
+	a.policySeen = &authPolicy{RequireVerification: requireVerification, RequireApproval: requireApproval}
 	return nil
 }
 
@@ -207,9 +237,9 @@ func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error
 // processes — and a deleted account could sign in again with its old password
 // as soon as any second-process write rewrote auth.json.
 //
-// Policy is deliberately NOT re-read: the config file overrides it at startup
-// (web.go), and reloading would let the persisted value quietly win back over
-// the value the sysadmin pinned.
+// Saved gating changes propagate to siblings, except for fields explicitly
+// pinned by the server configuration. AllowSignup, AllowedDomains and Admins
+// remain config-owned and are never widened by a browser toggle.
 //
 // A store that cannot answer leaves the maps in place — see ProjectDB.refresh
 // for the trade.
@@ -221,7 +251,7 @@ func (a *BuiltinAuth) refresh() {
 	if !stale {
 		return
 	}
-	users, tokens, _, err := a.store.Load()
+	users, tokens, policy, err := a.store.Load()
 	if err != nil {
 		if !a.warnedLoad {
 			a.warnedLoad = true
@@ -240,6 +270,16 @@ func (a *BuiltinAuth) refresh() {
 		nextTokens[t.Hash] = t
 	}
 	a.users, a.tokens = nextUsers, nextTokens
+	if policy != nil && (a.policySeen == nil || *policy != *a.policySeen) {
+		if a.pinnedVerification == nil {
+			a.RequireVerification = policy.RequireVerification
+		}
+		if a.pinnedApproval == nil {
+			a.RequireApproval = policy.RequireApproval
+		}
+		p := *policy
+		a.policySeen = &p
+	}
 }
 
 func randHex(n int) string {
@@ -608,6 +648,7 @@ func (a *BuiltinAuth) Branding() string { return a.Brand }
 func (a *BuiltinAuth) Policy() SignupPolicy {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.refresh()
 	admins := make([]string, 0, len(a.Admins))
 	for e := range a.Admins {
 		admins = append(admins, e)

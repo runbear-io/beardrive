@@ -205,6 +205,102 @@ type projectComments struct {
 	used     time.Time
 	keys     []string
 	listedAt time.Time
+	// keySet and dead index the last listing (keys, and the threads it found
+	// a tombstone for), so a comment receipt is checked without a scan.
+	keySet map[string]bool
+	dead   map[string]bool
+	// unseen is the negative cache for comment receipts: a key neither the
+	// listing nor a direct read found is not looked for again until
+	// commentReceiptCooldown passes.
+	unseen map[string]time.Time
+}
+
+/*
+Comment receipts: read-your-own-writes across hub processes.
+
+	Every comment write answers X-Bdrive-Comment-Receipt: <object key>, and a
+	client echoes its recent keys on comment requests. A process whose listing
+	(trusted for commentListTTL) lacks one relists at once, and reads a key the
+	listing still lacks straight from storage — a GCS listing can trail a
+	write the object itself already answers for. A key nothing finds is
+	remembered for commentReceiptCooldown, so a forged one costs one List.
+*/
+const (
+	commentReceiptHeader   = "X-Bdrive-Comment-Receipt"
+	maxCommentReceipts     = 8
+	maxCommentReceiptGets  = 4
+	commentReceiptCooldown = 5 * time.Second
+)
+
+type commentReceiptsKey struct{}
+
+// withCommentReceipts returns r carrying the well-formed keys of its
+// X-Bdrive-Comment-Receipt (the first maxCommentReceipts tokens) for
+// loadCommentEvents. Anything else in the header is ignored.
+func withCommentReceipts(r *http.Request) *http.Request {
+	var keys []string
+	n := 0
+	for _, line := range r.Header.Values(commentReceiptHeader) {
+		for _, tok := range strings.Split(line, ",") {
+			if n == maxCommentReceipts {
+				break
+			}
+			n++
+			tok = strings.TrimSpace(tok)
+			if commentKeyRe.MatchString(tok) || tombstoneKeyRe.MatchString(tok) {
+				keys = append(keys, tok)
+			}
+		}
+	}
+	if len(keys) == 0 {
+		return r
+	}
+	return r.WithContext(addCommentReceipts(r.Context(), keys...))
+}
+
+// addCommentReceipts adds keys to the ones ctx already carries.
+func addCommentReceipts(ctx context.Context, keys ...string) context.Context {
+	prev, _ := ctx.Value(commentReceiptsKey{}).([]string)
+	return context.WithValue(ctx, commentReceiptsKey{}, append(slices.Clip(prev), keys...))
+}
+
+// commentThreadOf is the thread an event or tombstone key belongs to.
+func commentThreadOf(key string) string {
+	if m := commentKeyRe.FindStringSubmatch(key); m != nil {
+		return m[1]
+	}
+	if m := tombstoneKeyRe.FindStringSubmatch(key); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// commentKeyCovered reports whether a listing (keySet, dead) already accounts for
+// key: an event listed, or of a thread since deleted; a tombstone found.
+func commentKeyCovered(key string, keySet, dead map[string]bool) bool {
+	if dead[commentThreadOf(key)] {
+		return true
+	}
+	return !tombstoneKeyRe.MatchString(key) && keySet[key]
+}
+
+// uncoveredReceipts is the receipts this project's listing lacks that are not
+// cooling down. Callers hold c.mu.
+func (pc *projectComments) uncoveredReceipts(want []string, now time.Time) []string {
+	var out []string
+	for _, k := range want {
+		if commentKeyCovered(k, pc.keySet, pc.dead) {
+			continue
+		}
+		if t, ok := pc.unseen[k]; ok {
+			if now.Sub(t) < commentReceiptCooldown {
+				continue
+			}
+			delete(pc.unseen, k)
+		}
+		out = append(out, k)
+	}
+	return out
 }
 
 func newCommentCache() *commentCache {
@@ -296,11 +392,13 @@ func (s *Server) loadCommentEvents(ctx context.Context, project string) ([]comme
 }
 
 func (c *commentCache) list(ctx context.Context, project string, be remote.Backend) ([]string, error) {
+	want, _ := ctx.Value(commentReceiptsKey{}).([]string)
 	c.mu.Lock()
 	pc := c.project(project)
 	keys, at := pc.keys, pc.listedAt
+	need := pc.uncoveredReceipts(want, time.Now())
 	c.mu.Unlock()
-	if !at.IsZero() && time.Since(at) < commentListTTL {
+	if !at.IsZero() && time.Since(at) < commentListTTL && len(need) == 0 {
 		return keys, nil
 	}
 	objs, err := be.List(ctx, commentsPrefix)
@@ -319,15 +417,59 @@ func (c *commentCache) list(ctx context.Context, project string, be remote.Backe
 			keys = append(keys, o.Key)
 		}
 	}
+	keySet := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		keySet[k] = true
+	}
+	// Receipts the listing still lacks: read straight from storage, a few.
+	var got []commentEvent
+	var unseen []string
+	reads := 0
+	for _, k := range need {
+		if commentKeyCovered(k, keySet, dead) {
+			continue
+		}
+		if reads == maxCommentReceiptGets {
+			break
+		}
+		reads++
+		if m := tombstoneKeyRe.FindStringSubmatch(k); m != nil {
+			rc, err := be.Get(ctx, k)
+			if err != nil {
+				if remote.IsNotExist(err) {
+					unseen = append(unseen, k)
+				}
+				continue
+			}
+			rc.Close()
+			dead[m[1]] = true
+			keys = slices.DeleteFunc(keys, func(x string) bool { return commentThreadOf(x) == m[1] })
+			continue
+		}
+		ev, err := readCommentEvent(ctx, be, k)
+		if err != nil {
+			if remote.IsNotExist(err) {
+				unseen = append(unseen, k)
+			}
+			continue
+		}
+		got = append(got, ev)
+		keys = append(keys, k)
+		keySet[k] = true
+	}
 	// The project cap, as a hard bound: the oldest events win, by the time
 	// stamp every key carries, so a late writer cannot displace an earlier one.
 	sort.Slice(keys, func(i, j int) bool { return keyStamp(keys[i]) < keyStamp(keys[j]) })
 	if len(keys) > maxCommentEventsPerProject {
 		keys = keys[:maxCommentEventsPerProject]
 	}
+	now := time.Now()
 	c.mu.Lock()
 	pc = c.project(project)
-	pc.keys, pc.listedAt = keys, time.Now()
+	pc.keys, pc.listedAt, pc.keySet, pc.dead = keys, now, keySet, dead
+	for _, k := range unseen {
+		pc.unseen = insertUnseen(pc.unseen, k, now, commentReceiptCooldown)
+	}
 	for k, ev := range pc.events {
 		if dead[ev.Thread] {
 			delete(pc.events, k)
@@ -335,6 +477,7 @@ func (c *commentCache) list(ctx context.Context, project string, be remote.Backe
 			c.bytes -= ev.size
 		}
 	}
+	c.add(project, got...)
 	c.mu.Unlock()
 	return keys, nil
 }
@@ -543,17 +686,20 @@ func (e errCommentLimit) Error() string { return e.msg }
 // is checked against the plan and recorded as usage. ydoc/ is exempt because
 // the hub writes it on its own, once per blob; these are written on request
 // by anyone who can read the project.
-func (s *Server) writeCommentEvent(ctx context.Context, project string, ev commentEvent) error {
+//
+// It answers the event's object key: the comment receipt a reader on another
+// hub process echoes to be sure it sees this write.
+func (s *Server) writeCommentEvent(ctx context.Context, project string, ev commentEvent) (string, error) {
 	be, ok := s.projectBackend(project)
 	if !ok {
-		return errCommentsOff
+		return "", errCommentsOff
 	}
 	evs, err := s.loadCommentEvents(ctx, project)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(evs) >= maxCommentEventsPerProject {
-		return errCommentLimit{"this project has reached its limit of comments"}
+		return "", errCommentLimit{"this project has reached its limit of comments"}
 	}
 	mine := 0
 	for _, e := range evs {
@@ -562,12 +708,12 @@ func (s *Server) writeCommentEvent(ctx context.Context, project string, ev comme
 		}
 	}
 	if mine >= maxCommentEventsPerAuthor {
-		return errCommentLimit{"you have reached the limit of comments in this project"}
+		return "", errCommentLimit{"you have reached the limit of comments in this project"}
 	}
 	ev.key = fmt.Sprintf("%s%s/%019d-%s.json", commentsPrefix, ev.Thread, ev.Time.UnixNano(), randHex(4))
 	data, err := json.Marshal(ev)
 	if err != nil {
-		return err
+		return "", err
 	}
 	ev.size = len(data)
 	// Against what is already promised to presigned uploads too, the same
@@ -575,10 +721,10 @@ func (s *Server) writeCommentEvent(ctx context.Context, project string, ev comme
 	org := s.orgOf(project)
 	s.reconcileGrants(ctx, project, be)
 	if err := s.quota().CheckWrite(org, int64(len(data))+s.reservedBytes(org)); err != nil {
-		return errCommentLimit{err.Error()}
+		return "", errCommentLimit{err.Error()}
 	}
 	if err := be.Put(ctx, ev.key, bytes.NewReader(data), int64(len(data))); err != nil {
-		return err
+		return "", err
 	}
 	s.quota().RecordUsage(org, int64(len(data)))
 	c := s.commentStore()
@@ -587,12 +733,14 @@ func (s *Server) writeCommentEvent(ctx context.Context, project string, ev comme
 	c.project(project).listedAt = time.Time{}
 	c.mu.Unlock()
 	// Read back through the bounds: another hub process may have taken the
-	// last slot between the check above and this write (see the caps).
-	if after, err := s.loadCommentEvents(ctx, project); err == nil && !slices.ContainsFunc(after, func(e commentEvent) bool { return e.key == ev.key }) {
-		return errCommentLimit{"this project has reached its limit of comments"}
+	// last slot between the check above and this write (see the caps). The
+	// key rides as a receipt, so a listing that trails the write cannot pass
+	// for a lost slot.
+	if after, err := s.loadCommentEvents(addCommentReceipts(ctx, ev.key), project); err == nil && !slices.ContainsFunc(after, func(e commentEvent) bool { return e.key == ev.key }) {
+		return "", errCommentLimit{"this project has reached its limit of comments"}
 	}
 	s.publishComments(project, commentPath(ev, evs))
-	return nil
+	return ev.key, nil
 }
 
 // commentPath is the file a comment event is about: its own path when it
@@ -710,6 +858,7 @@ func commentsErr(w http.ResponseWriter, err error) {
 // status defaults to open — the sweep an agent runs is "what is still asking
 // for something".
 func (s *Server) handleCommentList(v *volume, w http.ResponseWriter, r *http.Request) {
+	r = withCommentReceipts(r)
 	q := r.URL.Query()
 	status := q.Get("status")
 	switch status {
@@ -730,9 +879,9 @@ func (s *Server) handleCommentList(v *volume, w http.ResponseWriter, r *http.Req
 		writeJSON(w, map[string]any{"comments": []*CommentThread{}})
 		return
 	}
-	snap, err := v.snapshot(r.Context())
+	snap, err := v.snapshotWithReceipts(r.Context(), r.Header)
 	if err != nil {
-		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
+		snapshotErr(w, err)
 		return
 	}
 	out := []*CommentThread{}
@@ -758,6 +907,7 @@ func (s *Server) handleCommentList(v *volume, w http.ResponseWriter, r *http.Req
 // comment changes nothing but the comment list: whoever acts on it does so
 // with their own write access.
 func (s *Server) handleCommentCreate(v *volume, w http.ResponseWriter, r *http.Request) {
+	r = withCommentReceipts(r)
 	if !s.commentsAvailable() {
 		http.Error(w, errCommentsOff.Error(), http.StatusNotFound)
 		return
@@ -795,6 +945,15 @@ func (s *Server) handleCommentCreate(v *volume, w http.ResponseWriter, r *http.R
 	}
 	fi, ok := snap.files[p]
 	if !ok {
+		// A file just written through another hub process: the receipt the
+		// write answered names it, so this process folds it in now.
+		if snap, err = v.snapshotWithReceipts(r.Context(), r.Header); err != nil {
+			snapshotErr(w, err)
+			return
+		}
+		fi, ok = snap.files[p]
+	}
+	if !ok {
 		http.Error(w, "no such file", http.StatusNotFound)
 		return
 	}
@@ -817,13 +976,13 @@ func (s *Server) handleCommentCreate(v *volume, w http.ResponseWriter, r *http.R
 	project := r.PathValue("project")
 	mu := s.commentStore().lock(project)
 	mu.Lock()
-	err = s.writeCommentEvent(r.Context(), project, ev)
+	key, err := s.writeCommentEvent(r.Context(), project, ev)
 	mu.Unlock()
 	if err != nil {
 		commentsErr(w, err)
 		return
 	}
-	s.answerThread(v, w, r, ev.Thread)
+	s.answerThread(v, w, r, ev.Thread, key)
 }
 
 // handleCommentUpdate: POST /api/p/<id>/comments/<thread> {action, body?}
@@ -833,6 +992,7 @@ func (s *Server) handleCommentCreate(v *volume, w http.ResponseWriter, r *http.R
 // thread as a message. Repeating a resolve on a resolved thread with no note
 // writes nothing: an agent re-running its sweep must not stack events.
 func (s *Server) handleCommentUpdate(v *volume, w http.ResponseWriter, r *http.Request) {
+	r = withCommentReceipts(r)
 	var req struct {
 		Action string `json:"action"`
 		Body   string `json:"body"`
@@ -863,11 +1023,11 @@ func (s *Server) handleCommentUpdate(v *volume, w http.ResponseWriter, r *http.R
 	}
 	if body == "" && ((req.Action == "resolve" && t.Resolved) || (req.Action == "reopen" && !t.Resolved)) {
 		mu.Unlock()
-		s.answerThread(v, w, r, t.ID)
+		s.answerThread(v, w, r, t.ID, "")
 		return
 	}
 	email, name := s.commentActor(r)
-	err := s.writeCommentEvent(r.Context(), project, commentEvent{
+	key, err := s.writeCommentEvent(r.Context(), project, commentEvent{
 		Kind: req.Action, Thread: t.ID, Path: t.Path, Body: body,
 		Author: email, Name: name, Time: s.nextCommentTime(t),
 	})
@@ -876,12 +1036,13 @@ func (s *Server) handleCommentUpdate(v *volume, w http.ResponseWriter, r *http.R
 		commentsErr(w, err)
 		return
 	}
-	s.answerThread(v, w, r, t.ID)
+	s.answerThread(v, w, r, t.ID, key)
 }
 
 // handleCommentDelete: DELETE /api/p/<id>/comments/<thread>. The thread's
 // author or a project admin; resolving is how everyone else closes one.
 func (s *Server) handleCommentDelete(v *volume, w http.ResponseWriter, r *http.Request) {
+	r = withCommentReceipts(r)
 	project := r.PathValue("project")
 	mu := s.commentStore().lock(project)
 	mu.Lock()
@@ -899,10 +1060,12 @@ func (s *Server) handleCommentDelete(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, "only the comment's author or a project admin can delete it", http.StatusForbidden)
 		return
 	}
-	if err := s.retireThread(r.Context(), project, t.ID, email, name); err != nil {
+	key, err := s.retireThread(r.Context(), project, t.ID, email, name)
+	if err != nil {
 		commentsErr(w, err)
 		return
 	}
+	w.Header().Set(commentReceiptHeader, key)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -910,22 +1073,23 @@ func (s *Server) handleCommentDelete(v *volume, w http.ResponseWriter, r *http.R
 // process. Not subject to the caps — deleting is how a crowded project gets
 // room back — but checked against the plan like any write: the backend has no
 // delete, so a tombstone is permanent bytes.
-func (s *Server) retireThread(ctx context.Context, project, thread, email, name string) error {
+func (s *Server) retireThread(ctx context.Context, project, thread, email, name string) (string, error) {
 	be, ok := s.projectBackend(project)
 	if !ok {
-		return errCommentsOff
+		return "", errCommentsOff
 	}
 	data, err := json.Marshal(map[string]any{"author": email, "name": name, "time": time.Now().UTC()})
 	if err != nil {
-		return err
+		return "", err
 	}
 	org := s.orgOf(project)
 	s.reconcileGrants(ctx, project, be)
 	if err := s.quota().CheckWrite(org, int64(len(data))+s.reservedBytes(org)); err != nil {
-		return errCommentLimit{err.Error()}
+		return "", errCommentLimit{err.Error()}
 	}
-	if err := be.Put(ctx, commentsPrefix+thread+"/deleted.json", bytes.NewReader(data), int64(len(data))); err != nil {
-		return err
+	key := commentsPrefix + thread + "/deleted.json"
+	if err := be.Put(ctx, key, bytes.NewReader(data), int64(len(data))); err != nil {
+		return "", err
 	}
 	s.quota().RecordUsage(org, int64(len(data)))
 	c := s.commentStore()
@@ -945,7 +1109,7 @@ func (s *Server) retireThread(ctx context.Context, project, thread, email, name 
 	pc.listedAt = time.Time{}
 	c.mu.Unlock()
 	s.publishComments(project, path)
-	return nil
+	return key, nil
 }
 
 // nextCommentTime is now, nudged past the thread's last event: fold orders by
@@ -973,9 +1137,9 @@ func (s *Server) visibleThread(v *volume, w http.ResponseWriter, r *http.Request
 		commentsErr(w, err)
 		return nil, false
 	}
-	snap, err := v.snapshot(r.Context())
+	snap, err := v.snapshotWithReceipts(r.Context(), r.Header)
 	if err != nil {
-		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
+		snapshotErr(w, err)
 		return nil, false
 	}
 	t, ok := threads[id]
@@ -991,13 +1155,24 @@ func (s *Server) visibleThread(v *volume, w http.ResponseWriter, r *http.Request
 	return placed[0], true
 }
 
-func (s *Server) answerThread(v *volume, w http.ResponseWriter, r *http.Request, id string) {
+// answerThread answers with thread id as the caller now sees it. event is the
+// key this request wrote ("" when it wrote nothing): it goes out as the
+// comment receipt, header and "event" field, and is waited for here too.
+func (s *Server) answerThread(v *volume, w http.ResponseWriter, r *http.Request, id, event string) {
+	if event != "" {
+		r = r.WithContext(addCommentReceipts(r.Context(), event))
+	}
 	r.SetPathValue("thread", id)
 	t, ok := s.visibleThread(v, w, r)
 	if !ok {
 		return
 	}
-	writeJSON(w, map[string]any{"comment": t})
+	resp := map[string]any{"comment": t}
+	if event != "" {
+		w.Header().Set(commentReceiptHeader, event)
+		resp["event"] = event
+	}
+	writeJSON(w, resp)
 }
 
 // commentSuffix is appended to an HTML file served for commenting. Appended

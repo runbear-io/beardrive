@@ -4,12 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"log"
 	"net/http"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -193,7 +195,7 @@ func (db *ShareDB) SetExpiry(token string, ttl time.Duration) (Share, bool, erro
 	db.refresh()
 	prev, ok := db.byToken[token]
 	if !ok || prev.expired() {
-		return Share{}, false, nil
+		return Share{}, false, ErrShareNotFound
 	}
 	s := prev
 	if ttl > 0 {
@@ -201,13 +203,18 @@ func (db *ShareDB) SetExpiry(token string, ttl time.Duration) (Share, bool, erro
 	} else {
 		s.Expires = time.Time{}
 	}
-	db.byToken[token] = s
-	if err := db.repo.Put(s); err != nil {
-		// Restore, don't delete: unlike Create's rollback the row already
-		// existed, and dropping it would revoke a live link over a disk hiccup.
+	var err error
+	if rs, ok := db.repo.(shareExpiryUpdater); ok {
+		err = rs.UpdateExpiry(token, s.Expires)
+	} else {
+		err = db.repo.Put(s)
+	}
+	if err != nil {
 		db.byToken[token] = prev
+		db.ver.invalidate()
 		return Share{}, false, err
 	}
+	db.byToken[token] = s
 	return s, true, nil
 }
 
@@ -453,6 +460,10 @@ func (s *Server) handleShareExpiry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	updated, ok, err := s.Shares.SetExpiry(sh.Token, ttl)
+	if errors.Is(err, ErrShareNotFound) {
+		http.Error(w, "no such share", http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -608,7 +619,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
 		return
 	}
-	snap, err := v.snapshot(r.Context())
+	snap, stale, err := v.snapshotCoveringFresh(r.Context(), 0)
 	if err != nil {
 		http.Error(w, "content temporarily unavailable", http.StatusBadGateway)
 		return
@@ -618,6 +629,19 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	// always serves whatever lives there now. That also closes a leak: a
 	// share used to serve whatever unrelated file later occupied its path.
 	sp, ok := resolveShare(snap.moves, snap.files, sh.Path, sh.Created)
+	if !ok && !stale {
+		// The cached fold may predate the file: a link minted through a
+		// sibling hub process right after the file was written. One fresh
+		// fold (coalesced, cooled down per token) before answering 404.
+		found := func(n *snapshot) bool {
+			_, hit := resolveShare(n.moves, n.files, sh.Path, sh.Created)
+			return hit
+		}
+		if fresh, refolded := v.snapshotForShareMiss(r.Context(), sh.Token, snap, found); refolded {
+			snap = fresh
+			sp, ok = resolveShare(snap.moves, snap.files, sh.Path, sh.Created)
+		}
+	}
 	if !ok {
 		http.Error(w, "the shared file no longer exists", http.StatusNotFound)
 		return
@@ -671,6 +695,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "render failed", http.StatusInternalServerError)
 			return
 		}
+		body = unwrapWikiLinks(body)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		// A share page IS the public copy, so this is the one surface whose
 		// card may describe the content itself, not just name it.
@@ -688,6 +713,21 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		setContentLength(w, rc) // measured, never the journal's Size field
 		copyOrAbort(cw, rc)
 	}
+}
+
+// wikiAnchorRe matches the anchor wikiParser renders for [[target|label]].
+// The label is goldmark-escaped text, so it never holds a '<'.
+var wikiAnchorRe = regexp.MustCompile(`<a href="wiki:[^"]*">([^<]*)</a>`)
+
+// unwrapWikiLinks turns wikilinks into plain text on a share page. The viewer
+// resolves wiki: against the project's file tree; a share visitor has no tree
+// and no access to any other file, so the link could only ever be a broken
+// wiki: URL. The label stays readable.
+func unwrapWikiLinks(body string) string {
+	if !strings.Contains(body, `href="wiki:`) {
+		return body
+	}
+	return wikiAnchorRe.ReplaceAllString(body, `<span class="wiki-text">$1</span>`)
 }
 
 // updatedStamp renders the "how old is this?" line a share page owes its

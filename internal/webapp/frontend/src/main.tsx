@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { prefetchForURL } from "./api/prefetch";
 import { startConfig } from "./hooks/useConfig";
-import ErrorBoundary from "./ErrorBoundary";
+import { RouteErrorBoundary } from "./ErrorBoundary";
 import { initTheme } from "./lib/theme";
 import "./tw.css";
 import "./style.css";
@@ -25,10 +25,10 @@ initTheme();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <ErrorBoundary>
-      <QueryClientProvider client={queryClient}>
+    <QueryClientProvider client={queryClient}>
+      <RouteErrorBoundary>
         <App />
-      </QueryClientProvider>
-    </ErrorBoundary>
+      </RouteErrorBoundary>
+    </QueryClientProvider>
   </StrictMode>,
 );

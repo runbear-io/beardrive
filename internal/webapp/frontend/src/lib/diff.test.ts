@@ -3,9 +3,9 @@
 // app's DOM-only lib set does not know about.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { splitLines, lcsDiff, diffText, textEdit } from "./diff.ts";
+import { splitLines, lcsDiff, diffText, textEdit, uniqueAnchors, type DiffLine } from "./diff.ts";
 
-const ops = (ls: ReturnType<typeof lcsDiff>) => ls.map((l) => l.op + l.line);
+const ops = (ls: DiffLine[]) => ls.map((l) => l.op + l.line);
 
 test("splitLines: trailing newline ends the last line", () => {
   assert.deepEqual(splitLines("a\nb\n"), ["a", "b"]);
@@ -89,13 +89,90 @@ test("a one-line edit in a long file stays cheap and local", () => {
   );
 });
 
-test("past the cell budget it degrades to whole-file replacement", () => {
+test("past the cell budget with nothing shared it degrades to replacement", () => {
   const a = Array.from({ length: 2100 }, (_, i) => "a" + i);
   const b = Array.from({ length: 2100 }, (_, i) => "b" + i);
   const d = lcsDiff(a, b);
   assert.equal(d.filter((l) => l.op === "-").length, 2100);
   assert.equal(d.filter((l) => l.op === "+").length, 2100);
   assert.equal(d.filter((l) => l.op === "=").length, 0);
+  valid(a, b, d);
+});
+
+// Every diff must replay to both sides exactly, with line numbers that count
+// up 1, 2, 3… on each side.
+function valid(a: string[], b: string[], d: DiffLine[]) {
+  const ra: string[] = [];
+  const rb: string[] = [];
+  for (const l of d) {
+    if (l.op !== "+") {
+      ra.push(l.line);
+      assert.equal(l.an, ra.length);
+    }
+    if (l.op !== "-") {
+      rb.push(l.line);
+      assert.equal(l.bn, rb.length);
+    }
+  }
+  assert.deepEqual(ra, a);
+  assert.deepEqual(rb, b);
+}
+
+test("two edits far apart in a 5,000-line file stay two edits, fast", () => {
+  const a = Array.from({ length: 5000 }, (_, i) => "line " + i);
+  const b = a.slice();
+  b[9] = "changed near the top";
+  b[4989] = "changed near the bottom";
+  const t0 = performance.now();
+  const d = diffText(a.join("\n") + "\n", b.join("\n") + "\n");
+  const ms = performance.now() - t0;
+  assert.equal(d.add, 2);
+  assert.equal(d.del, 2);
+  assert.deepEqual(
+    d.lines.filter((l) => l.op !== "=").map((l) => l.op + l.line),
+    ["-line 9", "+changed near the top", "-line 4989", "+changed near the bottom"],
+  );
+  valid(a, b, d.lines);
+  assert.ok(ms < 50, `took ${ms.toFixed(1)}ms`);
+});
+
+test("a 50,000-line file with scattered edits splits on anchors", () => {
+  const a = Array.from({ length: 50_000 }, (_, i) => "row " + i);
+  const b = a.slice();
+  for (const k of [100, 12_345, 30_000, 49_900]) b[k] = "edited " + k;
+  b.splice(20_000, 0, "inserted");
+  const d = lcsDiff(a, b);
+  assert.equal(d.filter((l) => l.op === "+").length, 5);
+  assert.equal(d.filter((l) => l.op === "-").length, 4);
+  valid(a, b, d);
+});
+
+test("repeated lines with no unique anchor fall back only where they must", () => {
+  // Alternating x/y on both sides, phase-shifted: nothing occurs once, and
+  // the range is past the table budget.
+  const a = Array.from({ length: 2200 }, (_, i) => (i % 2 ? "y" : "x"));
+  const b = Array.from({ length: 2200 }, (_, i) => (i % 2 ? "x" : "y"));
+  assert.deepEqual(uniqueAnchors(a, 0, a.length, b, 0, b.length), []);
+  valid(a, b, lcsDiff(a, b));
+
+  // The same anchorless block twice, separated by a unique line on each
+  // side: the anchor still splits it, and each half is coarse on its own.
+  const a2 = [...a, "ANCHOR", ...a];
+  const b2 = [...b, "ANCHOR", ...b];
+  const d2 = lcsDiff(a2, b2);
+  valid(a2, b2, d2);
+  assert.ok(d2.some((l) => l.op === "=" && l.line === "ANCHOR" && l.an === 2201 && l.bn === 2201));
+});
+
+test("anchors never cross", () => {
+  // u1..u3 appear once on each side, but u1 moved past u3: the anchors kept
+  // must increase on both sides.
+  const a = ["u1", "u2", "u3"];
+  const b = ["u2", "u3", "u1"];
+  assert.deepEqual(uniqueAnchors(a, 0, 3, b, 0, 3), [
+    [1, 0],
+    [2, 1],
+  ]);
 });
 
 test("textEdit is null when there is nothing to do", () => {

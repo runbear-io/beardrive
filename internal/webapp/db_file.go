@@ -3,6 +3,7 @@ package webapp
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -46,6 +48,72 @@ func writeFileAtomic(path string, data []byte) error {
 	return os.Rename(tmp.Name(), path)
 }
 
+// fileMu is a file repo's lock: the in-process mutex plus an exclusive
+// flock(2) on "<path>.lock", held together across every reload → mutate →
+// atomic-write sequence, so two hub processes sharing one data directory
+// serialize their writes instead of each rewriting the file from its own stale
+// copy and losing the other's record. The lock file is separate from the data
+// file because every write REPLACES the data file (temp + rename): a lock on
+// its inode would be a lock on a file nobody opens next. It is never removed.
+//
+// This is cooperative and local: it serializes processes on one host (or a
+// filesystem with working flock), not hubs on different machines — the SQL
+// backend is the multi-host story. A lock file that cannot be opened (a
+// read-only directory) still permits reading, but every write fails closed
+// with the acquisition error rather than proceeding without its lock.
+type fileMu struct {
+	mu   sync.Mutex
+	lock string
+	f    *os.File // held flock while locked; nil when unlocked or degraded
+	err  error    // failed lock acquisition; write must fail closed
+}
+
+func newFileMu(path string) fileMu { return fileMu{lock: path + ".lock"} }
+
+var fileLockWarn sync.Once
+
+func (m *fileMu) Lock() {
+	m.mu.Lock()
+	m.err = nil
+	if m.lock == "" {
+		return
+	}
+	f, err := os.OpenFile(m.lock, os.O_RDWR|os.O_CREATE, 0o600)
+	if os.IsNotExist(err) {
+		if os.MkdirAll(filepath.Dir(m.lock), 0o700) == nil {
+			f, err = os.OpenFile(m.lock, os.O_RDWR|os.O_CREATE, 0o600)
+		}
+	}
+	if err == nil {
+		for {
+			err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+			if err != syscall.EINTR {
+				break
+			}
+		}
+		if err != nil {
+			f.Close()
+		}
+	}
+	if err != nil {
+		m.err = fmt.Errorf("metadata lock %s: %w", m.lock, err)
+		fileLockWarn.Do(func() {
+			log.Printf("beardrive: metadata lock %s unavailable, writes refused: %v", m.lock, err)
+		})
+		return
+	}
+	m.f = f
+}
+
+func (m *fileMu) Unlock() {
+	if m.f != nil {
+		syscall.Flock(int(m.f.Fd()), syscall.LOCK_UN)
+		m.f.Close()
+		m.f = nil
+	}
+	m.mu.Unlock()
+}
+
 // fileVersion is the file backend's Versioned token: size and modification
 // time, which the temp-file + rename every write goes through always moves.
 // A missing file gets its own token, so creating one counts as a change.
@@ -53,10 +121,9 @@ func writeFileAtomic(path string, data []byte) error {
 // ponytail: mtime+size, not an inode and not a content hash. Two hub PROCESSES
 // writing the same byte count within one filesystem timestamp tick would look
 // unchanged to each other — nanosecond mtimes (APFS, ext4, xfs, btrfs, ZFS)
-// make that a theoretical window, and the file backend is not multi-process-
-// safe regardless: every write is still read-modify-write-rename, so two
-// processes can lose each other's records outright. This narrows the
-// stale-read race; it does not close it. The SQL backend is the fix.
+// make that a theoretical window. Writes themselves are serialized across
+// processes by fileMu, so no record is lost; this only narrows the stale-READ
+// race. The SQL backend is the multi-host fix.
 func fileVersion(path string) (string, error) {
 	fi, err := os.Stat(path)
 	if os.IsNotExist(err) {
@@ -137,14 +204,14 @@ type authFileShape struct {
 type fileAccountRepo struct {
 	path string
 
-	mu     sync.Mutex
+	mu     fileMu
 	users  map[string]*authUser
 	tokens map[string]authToken
 	policy *authPolicy
 }
 
 func newFileAccountRepo(path string) *fileAccountRepo {
-	return &fileAccountRepo{path: path, users: map[string]*authUser{}, tokens: map[string]authToken{}}
+	return &fileAccountRepo{path: path, mu: newFileMu(path), users: map[string]*authUser{}, tokens: map[string]authToken{}}
 }
 
 func (r *fileAccountRepo) Version() (string, error) { return fileVersion(r.path) }
@@ -178,6 +245,9 @@ func (r *fileAccountRepo) reload() ([]*authUser, []authToken, *authPolicy, error
 
 // write persists users, tokens, and policy. Callers hold mu.
 func (r *fileAccountRepo) write() error {
+	if r.mu.err != nil {
+		return r.mu.err
+	}
 	var f authFileShape
 	for _, u := range r.users {
 		f.Users = append(f.Users, u)
@@ -260,12 +330,12 @@ func (r *fileAccountRepo) PutPolicy(p authPolicy) error {
 
 type fileProjectRepo struct {
 	path string
-	mu   sync.Mutex
+	mu   fileMu
 	byID map[string]Project
 }
 
 func newFileProjectRepo(path string) *fileProjectRepo {
-	return &fileProjectRepo{path: path, byID: map[string]Project{}}
+	return &fileProjectRepo{path: path, mu: newFileMu(path), byID: map[string]Project{}}
 }
 
 func (r *fileProjectRepo) Version() (string, error) { return fileVersion(r.path) }
@@ -295,6 +365,9 @@ func (r *fileProjectRepo) reload() ([]Project, error) {
 }
 
 func (r *fileProjectRepo) write() error {
+	if r.mu.err != nil {
+		return r.mu.err
+	}
 	list := make([]Project, 0, len(r.byID))
 	for _, p := range r.byID {
 		list = append(list, p)
@@ -320,6 +393,37 @@ func (r *fileProjectRepo) Put(p Project) error {
 	}
 	r.byID[p.ID] = p
 	return r.write()
+}
+
+// CreateProjectIfAbsent writes p unless the file already holds a project
+// with its (org, name), answering that project's id (projectCreator). The
+// check runs on the freshly re-read file under the cross-process lock.
+func (r *fileProjectRepo) CreateProjectIfAbsent(p Project) (string, bool, error) {
+	if err := checkProject(p); err != nil {
+		return "", false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return "", false, err
+	}
+	var hit *Project
+	for _, q := range r.byID {
+		if q.Org == p.Org && strings.EqualFold(q.Name, p.Name) {
+			if hit == nil || q.Created.Before(hit.Created) || (q.Created.Equal(hit.Created) && q.ID < hit.ID) {
+				q := q
+				hit = &q
+			}
+		}
+	}
+	if hit != nil {
+		return hit.ID, false, nil
+	}
+	r.byID[p.ID] = p
+	if err := r.write(); err != nil {
+		return "", false, err
+	}
+	return p.ID, true, nil
 }
 
 // PutMeta writes the project's own fields and keeps whatever grants are on
@@ -516,13 +620,13 @@ func (r *fileProjectRepo) Delete(id string) error {
 
 type fileOrgRepo struct {
 	path    string
-	mu      sync.Mutex
+	mu      fileMu
 	byID    map[string]Org
 	invites map[string]OrgInvite
 }
 
 func newFileOrgRepo(path string) *fileOrgRepo {
-	return &fileOrgRepo{path: path, byID: map[string]Org{}, invites: map[string]OrgInvite{}}
+	return &fileOrgRepo{path: path, mu: newFileMu(path), byID: map[string]Org{}, invites: map[string]OrgInvite{}}
 }
 
 func (r *fileOrgRepo) Version() (string, error) { return fileVersion(r.path) }
@@ -560,6 +664,9 @@ func (r *fileOrgRepo) reload() ([]Org, []OrgInvite, error) {
 }
 
 func (r *fileOrgRepo) write() error {
+	if r.mu.err != nil {
+		return r.mu.err
+	}
 	var f struct {
 		Orgs    []Org       `json:"orgs"`
 		Invites []OrgInvite `json:"invites"`
@@ -637,6 +744,64 @@ func (r *fileOrgRepo) PutMember(org, email, role string, joined time.Time) error
 	return r.write()
 }
 
+// PutMemberGuarded is PutMember with the last-owner check made against the
+// freshly re-read file, under the cross-process lock (ownerGuardedOrgRepo).
+func (r *fileOrgRepo) PutMemberGuarded(org, email, role string, joined time.Time) error {
+	if err := storable(org, email, role); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, _, err := r.reload(); err != nil {
+		return err
+	}
+	o, ok := r.byID[org]
+	if !ok {
+		return fmt.Errorf("no such organization %q", org)
+	}
+	if o.Members[email] == RoleOwner && role != RoleOwner {
+		others := 0
+		for m, rl := range o.Members {
+			if m != email && rl == RoleOwner {
+				others++
+			}
+		}
+		if others == 0 {
+			return ErrLastOwner
+		}
+	}
+	o = o.clone()
+	if role == "" {
+		delete(o.Members, email)
+		delete(o.Joined, email)
+	} else {
+		o.Members[email] = role
+		o.Joined[email] = joined
+	}
+	r.byID[org] = o
+	return r.write()
+}
+
+// CreateOrgIfAbsent writes o unless the file already holds its id.
+func (r *fileOrgRepo) CreateOrgIfAbsent(o Org) (bool, error) {
+	if err := checkOrg(o); err != nil {
+		return false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, _, err := r.reload(); err != nil {
+		return false, err
+	}
+	if _, ok := r.byID[o.ID]; ok {
+		return false, nil
+	}
+	r.byID[o.ID] = o
+	if err := r.write(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (r *fileOrgRepo) DeleteOrg(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -674,12 +839,12 @@ func (r *fileOrgRepo) DeleteInvite(token string) error {
 
 type fileShareRepo struct {
 	path    string
-	mu      sync.Mutex
+	mu      fileMu
 	byToken map[string]Share
 }
 
 func newFileShareRepo(path string) *fileShareRepo {
-	return &fileShareRepo{path: path, byToken: map[string]Share{}}
+	return &fileShareRepo{path: path, mu: newFileMu(path), byToken: map[string]Share{}}
 }
 
 func (r *fileShareRepo) Version() (string, error) { return fileVersion(r.path) }
@@ -709,6 +874,9 @@ func (r *fileShareRepo) reload() ([]Share, error) {
 }
 
 func (r *fileShareRepo) write() error {
+	if r.mu.err != nil {
+		return r.mu.err
+	}
 	var f struct {
 		Shares []Share `json:"shares"`
 	}
@@ -735,6 +903,23 @@ func (r *fileShareRepo) Put(s Share) error {
 	return r.write()
 }
 
+// UpdateExpiry re-dates a link that is still on disk; one revoked by any
+// process fails ErrShareNotFound instead of being written back.
+func (r *fileShareRepo) UpdateExpiry(token string, expires time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	s, ok := r.byToken[token]
+	if !ok {
+		return ErrShareNotFound
+	}
+	s.Expires = expires
+	r.byToken[token] = s
+	return r.write()
+}
+
 func (r *fileShareRepo) Delete(token string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -749,13 +934,13 @@ func (r *fileShareRepo) Delete(token string) error {
 
 type fileAppRepo struct {
 	path string
-	mu   sync.Mutex
+	mu   fileMu
 	apps map[string]App
 	keys map[string]AppKey
 }
 
 func newFileAppRepo(path string) *fileAppRepo {
-	return &fileAppRepo{path: path, apps: map[string]App{}, keys: map[string]AppKey{}}
+	return &fileAppRepo{path: path, mu: newFileMu(path), apps: map[string]App{}, keys: map[string]AppKey{}}
 }
 
 func (r *fileAppRepo) Version() (string, error) { return fileVersion(r.path) }
@@ -791,6 +976,9 @@ func (r *fileAppRepo) reload() (appFileShape, error) {
 }
 
 func (r *fileAppRepo) write() error {
+	if r.mu.err != nil {
+		return r.mu.err
+	}
 	var f appFileShape
 	for _, a := range r.apps {
 		f.Apps = append(f.Apps, a)
@@ -841,13 +1029,13 @@ func (r *fileAppRepo) DeleteApp(id string) error {
 
 type fileMCPRepo struct {
 	path    string
-	mu      sync.Mutex
+	mu      fileMu
 	grants  map[string]MCPGrant
 	clients map[string]MCPClient
 }
 
 func newFileMCPRepo(path string) *fileMCPRepo {
-	return &fileMCPRepo{path: path, grants: map[string]MCPGrant{}, clients: map[string]MCPClient{}}
+	return &fileMCPRepo{path: path, mu: newFileMu(path), grants: map[string]MCPGrant{}, clients: map[string]MCPClient{}}
 }
 
 func (r *fileMCPRepo) Version() (string, error) { return fileVersion(r.path) }
@@ -879,6 +1067,9 @@ func (r *fileMCPRepo) reload() (mcpFileShape, error) {
 }
 
 func (r *fileMCPRepo) write() error {
+	if r.mu.err != nil {
+		return r.mu.err
+	}
 	var f mcpFileShape
 	for _, g := range r.grants {
 		f.Grants = append(f.Grants, g)
@@ -946,12 +1137,12 @@ func (r *fileMCPRepo) PutClient(c MCPClient) error {
 // a device belonged to whoever named it last.
 type fileDeviceRepo struct {
 	path string
-	mu   sync.Mutex
+	mu   fileMu
 	rows map[devKey]DeviceInfo
 }
 
 func newFileDeviceRepo(path string) *fileDeviceRepo {
-	return &fileDeviceRepo{path: path, rows: map[devKey]DeviceInfo{}}
+	return &fileDeviceRepo{path: path, mu: newFileMu(path), rows: map[devKey]DeviceInfo{}}
 }
 
 func (r *fileDeviceRepo) Version() (string, error) { return fileVersion(r.path) }
@@ -983,6 +1174,9 @@ func (r *fileDeviceRepo) reload() ([]DeviceInfo, error) {
 }
 
 func (r *fileDeviceRepo) write() error {
+	if r.mu.err != nil {
+		return r.mu.err
+	}
 	var f struct {
 		Devices []DeviceInfo `json:"devices"`
 	}
@@ -1023,12 +1217,12 @@ func (r *fileDeviceRepo) Delete(user, id string) error {
 
 type fileReadRepo struct {
 	path  string
-	mu    sync.Mutex
+	mu    fileMu
 	byKey map[ReadStatKey]ReadStat
 }
 
 func newFileReadRepo(path string) *fileReadRepo {
-	return &fileReadRepo{path: path, byKey: map[ReadStatKey]ReadStat{}}
+	return &fileReadRepo{path: path, mu: newFileMu(path), byKey: map[ReadStatKey]ReadStat{}}
 }
 
 func (r *fileReadRepo) Version() (string, error) { return fileVersion(r.path) }
@@ -1060,6 +1254,9 @@ func (r *fileReadRepo) reload() ([]ReadStat, error) {
 }
 
 func (r *fileReadRepo) write() error {
+	if r.mu.err != nil {
+		return r.mu.err
+	}
 	var f struct {
 		Reads []ReadStat `json:"reads"`
 	}
@@ -1099,6 +1296,36 @@ func (r *fileReadRepo) PutBatch(stats []ReadStat) error {
 	return r.write()
 }
 
+// AddBatch adds each delta to its bucket on the freshly re-read file (see
+// readAdder), under the cross-process lock, so two hub processes flushing the
+// same bucket both count.
+func (r *fileReadRepo) AddBatch(deltas []ReadStat) error {
+	for _, s := range deltas {
+		if err := checkReadStat(s); err != nil {
+			return err
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	for _, d := range deltas {
+		k := d.key()
+		cur, ok := r.byKey[k]
+		if !ok {
+			r.byKey[k] = d
+			continue
+		}
+		cur.Count += d.Count
+		if d.Last.After(cur.Last) {
+			cur.Last = d.Last
+		}
+		r.byKey[k] = cur
+	}
+	return r.write()
+}
+
 func (r *fileReadRepo) DeleteBatch(keys []ReadStatKey) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1115,12 +1342,12 @@ func (r *fileReadRepo) DeleteBatch(keys []ReadStatKey) error {
 
 type fileSessionReadRepo struct {
 	path  string
-	mu    sync.Mutex
+	mu    fileMu
 	byKey map[sessionReadKey]SessionRead
 }
 
 func newFileSessionReadRepo(path string) *fileSessionReadRepo {
-	return &fileSessionReadRepo{path: path, byKey: map[sessionReadKey]SessionRead{}}
+	return &fileSessionReadRepo{path: path, mu: newFileMu(path), byKey: map[sessionReadKey]SessionRead{}}
 }
 
 // reload re-reads before every write, for fileReadRepo.reload's reason: a
@@ -1141,6 +1368,9 @@ func (r *fileSessionReadRepo) reload() error {
 }
 
 func (r *fileSessionReadRepo) write() error {
+	if r.mu.err != nil {
+		return r.mu.err
+	}
 	var f struct {
 		Sessions []SessionRead `json:"sessions"`
 	}
@@ -1227,12 +1457,12 @@ filePendingRepo is the JSON backend for PendingRepo.
 */
 type filePendingRepo struct {
 	path string
-	mu   sync.Mutex
+	mu   fileMu
 	rows map[string]PendingGrant // kind + "\x00" + key
 }
 
 func newFilePendingRepo(path string) *filePendingRepo {
-	return &filePendingRepo{path: path, rows: map[string]PendingGrant{}}
+	return &filePendingRepo{path: path, mu: newFileMu(path), rows: map[string]PendingGrant{}}
 }
 
 func pendingKey(kind, key string) string { return kind + "\x00" + key }
@@ -1252,6 +1482,9 @@ func (r *filePendingRepo) reload() error {
 }
 
 func (r *filePendingRepo) write() error {
+	if r.mu.err != nil {
+		return r.mu.err
+	}
 	var f struct {
 		Pending []PendingGrant `json:"pending"`
 	}

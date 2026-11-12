@@ -7,6 +7,7 @@ import { copyText } from "../util";
 import { toast } from "../toast";
 import { useWideRail } from "./FileRail";
 import { Avatar } from "./PresenceBar";
+import { fileURLFor } from "../hooks/useBlob";
 
 /* The right rail while a markdown file is being edited: who has written their
    section (meeting notes only), the action items in the text, and the file's
@@ -17,6 +18,11 @@ import { Avatar } from "./PresenceBar";
    overwritten one stays in history and can itself be restored. */
 
 const VERSIONS = 6;
+
+// What POST /restore answers that the host needs: whether a live room
+// already folded the restore in, and the blob it restored.
+export type RestoreAnswer = { folded?: boolean; blob?: string };
+export type RestoreHost = (post: () => Promise<RestoreAnswer>) => Promise<{ reconciled: boolean }>;
 
 export function EditRail(props: {
   apiBase: string;
@@ -31,9 +37,13 @@ export function EditRail(props: {
   // History and restore are per-project hub routes; a single-volume server
   // has neither, so it gets no versions list.
   versions: boolean;
-  // A restore landed: the file now holds that version, and the open document
-  // must be brought to it.
-  onRestored?: (folded: boolean) => Promise<void>;
+  // Runs a restore for the open document: `post` sends it, and the host
+  // brackets the whole request — fencing reads of the file before and after
+  // it — then brings the open document to the restored version. Throws only
+  // if the restore failed; `reconciled: false` is a restore that landed but
+  // has not reached the open document yet.
+  onRestore?: RestoreHost;
+  onJumpToLine?: (line: number) => void;
 }) {
   const { apiBase, path, text, meeting } = props;
   const wide = useWideRail();
@@ -71,19 +81,38 @@ export function EditRail(props: {
                 <span className="er-box" aria-hidden="true">
                   {a.done ? "✓" : ""}
                 </span>
-                <span className="er-text">
+                <button
+                  type="button"
+                  className="er-text"
+                  style={{ textAlign: "left", color: a.done ? "var(--text-faint)" : "inherit", cursor: "pointer", background: "none", border: 0, padding: 0, font: "inherit" }}
+                  aria-label={`Go to line ${a.line}: ${a.text || "untitled action item"}`}
+                  onClick={() => {
+                    if (props.onJumpToLine) {
+                      props.onJumpToLine(a.line);
+                      return;
+                    }
+                    // Preview mode has no live view to select in. Focus its
+                    // read surface instead of leaving an inert control.
+                    const preview = document.getElementById("ed-preview");
+                    if (preview) {
+                      preview.tabIndex = -1;
+                      preview.focus();
+                      preview.scrollIntoView({ block: "nearest" });
+                    }
+                  }}
+                >
                   {a.text || "(untitled)"}
                   <small>
                     {a.owner ? "@" + a.owner : "no owner"}
                     {a.section ? " · " + a.section : ""}
                   </small>
-                </span>
+                </button>
               </li>
             ))}
           </ul>
         )}
       </section>
-      {props.versions && <Versions apiBase={apiBase} path={path} onRestored={props.onRestored} size={new TextEncoder().encode(text).length} />}
+      {props.versions && <Versions apiBase={apiBase} path={path} onRestore={props.onRestore} size={new TextEncoder().encode(text).length} />}
     </>
   );
 
@@ -151,12 +180,12 @@ function Versions({
   apiBase,
   path,
   size,
-  onRestored,
+  onRestore,
 }: {
   apiBase: string;
   path: string;
   size: number;
-  onRestored?: (folded: boolean) => Promise<void>;
+  onRestore?: RestoreHost;
 }) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState("");
@@ -175,10 +204,30 @@ function Versions({
     const when = new Date(e.time).toLocaleString();
     setBusy(e.blob!);
     try {
-      const out = await postJSON<{ folded?: boolean }>(apiBase + "restore", { path, sha: e.blob });
-      toast("Restored the version from " + when + ".");
+      const post = () => postJSON<RestoreAnswer>(apiBase + "restore", { path, sha: e.blob });
+      // The text is NOT touched here: the host folds the restored head into
+      // the open document first (with `held` for a live room) and only then
+      // updates the text query — a read racing ahead of that merge, whether
+      // from before the restore or the change stream's refetch during it,
+      // would splice the restore in a second time.
+      let reconciled = true;
+      if (onRestore) ({ reconciled } = await onRestore(post));
+      else {
+        await post();
+        void qc.invalidateQueries({ queryKey: ["text", fileURLFor(apiBase, path)] });
+      }
+      // Committed either way; only the open editor may still be catching up.
+      toast(
+        reconciled
+          ? "Restored the version from " + when + "."
+          : "Restored the version from " + when + " — the editor will catch up once it can read the file.",
+      );
+      // The file and its render moved too: the read view Done opens must not
+      // show the version from before the restore. The refetches carry the
+      // restore's receipt (api/http.ts), so any hub process answers with it.
+      // The render is reset so its pre-restore HTML is never painted again.
       void qc.invalidateQueries({ queryKey: ["history", apiBase] });
-      await onRestored?.(!!out?.folded);
+      void qc.resetQueries({ queryKey: ["render", apiBase, path] });
     } catch (err) {
       toast("Could not restore: " + (err as Error).message, true);
     } finally {

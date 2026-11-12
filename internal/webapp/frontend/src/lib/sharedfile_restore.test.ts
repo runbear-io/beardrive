@@ -57,6 +57,7 @@ const { parseConflict } = await import("./conflict.ts");
 const { merge3, merge3PreferRight, merge3ForPath, validMergedText } = await import("./merge3.ts");
 const { frameChannel, saveLocked } = await import("./frameflush.ts");
 const { ackEditedSpan, unackedExitPatches, applyRenderPatches, buildExitSaveRequest } = await import("./editbeacon.ts");
+const { coversProjectReceipts, latestProjectReceipt, recordProjectReceipt } = await import("../api/http.ts");
 
 /* toEqual's semantics: a property that is undefined is a property that is
    absent. Only plain objects and arrays are rebuilt; anything else (a
@@ -211,6 +212,37 @@ test("A -> save B -> outside restore to A merges A back into the buffer", async 
   gate.resolve();
   await saving;
   assert.equal(buffer, "C\n");
+  file.destroy();
+});
+
+/* Done seeds the reading view from settled(): the bytes the file now holds,
+   and the sha they are stored under — never a sha for text it did not write. */
+test("settled() names the saved text and its sha, and no sha for unsaved typing", async () => {
+  globalThis.fetch = (async () => new Response(JSON.stringify({ sha: "sha-b" }), { status: 200 })) as typeof fetch;
+  let buffer = "A\n";
+  let solo = false;
+  const file = openSharedFile({
+    apiBase: "/api/",
+    path: "notes.md",
+    seed: "A\n",
+    baseSha: "sha-a",
+    me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+    onReady: () => {},
+    onSolo: () => {
+      solo = true;
+    },
+    soloText: () => buffer,
+    soloApply: (e) => {
+      buffer = buffer.slice(0, e.from) + e.insert + buffer.slice(e.to);
+    },
+  });
+  await waitFor(() => assert.equal(solo, true));
+  same(file.settled(), { text: "A\n", sha: "sha-a", clean: true });
+
+  buffer = "B\n";
+  same(file.settled(), { text: "B\n", sha: undefined, clean: false });
+  assert.equal(await file.saveNow(), true);
+  same(file.settled(), { text: "B\n", sha: "sha-b", clean: true });
   file.destroy();
 });
 
@@ -2979,4 +3011,19 @@ test("buildExitSaveRequest: hub checkpoint, plain-folder save after an autosave,
     docText: big,
   };
   assert.equal(buildExitSaveRequest(bigState, [{ ...para, html: "x" }]), null);
+});
+
+test("recordProjectReceipt deduplicates per device, rejects malformed parts, and checks full batch coverage", () => {
+  const apiBase = "/api/p/proj-sse-receipt-test/";
+  assert.deepEqual(recordProjectReceipt(apiBase, "hub-a:3"), ["hub-a:3"]);
+  assert.deepEqual(recordProjectReceipt(apiBase, "hub-a:2"), ["hub-a:2"]); // older seq kept at 3
+  assert.deepEqual(recordProjectReceipt(apiBase, "dev-peer:11"), ["dev-peer:11"]);
+  assert.deepEqual(recordProjectReceipt(apiBase, "hub-a:4,dev-two:7"), ["hub-a:4", "dev-two:7"]);
+  assert.deepEqual(recordProjectReceipt(apiBase, "hub-a:5,not-a-receipt"), []);
+  assert.equal(latestProjectReceipt(apiBase), "dev-peer:11,hub-a:4,dev-two:7");
+  assert.equal(coversProjectReceipts(apiBase, ["hub-a:3", "dev-two:7"]), true);
+  assert.equal(coversProjectReceipts(apiBase, ["hub-a:3", "missing-dev:1"]), false);
+  // Exceeding the 4-device header cap evicts the oldest device, so full-batch coverage honestly reports false.
+  recordProjectReceipt(apiBase, "dev-three:1,dev-four:1");
+  assert.equal(coversProjectReceipts(apiBase, ["dev-peer:11", "dev-four:1"]), false);
 });

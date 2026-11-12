@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -14,6 +16,7 @@ import (
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 )
 
@@ -112,10 +115,81 @@ func RenderMarkdownPairs(src []byte) ([]FrontmatterPair, string, error) {
 
 func renderBody(body []byte) (string, error) {
 	var buf bytes.Buffer
-	if err := md.Convert(body, &buf); err != nil {
+	ctx := parser.NewContext(parser.WithIDs(newHeadingIDs()))
+	if err := md.Convert(body, &buf, parser.WithContext(ctx)); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// headingIDs is goldmark's own heading-id generator with one change: a
+// letter or digit outside ASCII is kept (NFC-normalized, lowercased) instead
+// of dropped. goldmark skips every multi-byte rune, so "## 한글 제목" became
+// id="-" and every non-Latin heading in a document collided onto -1, -2, …
+// — unlinkable. An ASCII heading still gets byte-for-byte the id it always
+// had (every published #fragment keeps resolving): same trimming, same
+// lowercasing, space/-/_ to "-", "heading" when nothing is left, -N on
+// duplicates within one document.
+type headingIDs struct{ values map[string]bool }
+
+func newHeadingIDs() parser.IDs { return &headingIDs{values: map[string]bool{}} }
+
+func (s *headingIDs) Generate(value []byte, kind ast.NodeKind) []byte {
+	value = util.TrimRightSpace(util.TrimLeftSpace(value))
+	if !isASCII(value) {
+		value = norm.NFC.Bytes(value)
+	}
+	result := make([]byte, 0, len(value))
+	for i := 0; i < len(value); {
+		c := value[i]
+		if c < utf8.RuneSelf {
+			i++
+			switch {
+			case util.IsAlphaNumeric(c):
+				if 'A' <= c && c <= 'Z' {
+					c += 'a' - 'A'
+				}
+				result = append(result, c)
+			case util.IsSpace(c) || c == '-' || c == '_':
+				result = append(result, '-')
+			}
+			continue
+		}
+		r, n := utf8.DecodeRune(value[i:])
+		i += n
+		if r != utf8.RuneError && (unicode.IsLetter(r) || unicode.IsNumber(r)) {
+			result = utf8.AppendRune(result, unicode.ToLower(r))
+		}
+	}
+	if len(result) == 0 {
+		if kind == ast.KindHeading {
+			result = []byte("heading")
+		} else {
+			result = []byte("id")
+		}
+	}
+	if !s.values[string(result)] {
+		s.values[string(result)] = true
+		return result
+	}
+	for i := 1; ; i++ {
+		next := fmt.Sprintf("%s-%d", result, i)
+		if !s.values[next] {
+			s.values[next] = true
+			return []byte(next)
+		}
+	}
+}
+
+func (s *headingIDs) Put(value []byte) { s.values[string(value)] = true }
+
+func isASCII(b []byte) bool {
+	for _, c := range b {
+		if c >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // fmCloseRe matches a frontmatter closing fence on its own line.

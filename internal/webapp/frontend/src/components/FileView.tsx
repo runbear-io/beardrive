@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
-import { fetchBlobText, fileURLFor, useFrameURL, useTextAt } from "../hooks/useBlob";
+import { fetchBlobText, fileURLFor, isTransientBlobError, textQueryOptions, useFrameURL, withReceipt, type BlobText } from "../hooks/useBlob";
 import type { SharedFile } from "../lib/sharedfile";
 import {
   CSV_EXT,
@@ -14,7 +14,7 @@ import {
   TEXT_EXT,
   humanSize,
   joinPath,
-  resolveWiki,
+  resolveWikiTarget,
 } from "../util";
 import { urlForPath, urlForView } from "../router";
 import { DocHeader, FileRail, useWideRail } from "./FileRail";
@@ -25,7 +25,7 @@ import { secretsBadge, type SecretFinding } from "../lib/secrets";
 import { Icon } from "./shell";
 import { toast } from "../toast";
 import type { EditMode, EditorInfo, SaveState } from "./Editor";
-import { EditRail } from "./EditRail";
+import { EditRail, type RestoreAnswer } from "./EditRail";
 import { Avatar } from "./PresenceBar";
 import { agoShort, byteLength, isMeetingNote, sectionAt, sections, wordCount } from "../lib/meeting";
 import type { CollabStatus } from "../lib/collab";
@@ -36,7 +36,8 @@ import type { CollabStatus } from "../lib/collab";
    Loaded by hand rather than with React.lazy: lazy suspends on its first
    render even when the module is already here, and React then holds the
    Suspense fallback for at least 300 ms. A module fetched ahead of time (see
-   preloadEditor) is rendered on the first pass instead. */
+   preloadTextEditor / preloadVisualEditor) is rendered on the first pass
+   instead. */
 type EditorModule = typeof import("./Editor");
 type VisualEditModule = typeof import("./VisualEdit");
 let editorModule: EditorModule | null = null;
@@ -59,6 +60,9 @@ const loadVisualEdit = () =>
       visualLoad = null;
       throw e;
     }));
+// The loader for a surface this page does not show: never settles, so the
+// module stays unloaded and no failure is reported for it.
+const notNeeded = () => new Promise<never>(() => {});
 
 function useModule<T>(have: T | null, load: () => Promise<T>): { mod: T | null; failed: boolean; retry: () => void } {
   const [m, setM] = useState(have);
@@ -87,19 +91,48 @@ function useModule<T>(have: T | null, load: () => Promise<T>): { mod: T | null; 
 
 // What the editing page has to load before it can show anything: the editor
 // code, and the file's text under the key EditView reads. Started ahead of the
-// click so pressing Edit has nothing left to wait for.
-export function preloadEditor() {
+// click so pressing Edit has nothing left to wait for. One chunk per surface:
+// a Markdown or code file never needs TipTap, and an HTML page never needs
+// the source editor unless its reader asks for the markup.
+export function preloadTextEditor() {
   void loadEditor();
+}
+
+export function preloadVisualEditor() {
   void loadVisualEdit();
 }
 
-// How old a cached copy of the file's text may be to show while editing waits
-// for its own read. Display only: a session is never seeded from it.
-const EDIT_PREVIEW_MAX_AGE_MS = 2_000;
+export function preloadEditorForPath(path: string) {
+  if (HTML_EXT.test(path)) preloadVisualEditor();
+  else preloadTextEditor();
+}
+
+/* Live file URLs a read was started for ahead of editing — hovers, row
+   prefetches, a read view warming its source. Opening the editor must not
+   ride such a read: it was asked before the click, perhaps before a peer's
+   write. The boot prefetch of an /edit/ link is not among them: that read IS
+   the edit's own, and restarting it would only double a cold open. */
+const readsBeforeEdit = new Set<string>();
 
 export function prefetchEditText(qc: QueryClient, apiBase: string, path: string) {
   const url = fileURLFor(apiBase, path);
-  void qc.prefetchQuery({ queryKey: ["text", url], queryFn: () => fetchBlobText(url) });
+  if (readsBeforeEdit.size >= 128) {
+    const oldest = readsBeforeEdit.values().next().value;
+    if (oldest !== undefined) readsBeforeEdit.delete(oldest);
+  }
+  readsBeforeEdit.add(url);
+  void qc.prefetchQuery(textQueryOptions(url));
+}
+
+/* What opening a file will read, started from a hover or press on its row:
+   the rendered page for Markdown, and the bytes for anything read as text
+   (Markdown's too, so Edit is instant from there). Images, PDFs and HTML
+   load from their own URL in the page and need nothing here. Both go through
+   the queries the views read, so a fresh copy costs nothing. */
+export function prefetchFile(qc: QueryClient, apiBase: string, path: string) {
+  if (MD_EXT.test(path)) void qc.prefetchQuery(renderQuery(apiBase, path));
+  if (IMG_EXT.test(path) || PDF_EXT.test(path) || HTML_EXT.test(path)) return;
+  prefetchEditText(qc, apiBase, path);
 }
 
 export function FileView(props: {
@@ -111,7 +144,8 @@ export function FileView(props: {
   flatFiles: Node[];
   // Hub mode only; absent in volume mode, where file URLs are "/<path>".
   projectId?: string;
-  onOpenFile: (path: string) => void;
+  // `hash`: a #fragment the link named, to scroll to once the file renders.
+  onOpenFile: (path: string, hash?: string) => void;
   onMeta: (meta: ReactNode) => void;
   onRendered?: () => void;
   // Who is editing, for the label and colour on this account's caret in
@@ -235,6 +269,14 @@ function HtmlView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
     window.addEventListener("bdrive:changed", onChanged);
     return () => window.removeEventListener("bdrive:changed", onChanged);
   }, [path]);
+  // Receipts read once per mount (rev): a pinned version is content-addressed
+  // and needs none.
+  const src = useMemo(() => {
+    if (!fileURL) return "";
+    const u = props.commentable ? fileURL + (fileURL.includes("?") ? "&" : "?") + "comment=1" : fileURL;
+    return version ? u : withReceipt(u, apiBase);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase, fileURL, version, props.commentable, rev]);
   if (!fileURL) return null;
   return (
     <iframe
@@ -243,7 +285,7 @@ function HtmlView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
       key={rev}
       className="htmlview"
       sandbox="allow-scripts allow-downloads"
-      src={props.commentable ? fileURL + (fileURL.includes("?") ? "&" : "?") + "comment=1" : fileURL}
+      src={src}
       title={path}
       onLoad={onRendered}
     />
@@ -260,17 +302,12 @@ function SniffView(
   // The ["text", url] family is what a restore invalidates (Browser.tsx);
   // an immutable ["blob", …] key on a live path would go stale after a
   // teammate's edit. A ?v= URL is content-addressed, so it can be pinned.
-  const { data, error } = useTextAt(
-    fileURL,
-    ["text", fileURL],
-    true,
-    !!version,
-  );
+  const { data, error } = useQuery(textQueryOptions(fileURL, !!version));
   useEffect(() => {
     if (data) onRendered?.();
   }, [data, onRendered]);
   if (error) return <LoadError version={version} err={error as Error} />;
-  if (!data) return null;
+  if (!data) return <FileSkeleton />;
   if (data.kind === "text")
     return (
       <pre className="plain" key={path}>
@@ -399,34 +436,54 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // says right now. Shares the ["text", url] family the rest of the app uses,
   // so a restore or a peer write invalidates it like any other read.
   const fileURL = fileURLFor(apiBase, path);
-  const frameURL = useFrameURL(apiBase, path, fileURL).url;
-  const text = useTextAt(fileURL, ["text", fileURL], true, false);
-  const { error } = text;
-  // The buffer is seeded from these bytes, so they are always read again when
-  // editing starts, and nothing is built until that read answers: a cached copy
-  // — an earlier read, a hover prefetch — may be older than a peer's write.
-  // A copy fetched just now is only shown, read-only, while the read is out.
-  // Per file: the same page can move to another path without remounting.
-  const openedAt = useMemo(() => Date.now(), [fileURL]);
-  const [revalidatedFor, setRevalidatedFor] = useState<string | null>(null);
-  const { refetch } = text;
+  // Only the visual editor frames the page; a source editor minting a frame
+  // URL it never shows was a wasted request on every Markdown and code edit.
+  const frameURL = useFrameURL(apiBase, path, fileURL, undefined, visual).url;
+  /* The buffer opens on the cached copy when there is one — a read view, a
+     hover, the boot prefetch, Done's own save — so the editor is on screen in
+     the first frame. That copy may be older than a peer's write, so it is
+     always read again on the way in ("always", not the stale check), and
+     whatever that read brings is folded into the open document as a splice
+     (Editor's initial/baseSha → sharedfile.merge), never a re-seed: the
+     cursor stays where it is. Only a cold load waits, behind the skeleton. */
+  const qcEarly = useQueryClient();
+  /* "always" can still join a read that was already out — a hover prefetch
+     sent before a peer's write — and then no read is made after the click at
+     all. So an open that found a copy, or a pre-edit read still in flight,
+     starts a read of its own: the editor is up on the cached copy (or the
+     skeleton holds), `data` stays defined throughout, and the answer is
+     folded in like any other. Decided BEFORE useQuery subscribes, which would
+     otherwise make every open look like it had a read in flight. A cold
+     /edit/ link keeps its boot read, the one request it needs. */
+  const ownRead = useMemo(() => {
+    const s = qcEarly.getQueryState(textQueryOptions(fileURL).queryKey);
+    return s?.data !== undefined || (s?.fetchStatus === "fetching" && readsBeforeEdit.has(fileURL));
+  }, [qcEarly, fileURL]);
+  const text = useQuery({ ...textQueryOptions(fileURL), refetchOnMount: "always" });
+  const { error, data, refetch } = text;
   useEffect(() => {
-    let live = true;
-    // A new request, not one already in flight: a prefetch started before
-    // editing did is not a read of the file as it is now.
-    void refetch({ cancelRefetch: true }).then((r) => {
-      // A failed read leaves any cached copy in place; that copy must not
-      // seed the session either.
-      if (live && r.status === "success" && !r.isRefetchError) setRevalidatedFor(fileURL);
-    });
-    return () => {
-      live = false;
-    };
-  }, [refetch, fileURL]);
-  const data = revalidatedFor === fileURL ? text.data : undefined;
-  const glimpse = text.data && text.dataUpdatedAt >= openedAt - EDIT_PREVIEW_MAX_AGE_MS ? text.data : undefined;
-  const editorMod = useModule(editorModule, loadEditor);
-  const visualMod = useModule(visualModule, loadVisualEdit);
+    readsBeforeEdit.delete(fileURL);
+    if (!ownRead) return;
+    // Cancelled first: refetch's own cancelRefetch only replaces a read when
+    // the query already has data, so a cold pre-click read still in flight
+    // would otherwise be joined, not replaced. With data, cancelling keeps
+    // it and only aborts the read.
+    void qcEarly
+      .cancelQueries({ queryKey: textQueryOptions(fileURL).queryKey })
+      .then(() => refetch({ cancelRefetch: true }));
+  }, [ownRead, refetch, fileURL, qcEarly]);
+  /* Except a copy already known to be behind: the change stream (or a
+     restore) invalidated it because a newer write landed after it was read.
+     Opening on it would paint text the read in flight is about to replace, so
+     that read is waited for instead. Only before the editor is up — once it
+     holds a buffer, a later invalidation is a splice, never an unmount. */
+  const textState = qcEarly.getQueryState(textQueryOptions(fileURL).queryKey);
+  const seededFor = useRef<string | null>(null);
+  const behind = seededFor.current !== fileURL && !!textState?.isInvalidated && text.isFetching;
+  // Only the surface this file edits with: a Markdown edit has no use for
+  // TipTap, nor an HTML page's visual edit for CodeMirror.
+  const editorMod = useModule(editorModule, visual ? notNeeded : loadEditor);
+  const visualMod = useModule(visualModule, visual ? loadVisualEdit : notNeeded);
   const Editor = editorMod.mod?.Editor;
   const VisualEdit = visualMod.mod?.VisualEdit;
   const loadFailed = visual ? visualMod : editorMod;
@@ -449,8 +506,11 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     const t = setInterval(() => setTick((n) => n + 1), 5_000);
     return () => clearInterval(t);
   }, []);
+  // Typed into during this visit: Done then fetches the render it opens on.
+  const edited = useRef(false);
   useEffect(() => {
     if (state === "clean") setSavedAt(Date.now());
+    else edited.current = true;
   }, [state]);
   const roomDoc = info?.collab ?? null;
   const textRef = useRef("");
@@ -490,25 +550,157 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   const mine = useRef(0);
   const qc = useQueryClient();
   const fileHandle = useRef<SharedFile | null>(null);
-  /* A restore from the rail, reconciled here rather than left to the change
-     stream: a missed frame would leave the open document on the text from
-     before it, and the next save would write that back over the restore. A
-     live room already holds the restored text — the hub folded it in — so
-     only the version is recorded; anything else takes it as an outside
-     write. */
-  const onRestored = async (folded: boolean) => {
-    try {
-      const head = await fetchBlobText(fileURL);
-      const f = fileHandle.current;
-      if (head.kind === "text" && f) {
-        const r = f.merge(head.text, head.sha, { held: folded });
-        setPeerWrote(r === "blocked");
-      }
-    } catch {
-      // The change stream and the next refetch still carry it.
+  /* The visual editor reads its seed once, so a fresher read of the file
+     than the copy it opened on is folded in here instead — the same splice
+     the source editor makes from its own props. */
+  const visualSeed = useRef<{ url: string; text: string; sha?: string } | null>(null);
+  useEffect(() => {
+    if (!visual || data?.kind !== "text") return;
+    const prev = visualSeed.current;
+    visualSeed.current = { url: fileURL, text: data.text, sha: data.sha };
+    if (!prev || prev.url !== fileURL || (prev.text === data.text && prev.sha === data.sha)) return;
+    const f = fileHandle.current;
+    if (f && f.merge(data.text, data.sha) === "blocked") setPeerWrote(true);
+  }, [visual, data, fileURL]);
+  /* A restore from the rail, run and reconciled here rather than left to the
+     change stream: a missed frame would leave the open document on the text
+     from before it, and the next save would write that back over the
+     restore. A live room already holds the restored text — the hub folded it
+     in — so only the version is recorded; anything else takes it as an
+     outside write.
+
+     The whole request is fenced. No read of the file may reach the editor's
+     own fold (its initial/baseSha props) until the restored head has been
+     merged with `held`: one would splice into the room a text the room's
+     restore frame then brings again. Two reads could: one already in flight
+     before the restore (it would land after, with the old bytes), and the
+     change stream's refetch, published before POST /restore even answers.
+     So reads are cancelled before and after the request, the editor's props
+     are frozen on what it already holds for the duration, and the cache is
+     given exactly the head just merged — which the fold then recognises as
+     nothing new when the props thaw. A failed restore just thaws them. */
+  const restoring = useRef(0);
+  const [frozen, setFrozen] = useState<{ text: string; sha?: string } | null>(null);
+  /* The document this view has open right now, for a restore's follow-up
+     read to tell it is still the one it restored. */
+  const openURL = useRef(fileURL);
+  openURL.current = fileURL;
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  // Each restore's number, and the newest one whose head is merged: an older
+  // restore still retrying its read stops once a newer one has landed.
+  const restoreSeq = useRef(0);
+  const restoreMerged = useRef(0);
+  /* A committed restore whose head could not be read. The props stay frozen
+     and the next read of the file to land is merged here, with `held`, before
+     they thaw — so that read never reaches the editor's fold without it. */
+  const pendingHeld = useRef<{ url: string; folded: boolean; blob?: string; at: number } | null>(null);
+  const { dataUpdatedAt } = text;
+  // Mirrors pendingHeld for rendering: the banner and the retry listeners.
+  const [hasPendingRestore, setHasPendingRestore] = useState(false);
+  const setPendingRestore = (p: typeof pendingHeld.current) => {
+    pendingHeld.current = p;
+    setHasPendingRestore(p !== null);
+  };
+  /* The text query's own retries end; a pending restore must not end with
+     them, or the props stay frozen until something else happens to read the
+     file. So it reads again when the network comes back or the tab regains
+     focus, and the banner offers it by hand. */
+  useEffect(() => {
+    if (!hasPendingRestore) return;
+    const again = () => void refetch();
+    window.addEventListener("online", again);
+    window.addEventListener("focus", again);
+    return () => {
+      window.removeEventListener("online", again);
+      window.removeEventListener("focus", again);
+    };
+  }, [hasPendingRestore, refetch]);
+  useEffect(() => {
+    const p = pendingHeld.current;
+    if (!p) return;
+    if (p.url !== fileURL) {
+      // Another document now: the restore's is gone with its editor.
+      setPendingRestore(null);
+      if (restoring.current === 0) setFrozen(null);
+      return;
     }
-    void qc.invalidateQueries({ queryKey: ["text", fileURL] });
-    void qc.invalidateQueries({ queryKey: ["render", apiBase, path] });
+    if (data?.kind !== "text" || dataUpdatedAt <= p.at) return;
+    setPendingRestore(null);
+    const f = fileHandle.current;
+    // Held only if this read IS the restored version: a write that landed
+    // after the restore is an outside write, which the room does not hold.
+    const held = p.folded && !!p.blob && data.sha === p.blob;
+    if (f) setPeerWrote(f.merge(data.text, data.sha, { held }) === "blocked");
+    if (restoring.current === 0) setFrozen(null);
+  }, [data, dataUpdatedAt, fileURL]);
+  /* Throws only when the restore itself failed. `reconciled: false` means it
+     WAS committed but the open document could not be brought to it yet —
+     the next read of the file does that (pendingHeld). */
+  const onRestore = async (
+    post: () => Promise<RestoreAnswer>,
+  ): Promise<{ reconciled: boolean }> => {
+    const textKey = textQueryOptions(fileURL).queryKey;
+    const mine = ++restoreSeq.current;
+    if (restoring.current++ === 0 && !pendingHeld.current) {
+      const held = qc.getQueryData(textKey);
+      setFrozen(held?.kind === "text" ? { text: held.text, sha: held.sha } : null);
+    }
+    try {
+      await qc.cancelQueries({ queryKey: textKey });
+      // A refusal thaws at once (finally): nothing changed, so the props may
+      // flow again.
+      const out = await post();
+      const folded = !!out?.folded;
+      /* From here the file HAS changed, and the props stay frozen until the
+         restored head is merged: thawing on a failed read would let the next
+         refetch reach the editor's fold without `held`. `held` itself only
+         when the head read IS the restored blob — anything newer is an
+         outside write the room does not hold. A transient failure is
+         retried, backing off (1, 2, 4, 8 s); a refusal (403, 404) is an
+         answer and is not. Giving up hands the merge to the next read that
+         lands (pendingHeld). The loop also ends when this document is gone,
+         or a newer restore has already merged its own head. */
+      let reconciled = true;
+      for (let attempt = 0; ; attempt++) {
+        if (!mounted.current || openURL.current !== fileURL || restoreMerged.current > mine) break;
+        await qc.cancelQueries({ queryKey: textKey });
+        try {
+          const head = await fetchBlobText(fileURL);
+          if (!mounted.current || openURL.current !== fileURL || restoreMerged.current > mine) break;
+          const f = fileHandle.current;
+          if (head.kind === "text" && f) {
+            const held = folded && !!out?.blob && head.sha === out.blob;
+            setPeerWrote(f.merge(head.text, head.sha, { held }) === "blocked");
+          }
+          qc.setQueryData(textKey, head);
+          restoreMerged.current = Math.max(restoreMerged.current, mine);
+          setPendingRestore(null);
+          break;
+        } catch (err) {
+          if (attempt < 4 && isTransientBlobError(err)) {
+            await new Promise((r) => setTimeout(r, 1_000 * 2 ** attempt));
+            continue;
+          }
+          if (mounted.current && openURL.current === fileURL && restoreMerged.current <= mine) {
+            setPendingRestore({ url: fileURL, folded, blob: out?.blob, at: Date.now() });
+            void qc.invalidateQueries({ queryKey: textKey });
+          }
+          reconciled = false;
+          break;
+        }
+      }
+      void qc.invalidateQueries({ queryKey: ["render", apiBase, path] });
+      return { reconciled };
+    } finally {
+      // Still frozen while a pending merge waits for its read.
+      if (--restoring.current === 0 && !pendingHeld.current) setFrozen(null);
+    }
   };
   const { flushRef } = props;
   useEffect(() => {
@@ -517,24 +709,55 @@ function EditView(props: Parameters<typeof FileView>[0]) {
        user must answer (a shrink, however late the hub reports it) keeps
        them here, and so does a save that failed: leaving would destroy the
        only copy of the buffer and the retry that is still trying to land it.
-       Clean or a bystander settles at once. */
+       Clean or a bystander settles at once.
+
+       And the page Done opens is ready before it opens. The saved bytes go
+       into the ["text", url] query the reading views read, so a text, code or
+       CSV page paints them in its first frame; a Markdown page's render is
+       fetched now, while the editor is still on screen (it carries this
+       save's receipt, so whichever hub process answers has folded it), so the
+       read view opens on the new HTML instead of a skeleton or the pre-edit
+       page. A render that fails does not hold anyone here: the read view
+       retries it as it always has. */
     const flush = async () => {
       for (;;) {
-        const f = fileHandle.current;
-        if (!f) return true;
+        const cur = fileHandle.current;
+        if (!cur) return true;
         let saved = false;
         try {
-          saved = await f.saveNow();
+          saved = await cur.saveNow();
         } catch {
           return false;
         }
-        if (!saved || f.askingShrink()) return false;
-        if (fileHandle.current && fileHandle.current !== f) continue;
-        break;
+        if (!saved || cur.askingShrink()) return false;
+        if (fileHandle.current && fileHandle.current !== cur) continue;
+        const now = cur.settled();
+        if (!now.clean) continue;
+        const textKey = textQueryOptions(fileURL).queryKey;
+        const before = qc.getQueryData(textKey);
+        const changed = edited.current || !(before?.kind === "text" && before.text === now.text);
+        const seeded: BlobText = now.sha ? { kind: "text", text: now.text, sha: now.sha } : { kind: "text", text: now.text };
+        qc.setQueryData(textKey, seeded);
+        if (MD_EXT.test(path)) {
+          const render = renderQuery(apiBase, path);
+          const held = qc.getQueryState(render.queryKey);
+          if (changed || !held?.data || held.isInvalidated) {
+            try {
+              await qc.fetchQuery({ ...render, staleTime: 0, retry: false });
+            } catch {
+              // MarkdownView retries it.
+            }
+            // Typing during the render fetch must go back through saveNow()
+            // (including shrink confirmation and durable save) before Done leaves.
+            if (fileHandle.current && fileHandle.current !== cur) continue;
+            const after = cur.settled();
+            if (!after.clean || after.text !== now.text || cur.askingShrink()) continue;
+          }
+        }
+        // Confirmed in the background; the cache already shows the answer.
+        void qc.invalidateQueries({ queryKey: ["text", fileURL], refetchType: "none" });
+        return true;
       }
-      void qc.invalidateQueries({ queryKey: ["render", apiBase, path] });
-      void qc.invalidateQueries({ queryKey: ["text", fileURL] });
-      return true;
     };
     flushRef.current = flush;
     return () => {
@@ -595,6 +818,10 @@ function EditView(props: Parameters<typeof FileView>[0]) {
             : state === "error"
               ? "Not saved — still trying"
               : (collab === "live" ? "Live · " : "") + "saved" + (savedAt ? " " + agoShort(savedAt) : "");
+  // The room lists this account too, and the presence bar beside it already
+  // shows "you": drawn here as well, one person read as two ("AK AK").
+  const myName = props.me?.name;
+  const others = useMemo(() => editors.filter((n) => n !== myName), [editors, myName]);
   useEffect(() => {
     onMeta(
       <>
@@ -608,12 +835,12 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           <i aria-hidden="true" />
           {label}
         </span>
-        {editors.length > 0 && (
+        {others.length > 0 && (
           <span className="ed-editors" aria-label="People editing this file">
-            {editors.slice(0, 5).map((n) => (
+            {others.slice(0, 5).map((n) => (
               <Avatar key={n} name={n} title={n + " is editing"} />
             ))}
-            {editors.length > 5 && <span className="ed-more">+{editors.length - 5}</span>}
+            {others.length > 5 && <span className="ed-more">+{others.length - 5}</span>}
           </span>
         )}
       </>,
@@ -621,7 +848,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     // collab belongs in the deps: without it the status line keeps whatever
     // connection state it was first rendered with, so a room that came up
     // fine still reads "connecting" forever.
-  }, [state, collab, label, pending, editors, onMeta]);
+  }, [state, collab, label, pending, others, onMeta]);
   // Leaving edit mode keeps FileView mounted on the same path, so the editor
   // clears its own status rather than leaving it on a read-only page.
   useEffect(() => () => onMeta(""), [onMeta]);
@@ -637,13 +864,14 @@ function EditView(props: Parameters<typeof FileView>[0]) {
      banner (BEA network-efficiency stage 5). */
   if (error && !data)
     return <div className="empty">Could not open {path} for editing.</div>;
-  if (!data) {
-    return glimpse?.kind === "text" ? (
-      <pre className={"cm-preview cm-mode-" + (mode === "preview" ? "write" : mode)} aria-busy="true">
-        {glimpse.text}
-      </pre>
-    ) : (
-      <div className="empty">Loading…</div>
+  // Nothing cached (a cold load), or a cached copy known to be behind: the
+  // only cases that wait for the read.
+  if (!data || behind) return <FileSkeleton />;
+  if (data.kind === "too-large") {
+    return (
+      <div className="empty">
+        This file is too large to edit in the browser.
+      </div>
     );
   }
   if (data.kind !== "text") {
@@ -653,13 +881,18 @@ function EditView(props: Parameters<typeof FileView>[0]) {
       </div>
     );
   }
+  seededFor.current = fileURL;
 
   return (
     <>
-      {error && (
+      {(error || hasPendingRestore) && (
         <div id="read-stale" className="banner">
-          Could not check this file for changes just now — your work is
-          untouched and still saving. Retrying.
+          {hasPendingRestore
+            ? "The restore is saved, but this editor could not read it back yet — your work is untouched and still saving. "
+            : "Could not check this file for changes just now — your work is untouched and still saving. Retrying. "}
+          <button type="button" className="btn-link" onClick={() => void refetch()}>
+            Retry now
+          </button>
         </div>
       )}
       {peerWrote && (
@@ -705,7 +938,8 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           me={props.me?.name ?? ""}
           typing={typing}
           versions={!!props.projectId}
-          onRestored={onRestored}
+          onRestore={onRestore}
+          onJumpToLine={mode === "preview" ? undefined : info?.jumpToLine}
         />
       )}
       {loadFailed.failed ? (
@@ -717,7 +951,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
         </div>
       ) : visual ? (
         !VisualEdit || !frameURL ? (
-          <div className="empty">Loading editor…</div>
+          <FileSkeleton />
         ) : (
         /* HTML gets the rendered page, clicked directly. Same file, same
            shared document, same save — a different surface onto it. Source
@@ -744,7 +978,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
         />
         )
       ) : !Editor ? (
-        <div className="empty">Loading editor…</div>
+        <FileSkeleton />
       ) : (
         <div className="ed-surface" hidden={mode === "preview"}>
         <Editor
@@ -756,8 +990,8 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           onPending={setPending}
           handle={fileHandle}
           path={path}
-          initial={data.text}
-          baseSha={data.sha}
+          initial={frozen ? frozen.text : data.text}
+          baseSha={frozen ? frozen.sha : data.sha}
           onConflictCopy={onConflictCopy}
           /* Someone wrote the file while it was open here. Merged, it is
              already on screen and only worth a word; refused, it is the
@@ -849,6 +1083,13 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
     onRendered,
   } = props;
   const { data: doc, error } = useQuery(renderQuery(apiBase, path, version));
+  // Once the page is up, warm its source in the background: pressing Edit
+  // then mounts the editor on bytes already in the cache, in one frame.
+  const qc = useQueryClient();
+  const docLoaded = !!doc;
+  useEffect(() => {
+    if (docLoaded && !version) prefetchEditText(qc, apiBase, path);
+  }, [docLoaded, version, qc, apiBase, path]);
 
   // Rewrite the HTML BEFORE rendering (relative image sources, external
   // link targets) rather than patching the live DOM afterwards: React owns
@@ -984,11 +1225,13 @@ function SecretBadge({ findings }: { findings?: SecretFinding[] }) {
 
 /* Delegated click handling for rendered-markdown links: wikilinks (already
    carrying a real in-app href, see transformHTML) and relative links route
-   in-app on a plain click, everything else keeps its native behavior. */
+   in-app on a plain click, everything else keeps its native behavior. A
+   `#fragment` rides along as the second argument, split off BEFORE the path
+   is resolved: `other.md#setup` is the file `other.md`, scrolled to `setup`. */
 export function handleLinkClick(
   e: React.MouseEvent,
   p: string,
-  openFile: (path: string) => void,
+  openFile: (path: string, hash?: string) => void,
 ) {
   const a = (e.target as HTMLElement).closest("a");
   if (!a || !(e.currentTarget as HTMLElement).contains(a)) return;
@@ -1005,10 +1248,19 @@ export function handleLinkClick(
   const wiki = a.getAttribute("data-wiki");
   if (wiki !== null) {
     e.preventDefault();
-    openFile(wiki);
+    openFile(wiki, a.getAttribute("data-wiki-hash") || undefined);
   } else if (!/^([a-z]+:|\/|#)/i.test(href)) {
     e.preventDefault();
-    openFile(joinPath(dir, decodeURIComponent(href)));
+    const h = href.indexOf("#");
+    const rawPath = h < 0 ? href : href.slice(0, h);
+    const hash = h < 0 ? "" : href.slice(h);
+    let rel = rawPath;
+    try {
+      rel = decodeURIComponent(rawPath);
+    } catch {
+      // a literal % in a file name: take the href as written
+    }
+    openFile(joinPath(dir, rel), hash.length > 1 ? hash : undefined);
   }
 }
 
@@ -1045,10 +1297,20 @@ export function transformHTML(
     // middle-click and open-in-new-tab all read the attribute, and only a
     // plain click ever reaches the handler above.
     if (href.startsWith("wiki:")) {
-      const hit = resolveWiki(decodeURIComponent(href.slice(5)), files);
-      if (hit) {
-        a.setAttribute("href", urlForPath(hit.path, projectId));
+      let target = href.slice(5);
+      try {
+        target = decodeURIComponent(target);
+      } catch {
+        // malformed escape: match the target as written
+      }
+      const hit = resolveWikiTarget(target, files);
+      if (hit && !hit.path) {
+        // [[#Heading]]: a heading of this document, an ordinary in-page link.
+        a.setAttribute("href", hit.fragment);
+      } else if (hit) {
+        a.setAttribute("href", urlForPath(hit.path, projectId) + hit.fragment);
         a.setAttribute("data-wiki", hit.path);
+        if (hit.fragment) a.setAttribute("data-wiki-hash", hit.fragment);
       } else {
         // No file matches: an unusable "wiki:" string must not survive the
         // mount, so the anchor loses its href and says why on hover.
@@ -1113,32 +1375,35 @@ function LoadError({ version, err }: { version?: string; err: Error }) {
 function TextView(
   props: Parameters<typeof FileView>[0] & { fileURL: string; delim?: string },
 ) {
-  const { path, version, fileURL, delim, onRendered } = props;
-  const { data, error } = useQuery({
-    queryKey: ["text", fileURL],
-    queryFn: async () => {
-      const r = await fetch(fileURL);
-      if (!r.ok) throw new Error(await r.text());
-      return r.text();
-    },
-    retry: version ? false : undefined,
-  });
+  const { apiBase, path, version, fileURL, delim, onRendered } = props;
+  // The same BlobText query the editor, Copy and SniffView read: one shape
+  // under ["text", url], whoever filled it.
+  const { data, error } = useQuery(textQueryOptions(fileURL, !!version));
   useEffect(() => {
-    if (data != null) onRendered?.();
+    if (data) onRendered?.();
   }, [data, onRendered]);
+  const text = data?.kind === "text" ? data.text : null;
   // null = not usefully delimited (or no delimiter asked for): fall through
   // to the plain-text view below.
   const csv = useMemo(
-    () =>
-      delim && data != null ? parseDelimited(data, delim, CSV_ROWS) : null,
-    [data, delim],
+    () => (delim && text != null ? parseDelimited(text, delim, CSV_ROWS) : null),
+    [text, delim],
   );
   if (error) return <LoadError version={version} err={error as Error} />;
-  if (data == null) return null;
+  if (!data) return <FileSkeleton />;
+  if (data.kind !== "text") {
+    return (
+      <FileCard apiBase={apiBase} path={path} version={version} fileURL={fileURL}>
+        {data.kind === "too-large"
+          ? `Too large to preview (${humanSize(data.size)}).`
+          : "No preview for this file type."}
+      </FileCard>
+    );
+  }
   if (csv) return <CsvTable csv={csv} key={path} />;
   return (
     <pre className="plain" key={path}>
-      {data}
+      {data.text}
     </pre>
   );
 }

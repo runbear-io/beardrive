@@ -47,6 +47,9 @@ export interface TreeActions {
   history?: (path: string) => void;
   insights?: (path: string) => void;
   remove?: (path: string) => void;
+  /** Start loading what opening this file will need: on hover, its content;
+      on press (`press`), the editor too when this reader can write. */
+  prefetch?: (path: string, press: boolean) => void;
 }
 
 // The two row menus, ⋯ (a DropdownMenu anchored to its button) and right-click
@@ -133,6 +136,32 @@ function activateOnKey(fn: () => void) {
   };
 }
 
+/* Hover and press prefetch for file rows. A hover only counts once the
+   pointer rests (~40 ms), so sweeping across a list does not fetch every
+   row it crosses; a press starts at once, a click's worth ahead of the
+   navigation it is about to cause. */
+export function useHoverPrefetch(prefetch?: (path: string, press: boolean) => void) {
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => clearTimeout(timer.current ?? undefined), []);
+  return {
+    enter: (path: string) => {
+      if (!prefetch) return;
+      clearTimeout(timer.current ?? undefined);
+      timer.current = setTimeout(() => prefetch(path, false), 40);
+    },
+    leave: () => {
+      clearTimeout(timer.current ?? undefined);
+      timer.current = null;
+    },
+    press: (path: string) => {
+      if (!prefetch) return;
+      clearTimeout(timer.current ?? undefined);
+      timer.current = null;
+      prefetch(path, true);
+    },
+  };
+}
+
 export function FileTree(props: {
   root: Node | undefined;
   expanded: Set<string>;
@@ -165,6 +194,7 @@ export function FileTree(props: {
   const noteMenuOpen = () => {
     menuScrollTop.current = scrollRef.current?.scrollTop ?? 0;
   };
+  const hover = useHoverPrefetch(actions.prefetch);
 
   const rows = useMemo(
     () => buildRows(root, { expanded, showAll, stats, keep: currentPath, order }),
@@ -318,7 +348,10 @@ export function FileTree(props: {
                   onPointerDown={(e) => {
                     pointerType.current = e.pointerType;
                     pressOpenedMenu.current = null;
+                    if (!n.dir) hover.press(n.path);
                   }}
+                  onPointerEnter={n.dir ? undefined : () => hover.enter(n.path)}
+                  onPointerLeave={n.dir ? undefined : hover.leave}
                   onContextMenu={() => {
                     if (pointerType.current === "touch") pressOpenedMenu.current = n.path;
                   }}

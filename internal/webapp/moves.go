@@ -365,9 +365,12 @@ func (s *Server) handleResolve(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, "missing ?path=", http.StatusBadRequest)
 		return
 	}
-	snap, err := v.snapshot(r.Context())
+	// Receipt-checked like lookup: a rename made through another hub process
+	// must resolve here before this process's refresh catches up.
+	w.Header().Add("Vary", receiptHeader)
+	snap, err := v.snapshotWithReceipts(r.Context(), r.Header)
 	if err != nil {
-		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
+		snapshotErr(w, err)
 		return
 	}
 	// This door does not go through lookup, so it needs the folder filter

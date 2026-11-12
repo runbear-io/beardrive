@@ -2,8 +2,8 @@ import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { useQueryClient } from "@tanstack/react-query";
-import { api, postJSON } from "../api/http";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, getJSON, postJSON } from "../api/http";
 import { modalConfirm, modalPrompt } from "../modal";
 import { copyText } from "../util";
 import { toast } from "../toast";
@@ -410,6 +410,15 @@ function People({ project, org }: { project: Project; org: Org | null }) {
   const qc = useQueryClient();
   const { data, error } = usePermissions(project.id);
   const isAdmin = atLeast(project.perm, "admin");
+  // App principals show as their name, not app:<id>. Same key and shape as
+  // OrgAdmin's Apps list, so either view primes the other; any member may list.
+  const { data: apps } = useQuery({
+    queryKey: ["apps", org?.id],
+    queryFn: () => getJSON<{ apps: Array<{ name: string; principal: string }> }>(`/api/orgs/${org!.id}/apps`),
+    select: (d) => d.apps || [],
+    enabled: !!org,
+    staleTime: 60_000,
+  });
   const reload = () => {
     qc.invalidateQueries({ queryKey: ["permissions", project.id] });
     qc.invalidateQueries({ queryKey: ["projects"] });
@@ -536,10 +545,13 @@ function People({ project, org }: { project: Project; org: Org | null }) {
           <div className="admin-list">
             {rows.map((g) => {
               const isOwner = "owner" in g;
+              const isApp = g.email.startsWith("app:");
+              const name = isApp ? apps?.find((a) => a.principal === g.email)?.name : undefined;
               return (
                 <div className="admin-item" key={g.email}>
                   <span className="ai-main" title={g.email}>
-                    {g.email}
+                    {name ? `${name} (App)` : g.email}
+                    {name && <span className="ai-tag"> {g.email}</span>}
                     {perms.creator && g.email.toLowerCase() === perms.creator.toLowerCase() && (
                       <span className="ai-tag"> (creator)</span>
                     )}
@@ -551,7 +563,9 @@ function People({ project, org }: { project: Project; org: Org | null }) {
                       <select
                         aria-label={`Access for ${g.email}`}
                         disabled={!isAdmin}
-                        value={g.level}
+                        // The hub refuses admin for an app and reads an old
+                        // admin grant as write (perms.go), so show what it is.
+                        value={isApp && g.level === "admin" ? "write" : g.level}
                         onChange={(e) =>
                           run(
                             () =>
@@ -562,7 +576,7 @@ function People({ project, org }: { project: Project; org: Org | null }) {
                           )
                         }
                       >
-                        {LEVELS.map((l) => (
+                        {(isApp ? LEVELS.filter((l) => l.value !== "admin") : LEVELS).map((l) => (
                           <option key={l.value} value={l.value}>
                             {l.label}
                           </option>

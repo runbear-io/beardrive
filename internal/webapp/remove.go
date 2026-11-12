@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 )
@@ -45,8 +46,9 @@ func (r *RemoteSource) removeIfBase(ctx context.Context, p string, cb *commitBas
 	}}, cb)
 }
 
-// handleRemove serves POST /api/p/<id>/remove {path}.
+// handleRemove serves POST /api/p/<id>/remove {path, if_match?}.
 func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request) {
+	r, sink := withReceiptSink(r)
 	up := s.gateUpload(v, w) // a read-only hub stays read-only
 	if up == nil {
 		return
@@ -56,11 +58,23 @@ func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req struct {
-		Path string `json:"path"`
+		Path    string `json:"path"`
+		IfMatch string `json:"if_match"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	ifMatch := req.IfMatch
+	if ifMatch == "" {
+		ifMatch = r.Header.Get("If-Match")
+	}
+	if ifMatch != "" {
+		ifMatch = strings.Trim(strings.TrimPrefix(ifMatch, "W/"), `"`)
+		if !blobRe.MatchString(ifMatch) {
+			http.Error(w, "if_match must be 64 lowercase hex chars", http.StatusBadRequest)
+			return
+		}
 	}
 	p, err := cleanUploadPath(req.Path)
 	if err != nil {
@@ -70,18 +84,29 @@ func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request)
 	if !s.writablePath(w, r, p) {
 		return
 	}
-	// The volume snapshot is the same map the tree and viewer serve, so the
-	// API agrees with what the caller was looking at. A stale-snapshot 404 is
-	// a harmless retry; a second, hand-rolled replay could disagree and
-	// delete the wrong thing.
+	// Match the version the caller viewed, refreshing a sibling's cached fold
+	// once before treating a mismatch as a concurrent edit.
 	snap, err := v.snapshotHaving(r.Context(), p)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	fi, ok := snap.files[p]
+	if ifMatch != "" && (!ok || fi.Blob != ifMatch) {
+		v.invalidate()
+		snap, err = v.snapshotHaving(r.Context(), p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		fi, ok = snap.files[p]
+	}
 	if !ok {
 		http.Error(w, "no such file", http.StatusNotFound)
+		return
+	}
+	if ifMatch != "" && fi.Blob != ifMatch {
+		http.Error(w, "file has changed since you viewed it", http.StatusConflict)
 		return
 	}
 	// A delete stores no bytes — but an org whose plan is blocked must still
@@ -105,5 +130,7 @@ func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request)
 	s.dataWrote(r.Context(), projectID(r))
 	s.captureChange(r, "browser", 0, 1)
 	s.publishChange(r, "browser", []string{p}, 0, 1)
-	writeJSON(w, map[string]any{"ok": true, "path": p})
+	resp := map[string]any{"ok": true, "path": p}
+	stampReceipt(w, resp, sink.String())
+	writeJSON(w, resp)
 }

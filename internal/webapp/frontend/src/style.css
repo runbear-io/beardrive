@@ -1,7 +1,7 @@
 /* BearDrive viewer — near-black, hairline-crafted, honey accent.
    Design language: Linear-grade restraint; the one accent (honey) is spent
    only on active state, the live/brand mark, and the palette selection. */
-:root {
+:root, :root[data-theme="dark"] {
   /* Dark is the default theme; :root[data-theme="light"] below overrides it
      (src/lib/theme.ts sets the attribute). Without this, anything the UA
      paints itself — scrollbars, autofill, select/date popups, and any control
@@ -16,6 +16,18 @@
   --border: rgba(255,255,255,.07);
   --border-2: rgba(255,255,255,.11);
   --code-bg: #0d0f12;
+
+  /* CodeMirror syntax: ≥7.4:1 on the dark editor ground (#0a0b0d).
+     Dark is the default; the light theme overrides these below. */
+  --cm-syn-keyword: #f472b6;
+  --cm-syn-string: #86efac;
+  --cm-syn-number: #fbbf24;
+  --cm-syn-property: #93c5fd;
+  --cm-syn-func: #fcd34d;
+  --cm-syn-type: #d2a8ff;
+  --cm-syn-comment: #9ca3af;
+  --cm-syn-meta: #fdba74;
+  --cm-syn-url: #60a5fa;
 
   --text: #eef0f3;
   --text-dim: #9aa0a9;        /* AA on both grounds */
@@ -103,6 +115,17 @@
   --border: rgba(0,0,0,.09);
   --border-2: rgba(0,0,0,.14);
   --code-bg: #f5f6f8;
+
+  /* CodeMirror syntax: ≥6.2:1 on the light editor ground (#ffffff). */
+  --cm-syn-keyword: #9d174d;
+  --cm-syn-string: #166534;
+  --cm-syn-number: #92400e;
+  --cm-syn-property: #1d4ed8;
+  --cm-syn-func: #854d0e;
+  --cm-syn-type: #6b21a8;
+  --cm-syn-comment: #59616e;
+  --cm-syn-meta: #9a3412;
+  --cm-syn-url: #1e40af;
 
   --text: #1b1d21;
   --text-dim: #565c66;
@@ -1881,17 +1904,16 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
    the editor and the rendered view are visibly the same document, not two
    apps. Only the pieces CM needs told explicitly are set. */
 .cm-host { height: 100%; }
-/* Editor.tsx's stand-in while the co-editing room answers: the same text in
-   the same type as the editor it is about to become. */
-.cm-preview {
-  margin: 0;
-  padding: 12px 2px 0 6px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--text);
-  font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+/* A text-styled action inside a banner (EditView's "Retry now"). */
+.btn-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
 }
-.cm-preview.cm-mode-write { font-family: var(--ui); font-size: 15px; line-height: 1.75; }
 .cm-host .cm-editor { height: 100%; background: transparent; color: var(--text); }
 .cm-host .cm-editor.cm-focused { outline: none; }
 .cm-host .cm-scroller {
@@ -2494,3 +2516,7 @@ a.fe-path:hover { color: var(--accent-bright); }
 .sd-ok { color: var(--add); }
 .sd-bad { color: var(--del); }
 .sd-actions { justify-content: space-between; }
+
+/* The checkbox is the task marker; a bullet beside it is a second marker. */
+.fv-prose li:has(> input[type="checkbox"]),
+.fv-prose .task-list-item { list-style: none; }

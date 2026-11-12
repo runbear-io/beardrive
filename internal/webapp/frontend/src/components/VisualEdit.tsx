@@ -1,10 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Y from "yjs";
 import { openSharedFile, type SaveState, type SharedFile } from "../lib/sharedfile";
 import { diffSplices, merge3PreferRight } from "../lib/merge3";
 import { frameChannel, saveLocked } from "../lib/frameflush";
 import { type CollabStatus } from "../lib/collab";
 import { askShrink, withdrawShrink } from "./ShrinkDialog";
+import { withReceipt } from "../hooks/useBlob";
 
 /* Click-to-edit for a synced HTML file: the app's half.
 
@@ -74,6 +75,16 @@ async function sha256Hex(s: string): Promise<string | null> {
     return null;
   }
 }
+
+/* Automatic re-renders after the frame's ranges stopped describing the
+   document, per (project, file, base version). A page whose served bytes
+   never match the shared document — a hub process serving an older fold, a
+   script that rewrites the source — used to reload as fast as it could load
+   (55 times in 7s). Each retry now waits twice as long as the last, and past
+   the cap the editor stops and says so. Module-level so a remount (each
+   reload is one) does not reset the count. */
+const MISMATCH_BACKOFF_MS = [250, 500, 1000, 2000, 4000];
+const mismatchReloads = new Map<string, number>();
 
 export function VisualEdit({
   apiBase,
@@ -202,7 +213,7 @@ export function VisualEdit({
        without the reader ever knowing. Only if that also fails is there
        anything worth telling them. */
     const retryTimer = setTimeout(() => {
-      if (!anchored && attempt.current < 1) {
+      if (!anchored && attempt.current < 1 && !mismatchReloads.has(mismatchKey())) {
         attempt.current++;
         reload();
       }
@@ -297,6 +308,27 @@ export function VisualEdit({
       appPort?.close();
       appPort = null;
       setGen((g) => g + 1);
+    };
+    const mismatchKey = () => `${apiBase}\0${path}\0${shaRef.current ?? ""}`;
+    let mismatchTimer: ReturnType<typeof setTimeout> | undefined;
+    // A reload because the frame and the document disagree: backed off and capped.
+    const mismatchReload = () => {
+      setArmed(false);
+      disarmExitWorker();
+      if (mismatchTimer !== undefined) return;
+      const k = mismatchKey();
+      const n = mismatchReloads.get(k) ?? 0;
+      if (n >= MISMATCH_BACKOFF_MS.length) {
+        setWarning(
+          "This page keeps changing while it loads, so click-to-edit could not attach. Reload the page to try again, or use Edit source.",
+        );
+        return;
+      }
+      mismatchReloads.set(k, n + 1);
+      mismatchTimer = setTimeout(() => {
+        mismatchTimer = undefined;
+        reload();
+      }, MISMATCH_BACKOFF_MS[n]);
     };
     const armExitWorker = (renderText: string) => {
       if (!exitWorker || workerDisarmed || !appPort) return;
@@ -418,7 +450,7 @@ export function VisualEdit({
           } else {
             anchors.clear();
             anchored = false;
-            if (prevText !== nextText) reload();
+            if (prevText !== nextText) mismatchReload();
           }
           prev.destroy();
         }
@@ -527,7 +559,7 @@ export function VisualEdit({
       // and it fails closed on any future way the two could drift apart.
       if (ranges.some((r) => r.end > text.length || r.start > r.end)) {
         ranges = null;
-        reload();
+        mismatchReload();
         return;
       }
       /* The ranges describe the document the SERVER served. If this side holds
@@ -543,7 +575,7 @@ export function VisualEdit({
         digest !== null ? digest !== srcHash : srcLen >= 0 && text.length !== srcLen;
       if (moved) {
         ranges = null;
-        reload();
+        mismatchReload();
         return;
       }
       anchors.clear();
@@ -626,7 +658,7 @@ export function VisualEdit({
         if ((sWhole && a.span < sText.length) || sSpan > a.span * 4 + 256) {
           anchors.clear();
           anchored = false;
-          reload();
+          mismatchReload();
           return false;
         }
         const sLive = sText.toString().slice(sFrom.index, sTo.index);
@@ -674,7 +706,7 @@ export function VisualEdit({
         // The ranges cannot be trusted any more; re-render and re-anchor.
         anchors.clear();
         anchored = false;
-        reload();
+        mismatchReload();
         return false;
       }
 
@@ -739,6 +771,7 @@ export function VisualEdit({
       channel.close();
       clearTimeout(retryTimer);
       clearTimeout(stuckTimer);
+      clearTimeout(mismatchTimer);
       clearTimeout(stageTimer);
       file.collab.text.unobserve(retry);
       /* Torn down a beat later, so a patch already in flight still lands.
@@ -767,6 +800,12 @@ export function VisualEdit({
     // same trap Editor.tsx documents, and the reason they all go through a ref.
   }, [apiBase, path, gen]);
 
+  // Receipts read once per render generation: a save made from this very
+  // frame records a new one, and re-pointing the live iframe at it would
+  // reload the page under the typist.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const src = useMemo(() => withReceipt(fileURL + (fileURL.includes("?") ? "&" : "?") + "edit=1", apiBase), [apiBase, fileURL, gen]);
+
   return (
     <>
       {warning && (
@@ -788,7 +827,7 @@ export function VisualEdit({
         // allow-same-origin here would hand every synced page the hub's
         // session, which is the wall this whole feature had to not touch.
         sandbox="allow-scripts"
-        src={fileURL + (fileURL.includes("?") ? "&" : "?") + "edit=1"}
+        src={src}
         title={path}
       />
     </>

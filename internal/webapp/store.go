@@ -1444,8 +1444,8 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		// landed: a client that refetches on the event finds the new ops.
 		puts, deletes := countOps(ops, storedMax)
 		if ev, ok := changeEventFor(r, "sync", newOpPaths(ops, storedMax), puts, deletes); ok {
+			ev.Receipt = newOpsReceipt(ops, storedMax)
 			project := projectID(r)
-			// The data index follows the fold this push just landed in.
 			refreshThen(func() {
 				s.events().publish(project, ev)
 				s.dataApplyAsync(project)
@@ -1779,6 +1779,7 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 	defer refreshThen(func() {})
 	puts, deletes := countOps(tailOps, storedMax)
 	if ev, ok := changeEventFor(r, "sync", newOpPaths(tailOps, storedMax), puts, deletes); ok {
+		ev.Receipt = newOpsReceipt(tailOps, storedMax)
 		projectID := projectID(r)
 		refreshThen(func() {
 			s.events().publish(projectID, ev)

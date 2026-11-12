@@ -1,11 +1,13 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import { diffBase } from "../lib/activity";
-import { diffText } from "../lib/diff";
+import { diffText, type DiffLine } from "../lib/diff";
 import { blobURL, useBlobText } from "../hooks/useBlob";
 import type { Node } from "../api/types";
 import { handleLinkClick, transformHTML } from "./FileView";
+import { navigate } from "../nav";
+import { urlForPath } from "../router";
 
 /* What actually changed between one version of a file and the one before
    it: a line diff, computed in the browser from the two blobs the history
@@ -24,6 +26,62 @@ function Downloads({ apiBase, path, prev, cur }: { apiBase: string; path: string
       <a href={blobURL(apiBase, prev, name, true)}>download previous</a>
       <a href={blobURL(apiBase, cur, name, true)}>download this version</a>
     </span>
+  );
+}
+
+// A separate keyed body gives each pair of versions its own expanded folds.
+// Only context is hidden; the original line numbers and change counts remain.
+function DiffLines({ lines }: { lines: DiffLine[] }) {
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  const rows: ReactNode[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.op === "=") {
+      let end = i + 1;
+      while (end < lines.length && lines[end].op === "=") end++;
+      if (end - i > 8 && !expanded.has(i)) {
+        const start = i;
+        const from = i + 3;
+        const to = end - 3;
+        for (let k = i; k < from; k++) rows.push(lineRow(lines[k], k));
+        rows.push(
+          <div key={"fold-" + start} className="dv-line dv-fold">
+            <button
+              type="button"
+              className="diff-fold"
+              aria-expanded={false}
+              style={{ width: "100%", minHeight: 32, whiteSpace: "normal", background: "var(--hover)", color: "var(--accent-ink)", border: 0, font: "inherit", cursor: "pointer" }}
+              onClick={(ev) => {
+                ev.stopPropagation();
+                setExpanded((old) => new Set([...old, start]));
+              }}
+            >
+              Show {to - from} unchanged lines
+            </button>
+          </div>,
+        );
+        for (let k = to; k < end; k++) rows.push(lineRow(lines[k], k));
+        i = end - 1;
+        continue;
+      }
+      // An expanded run must not be re-folded at its second line.
+      for (let k = i; k < end; k++) rows.push(lineRow(lines[k], k));
+      i = end - 1;
+      continue;
+    }
+    rows.push(lineRow(l, i));
+  }
+  return <>{rows}</>;
+}
+
+function lineRow(l: DiffLine, i: number) {
+  return (
+    <div key={i} className={"dv-line dv-" + (l.op === "=" ? "ctx" : l.op === "+" ? "ins" : "rm")}>
+      <span className="dv-n">{l.an ?? ""}</span>
+      <span className="dv-n">{l.bn ?? ""}</span>
+      <span className="dv-mark">{l.op === "=" ? " " : l.op}</span>
+      <span className="dv-text">{l.line || " "}</span>
+    </div>
   );
 }
 
@@ -72,14 +130,7 @@ export function DiffView({
         {add === 0 && del === 0 && <span className="dv-same">No line changes</span>}
       </div>
       <div className="dv-body">
-        {lines.map((l, i) => (
-          <div key={i} className={"dv-line dv-" + (l.op === "=" ? "ctx" : l.op === "+" ? "ins" : "rm")}>
-            <span className="dv-n">{l.an ?? ""}</span>
-            <span className="dv-n">{l.bn ?? ""}</span>
-            <span className="dv-mark">{l.op === "=" ? " " : l.op}</span>
-            <span className="dv-text">{l.line || " "}</span>
-          </div>
-        ))}
+        <DiffLines key={prev + ":" + cur} lines={lines} />
       </div>
     </div>
   );
@@ -210,7 +261,10 @@ function Rendered({
     <div
       className="md dtabs-md"
       dangerouslySetInnerHTML={{ __html: html }}
-      onClick={(e) => handleLinkClick(e, path, onOpenFile)}
+      onClick={(e) => handleLinkClick(e, path, (target, hash) => {
+        if (!hash) return onOpenFile(target);
+        navigate(urlForPath(target, projectId, undefined, new URLSearchParams(location.search).has("full")) + hash);
+      })}
     />
   );
 }

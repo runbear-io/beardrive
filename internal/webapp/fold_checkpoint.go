@@ -527,6 +527,7 @@ func (r *RemoteSource) restoreFoldCheckpoint(ctx context.Context, keep []remote.
 	r.ckptMu.Unlock()
 	r.foldMu.Lock()
 	r.foldFP, r.foldFiles, r.foldTombstones, r.foldMoves, r.foldJournals = fp, files, tombs, moves, updatedMeta
+	r.foldCov = lazyCoverage(files, tombs) // with its files, never after them
 	r.foldMu.Unlock()
 	if grew && r.shouldRefreshCheckpoint(updatedMeta) {
 		r.scheduleFoldCheckpointFromMeta(fp, updatedMeta, files, tombs, moves)
@@ -559,6 +560,7 @@ func (r *RemoteSource) tryIncrementalFold(ctx context.Context, keep []remote.Obj
 	}
 	r.foldMu.Lock()
 	r.foldFP, r.foldFiles, r.foldTombstones, r.foldMoves, r.foldJournals = fp, files, tombs, prevMoves, updatedMeta
+	r.foldCov = lazyCoverage(files, tombs) // with its files, never after them
 	r.foldMu.Unlock()
 	if grew && r.shouldRefreshCheckpoint(updatedMeta) {
 		r.scheduleFoldCheckpointFromMeta(fp, updatedMeta, files, tombs, prevMoves)

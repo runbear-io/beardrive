@@ -275,7 +275,6 @@ still applies; the answer is the sha the room now stands on and its text. A
 room this request had to open is closed again once written.
 */
 func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Request) {
-	_ = v
 	path, err := cleanUploadPath(r.URL.Query().Get("path"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -513,7 +512,9 @@ func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Req
 			_, _ = w.Write(pw.body.Bytes())
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "path": path, "sha": s.rooms().base(room), "text": cur, "parked": parked})
+		resp := map[string]any{"ok": true, "path": path, "sha": s.rooms().base(room), "text": cur, "parked": parked}
+		stampReceipt(w, resp, pw.hdr.Get(receiptHeader)) // the copy's own write
+		writeJSON(w, resp)
 		return
 	}
 	if conflict || tooLarge {
@@ -568,6 +569,15 @@ func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	// The receipt of the op that made the file say sha, when syncDurable
+	// proved it on storage and this process's fold already names that op: a
+	// reader on another hub process echoing it then sees the synced text.
+	receipt := ""
+	if sha != "" && v != nil {
+		if fi, ok := s.headFile(ctx, v, path); ok && fi.Blob == sha {
+			receipt = fileReceipt(fi)
+		}
+	}
 	if sha == "" {
 		sha = s.rooms().base(room)
 	}
@@ -584,6 +594,7 @@ func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Req
 		   of the client re-inserting the same lines a second time. */
 		resp["update"] = base64.StdEncoding.EncodeToString(synced)
 	}
+	stampReceipt(w, resp, receipt)
 	writeJSON(w, resp)
 }
 
@@ -1443,7 +1454,8 @@ func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) (f
 	if snapshotSeam != nil {
 		snapshotSeam(room)
 	}
-	cur, curSha, have, err := s.roomBytes(ctx, room)
+	cur, curFile, have, err := s.roomFile(ctx, room)
+	curSha, curWin := curFile.Blob, fileWin(curFile, path)
 	if ctx.Err() != nil {
 		return
 	}
@@ -1519,7 +1531,15 @@ func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) (f
 	if s.apiMux == nil {
 		return
 	}
-	if have && curSha != base && s.contains(ctx, doc, project, curSha) {
+	head := s.roomHeadRecord(ctx, project, path)
+	// A restore can point at a blob this room authored before. Its stored
+	// Yjs state is then a subset of doc too, but that is not proof that this
+	// journal winner is our snapshot: a newer op for a different blob than
+	// the recorded head proves an outside write AFTER that snapshot. Keep
+	// the old base, so the conditional put refuses and reconcile splices the
+	// outside version into the live room instead of overwriting the restore.
+	outside := head.Win != "" && curWin != "" && curWin > head.Win && curSha != head.SHA
+	if have && curSha != base && !outside && s.contains(ctx, doc, project, curSha) {
 		// The head was written by this room on another process — the
 		// previous lease holder — and the relay has already delivered every
 		// item it wrote, so build on it instead of parking beside it.

@@ -224,6 +224,8 @@ func (s *Server) handleFrame(v *volume, w http.ResponseWriter, r *http.Request) 
 // handleRaw serves one file under a frame token's folder, inline, exactly as
 // /file?path= would serve it to the token's reader.
 func (s *Server) handleRaw(v *volume, w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Add("Vary", receiptHeader)
 	c, ok := s.verifyFrame(r.Context(), r.PathValue("token"))
 	if !ok {
 		http.Error(w, "this page link has expired; reload the page", http.StatusUnauthorized)
@@ -236,8 +238,8 @@ func (s *Server) handleRaw(v *volume, w http.ResponseWriter, r *http.Request) {
 	}
 	// serveBlob reads its target from ?path=, so the one in the URL path is
 	// written over whatever the query says. The view flags (comment, edit,
-	// print) pass through: they change what the page is wrapped in, never
-	// what it may read.
+	// print) and the ?r= receipt pass through: they change what the page is
+	// wrapped in, or how fresh a fold answers, never what it may read.
 	q := r.URL.Query()
 	q.Set("path", p)
 	r2 := r.Clone(r.Context())

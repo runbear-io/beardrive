@@ -82,9 +82,13 @@ classDiagram
         -refresh time.Duration
         -snap *snapshot (files + moves + encoded tree)
         -gen, snapGen, staleThrough, covers, accepted
+        -unseen, shareMiss bounded negative receipt/share caches
         +snapshot(ctx)
         +current(ctx) never behind a background rebuild
         +snapshotHaving(ctx, p) current() when p is missing
+        +snapshotForRequest(r) header and query receipts
+        +snapshotWithReceipts(ctx, headers) receipt-fenced snapshot
+        +snapshotForShareMiss(ctx, token, seen, found) coalesced fresh fold
         +beginRefresh() pending until refreshThen
         +refreshThen(done) rebuild in background, then done
         +invalidate()
@@ -93,6 +97,8 @@ classDiagram
     class snapshot {
         -files map path→FileInfo
         -moves moveIndex
+        -cov *seqCoverage (the same fold as files)
+        +coversReceipt(journalReceipt) bool
         -tree map slim→encodedJSON
         +fullTree(slim) encodedJSON
     }
@@ -103,7 +109,30 @@ classDiagram
     }
     volume --> snapshot : holds
     snapshot --> encodedJSON : caches the full tree
-    note for snapshot "Immutable once built, so the /tree answer for a caller who may see every file is encoded once per snapshot — JSON, gzip and ETag — and served as stored (the gzip middleware passes a body that already carries Content-Encoding). A refresh whose fold is unchanged keeps the SAME snapshot, so the encoded tree survives it. Callers with hidden paths still get a per-request filtered tree"
+    note for snapshot "Immutable once built, so the /tree answer for a caller who may see every file is encoded once per snapshot — JSON, gzip and ETag — and served as stored (the gzip middleware passes a body that already carries Content-Encoding). An unchanged fold keeps its snapshot unless coverage improves; a coverage-only replacement preserves the generation and encoded trees. Callers with hidden paths still get a per-request filtered tree"
+    class seqCoverage {
+        -once sync.Once
+        -build lazy files+tombstones lower bound
+        -seqs map device→highest folded seq
+        +covers(journalReceipt) bool
+    }
+    class journalReceipt {
+        -dev string
+        -seq int64
+        +String() device:seq
+    }
+    class receiptSink {
+        -mu sync.Mutex
+        -receipt journalReceipt
+        +String() last appended op
+    }
+    snapshot o-- seqCoverage : coverage travels with its files
+    seqCoverage ..> journalReceipt : per-device sequence fence
+    volume ..> journalReceipt : parse header and query, refold once if uncovered
+    Server ..> receiptSink : request context, stampReceipt on write responses
+    RemoteSource ..> receiptSink : appendOpsIf records the appended op
+    note for seqCoverage "server.go — a full fold records exact per-journal coverage; checkpoints and incremental folds lazily derive a conservative lower bound from winners and tombstones. RemoteSource publishes files, moves and coverage under one foldMu section. A receipt is a freshness hint, never permission: snapshotForReceipts coalesces an uncovered receipt's refold under volume.mu, returns 503 if storage cannot be reached, and cools down receipts a fresh fold still lacks. A cached fold that covers the receipt needs no storage read."
+    note for receiptSink "Uploads, restores and removals return the op actually appended as X-Bdrive-Receipt and receipt in JSON. An unchanged upload names the op for the exact acknowledged sha; a live-room sync names its storage-proven sha's op when available. Tree, file, render and resolve reads carry the fence; frame URLs use ?r= because iframe loads cannot send the header. A public share has no browser receipt and takes one fresh, coalesced fold on a missing target before returning 404."
 
     class Source {
         <<interface>>
@@ -134,10 +163,12 @@ classDiagram
         -parsedJournals(ctx, keep) [][]journal.Op
         -cacheJournals(keep, misses, parsed, sizes)
         -foldFP/foldFiles/foldMoves last fold
+        -foldCov *seqCoverage, installed with foldFiles
         -flight / jflight singleflight.Group fold, history, and per-journal parse
         -jgen hubCaches generation of jcache
         -dropJournals(gen) when hubCaches evicts that generation
         +FilesWithMoves(ctx) files, moves
+        -filesMovesCoverage(ctx) files, moves, coverage from one fold
         -appendOp(ctx, op)
         -appendOps(ctx, ops) ONE read-modify-write
         -appendOpsIf(ctx, ops, base) held to a commitBase
@@ -359,6 +390,7 @@ classDiagram
         +Deletes int
         +Source sync or browser
         +Device string
+        +Receipt string
         +People roster, presence frames only
     }
     note for eventHub "GET {prefix}events, proj(PermRead) — reading the stream names paths, so it sits behind the same permission the tree does, and proj() already walls it by org membership. publish() is called from the FIVE write handlers beside captureChange, never inside it: that one is the PostHog path, whose contract is that &quot;nothing here carries a path or a file name&quot;, and whose signature is counts-only. publish sits on the sync push path, so it never blocks and never errors — it copies the subscriber set under the lock and sends outside it, and a full buffer marks the subscriber lost rather than waiting. Bounded (subBuffer 32, 256/project, 4096/hub) in the ratelimit.go mold. A SIXTH frame type joins change/resync/presence: publishScope, sent by folders.go and perms.go when a rule or a project level moves. It carries NO prefix — the same rule hides a subtree from one account and widens it for another, so naming it would leak a folder name to the people it exists to keep out — and each listener re-asks /scope, which answers per reader. It exists because the daemon now stands down beside a healthy stream, which stretched the window in which a device holds a stale scope from ~10s to ~5m; loadScope runs before the scan precisely so a scan cannot mint an op the hub would refuse with a 403 that wedges a journal"
@@ -390,6 +422,8 @@ classDiagram
         +AllowedDomains
         +RequireVerification bool
         +RequireApproval bool
+        +PinPolicy(verification, approval)
+        -pinnedVerification, pinnedApproval *bool
         +Admins
         +InviteValid func(token)
         +BindDevice func(email, r) error
@@ -398,10 +432,12 @@ classDiagram
         +Seniority() []string
         -store AccountRepo
         -users, tokens, pending
+        -policySeen *authPolicy, last saved gating toggles
         -cli CLIAuth
         -refresh re-reads the store before every decision
     }
     note for BuiltinAuth "Revocation is now a real edge, not a cookie change: revokeTokensFor / revokeGrantsForLocked kill every device token and pending CLI grant an account holds, DELETE /api/auth/token revokes one by name, and the same path runs on offboarding. BaseURL replaces trusting the request's Host when composing a reset or verification link — a mail link built from an attacker's Host header is a credential delivered to the attacker"
+    note for BuiltinAuth "refresh propagates changed saved verification/approval toggles across processes. Explicit per-field config pins survive refresh and reject conflicting SetPolicy changes; policySeen tracks the saved policy independently. Signup, domains and admins remain config-owned."
     class CLIAuth {
         +UsePending(PendingRepo)
         -pending PendingRepo
@@ -620,6 +656,15 @@ classDiagram
         -locks per-project writer mutex
         list / fetch (bounded parallel Get)
     }
+    class projectComments {
+        -events map key→commentEvent
+        -keys, listedAt cached listing
+        -keySet, dead receipt and deleted-thread indexes
+        -unseen bounded missing-receipt cooldowns
+        +uncoveredReceipts(want, now) keys
+    }
+    commentCache *-- projectComments : per project
+    note for projectComments "Comment writes return X-Bdrive-Comment-Receipt naming their immutable event or deletion tombstone. A listing missing an echoed receipt is refreshed before its TTL, then bounded direct Gets cover objects still absent from List. Missing keys cool down; deleted threads cover their old event receipts. Comment requests also carry journal receipts so a newly created file is visible before its thread is checked."
     class commentEvent {
         +Kind open|reply|resolve|reopen
         +Thread +Path +Anchor +Sha +Body
@@ -650,6 +695,7 @@ classDiagram
         RenderMarkdown → table + body HTML
         RenderMarkdownPairs → pairs + body HTML
         yamlValue(node) text + code flag
+        headingIDs NFC Unicode heading ids, per-document duplicate suffixes
     }
     class FrontmatterPair {
         +Key +Value +Code
@@ -707,11 +753,12 @@ classDiagram
         +dropProject(project)
         +SetMaxConns(applier, queries) a deployment's budget
     }
-    note for DataIndex "One row per JSON file, and per Markdown file's frontmatter, of every project whose Data setting is on: data_items(project, path, win, sha, changed_at, changed_by, doc, error, deleted) + data_projects(complete, applied_at). In the metadata SQL database, or data-index.db beside file metadata. DERIVED: dropped with the setting or the project, rebuilt by the next pass. win is winKey — journal.Less as bytes over the winning op — and every upsert carries WHERE data_items.win < excluded.win, so no older fold from any process can write over a newer row; a deletion is a tombstone keyed on the path's greatest delete op for the same reason. Queries never touch a snapshot or a blob, which is what makes them the same on every instance and fast on a cold one"
+    note for DataIndex "One row per JSON file, and per Markdown file's frontmatter, of every project whose Data setting is on: data_items(project, path, win, sha, changed_at, changed_by, doc, error, deleted) + data_projects(complete, applied_at, gen, epoch). gen fences each pass against later writes; epoch fences completion and cached winners against a sibling's partial rebuild. In the metadata SQL database, or data-index.db beside file metadata. DERIVED: dropped with the setting or the project, rebuilt by the next pass. win is winKey — journal.Less as bytes over the winning op — and every upsert carries WHERE data_items.win < excluded.win, so no older fold from any process can write over a newer row; a deletion is a tombstone keyed on the path's greatest delete op for the same reason. Queries never touch a snapshot or a blob, which is what makes them the same on every instance and fast on a cold one"
     class dataProject {
         <<dataapply.go, one per project>>
         -mu one pass at a time
-        -known path→win, loaded once
+        -known path→win, reloaded per build epoch
+        -knownEpoch int64
         +dataApplyLocked() diff snapshot.files vs index
     }
     note for dataProject "The applier follows the FOLD, never the op stream. Triggers: the refreshThen callback after a device push lands (dataApplyAsync, coalesced), inside every hub-door write's own request (dataWrote: the writer reads its write), and once after boot. Each pass diffs the whole fold, so a missed one is made up by the next. Only changed shas are fetched and decoded, a slice at a time (256 files or 16 MiB), so a first build holds one slice in memory (JSON as written; frontmatter typed by YAML; over 2 MiB or undecodable is an error row, counted by queries, never silently absent)"
@@ -728,6 +775,9 @@ classDiagram
         -sessions SessionReadRepo
         -retention, sessionRetention
         -byProject project→bucket map, dirty, seen, pendingSess
+        -pendingDeltas unflushed increments only
+        -ver versionGate, lastRefresh
+        -refreshLocked() sibling totals plus local deltas
         +Record(...)
         +RecordSession(project, session, device, path)
         +Heat(project, prefix, days)
@@ -735,6 +785,7 @@ classDiagram
         +WithSessions(repo, days)
         +ShareOpens(project)
     }
+    note for ReadLedger "In-tree repos implement readAdder: flush adds only this process's pending increments and keeps the later Last. Heat reloads sibling totals at most every two seconds and overlays unflushed increments; retention folds still use absolute PutBatch. Failed flushes retain their queued deltas."
     class ReadStat {
         +Project +Path +Day +Kind +Actor +Count +Last
     }
@@ -1117,6 +1168,7 @@ classDiagram
         -reads coalescedRead
         +stale(repo, mu) token, bool
         +fresh(token)
+        +invalidate() force the next reload
     }
     class coalescedRead {
         -busy, next *readCall
@@ -1141,6 +1193,28 @@ classDiagram
     }
     note for rowScopedProjectRepo "Type-asserted, not part of ProjectRepo/OrgRepo, so a third-party MetaStore stays valid — the whole-record Put is still the fallback. All four in-tree repos implement them. An empty level or role means delete the row. ProjectDB.put / putPerm and OrgDB.putOrg / putMember write through them and roll the in-memory map back when the write fails, so the map and the store can no longer disagree"
 
+    class ownerGuardedOrgRepo {
+        <<optional interface>>
+        +PutMemberGuarded(org, email, role, joined) error
+    }
+    class orgCreator {
+        <<optional interface>>
+        +CreateOrgIfAbsent(o) created, error
+    }
+    class projectCreator {
+        <<optional interface>>
+        +CreateProjectIfAbsent(p) id, created, error
+    }
+    class shareExpiryUpdater {
+        <<optional interface>>
+        +UpdateExpiry(token, expires) error
+    }
+    class readAdder {
+        <<optional interface>>
+        +AddBatch(deltas) error
+    }
+    note for ownerGuardedOrgRepo "db.go — optional store-side capabilities preserve the base MetaStore repo interfaces. Membership writes count owners under the write lock; org/project creation checks uniqueness there; expiry updates refuse a revoked share; additive read flushes retain sibling counts. Both in-tree backends implement every capability, with compile-time assertions."
+
     class storable {
         <<db.go — one gate>>
         storable / storableMap
@@ -1162,13 +1236,25 @@ classDiagram
 
     class fileMetaStore {
         JSON files, atomic rewrite per change
+        repo writes hold fileMu across reload, mutate, atomic rename
     }
+    class fileMu {
+        <<db_file.go, per repo>>
+        -mu sync.Mutex
+        -lock stable path.lock
+        -f held flock descriptor
+        -err failed acquisition, writes refused
+        +Lock() +Unlock()
+    }
+    fileMetaStore *-- fileMu : repos serialize local processes
+    note for fileMu "The separate lock file survives data-file atomic renames. Reads can continue after an acquisition failure, while every write fails closed. Requires a shared filesystem with working flock; SQL transactions provide multi-host coordination."
     class sqlMetaStore {
         one database/sql impl
         sqlite (modernc) or postgres (pgx)
         +schema_meta version row
         +addColumns(cols, guarded) ALTER
         +device_rows keyed (user, id)
+        +lockReg(tx, reg) serialize store-side checks
     }
     note for sqlMetaStore "ProjectRepo.Put is transactional over projects + project_perms + project_folders + project_folder_perms, and is the FALLBACK path — a single grant goes through PutPerm, a single rule through PutFolder. project_folders is a GUARDED TABLE: recreating it empty reads as &quot;nothing is restricted&quot;, so migrate refuses when the recorded schema version says it should exist. So are project_perms (1), project_folder_perms (2) and project_app_folders (3): they hold denials, and an empty one drops every none. Compile-time assertions keep both backends satisfying rowScopedProjectRepo, which is reached by type assertion and would otherwise degrade silently."
     note for sqlMetaStore "addColumns takes a second, GUARDED set. Probing the live columns and re-adding a missing one is how a running hub gains a field on restart, but on a security column (projects.default_level) it is also how a downgrade silently re-creates it EMPTY — every project back to its default visibility. A guarded column missing from a non-empty table past schema version 0 is now a hard startup error. device_rows is the new (account, device) primary key, copied once from the old id-keyed devices table, which is left in place"
@@ -1224,6 +1310,7 @@ classDiagram
     OrgDB *-- versionGate
     ShareDB *-- versionGate
     DeviceRegistry *-- versionGate
+    ReadLedger *-- versionGate
     versionGate ..> Versioned : asks before every reload
     fileMetaStore ..> Versioned : mtime + size
     sqlMetaStore ..> Versioned : meta_version row per registry
@@ -1233,6 +1320,21 @@ classDiagram
     sqlMetaStore ..> rowScopedOrgRepo
     ProjectDB ..> rowScopedProjectRepo : one perm, one row
     OrgDB ..> rowScopedOrgRepo : one member, one row
+    fileMetaStore ..> ownerGuardedOrgRepo : org repo
+    sqlMetaStore ..> ownerGuardedOrgRepo : org repo
+    fileMetaStore ..> orgCreator : org repo
+    sqlMetaStore ..> orgCreator : org repo
+    fileMetaStore ..> projectCreator : project repo
+    sqlMetaStore ..> projectCreator : project repo
+    fileMetaStore ..> shareExpiryUpdater : share repo
+    sqlMetaStore ..> shareExpiryUpdater : share repo
+    fileMetaStore ..> readAdder : read repo
+    sqlMetaStore ..> readAdder : read repo
+    OrgDB ..> ownerGuardedOrgRepo : last-owner guard
+    OrgDB ..> orgCreator : deterministic personal-org creation
+    ProjectDB ..> projectCreator : org and case-insensitive name uniqueness
+    ShareDB ..> shareExpiryUpdater : update existing only
+    ReadLedger ..> readAdder : flush local increments
     fileMetaStore ..> storable : before every write
     sqlMetaStore ..> storable : before every write
 ```

@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { useLocationPath } from "./nav";
 
 /* The app's floor.
  *
@@ -13,9 +14,15 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
  * is deliberately the smallest thing that works: no reporting, no retry state
  * machine, no per-route boundaries. Just a page that stays on screen and a way
  * back to a URL that is known to render.
+ *
+ * It does clear itself when the URL changes (`resetKey`): Back, Forward or an
+ * in-app link leaves the view that threw, and holding the error page over a
+ * route that renders fine made one bad view a dead end for the whole tab. It
+ * sits INSIDE the QueryClientProvider so that recovery keeps the cache.
  */
 interface Props {
   children: ReactNode;
+  resetKey?: string;
 }
 interface State {
   error: Error | null;
@@ -30,6 +37,12 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error("BearDrive: unhandled render error", error, info.componentStack);
+  }
+
+  componentDidUpdate(prevProps: Props) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.error !== null) {
+      this.setState({ error: null });
+    }
   }
 
   render() {
@@ -51,4 +64,9 @@ export default class ErrorBoundary extends Component<Props, State> {
       </div>
     );
   }
+}
+
+// The boundary keyed on the current URL, so navigating away recovers.
+export function RouteErrorBoundary({ children }: { children: ReactNode }) {
+  return <ErrorBoundary resetKey={useLocationPath()}>{children}</ErrorBoundary>;
 }

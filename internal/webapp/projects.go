@@ -321,16 +321,29 @@ func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 	defer db.mu.Unlock()
 	db.refresh()
 	for _, p := range db.byID {
-		if p.Name == name && p.Org == org {
+		if strings.EqualFold(p.Name, name) && p.Org == org {
 			return p.clone(), false, nil
 		}
 	}
 	p := Project{ID: uuid.NewString(), Name: name, Org: org, Created: time.Now().UTC()}
-	db.byID[p.ID] = p
-	if err := db.repo.Put(p); err != nil {
-		delete(db.byID, p.ID)
+	if rs, ok := db.repo.(projectCreator); ok {
+		id, created, err := rs.CreateProjectIfAbsent(p)
+		if err != nil {
+			return Project{}, false, err
+		}
+		if !created {
+			db.ver.invalidate()
+			db.refresh()
+			existing, ok := db.byID[id]
+			if !ok {
+				return Project{}, false, fmt.Errorf("project created concurrently is not readable")
+			}
+			return existing.clone(), false, nil
+		}
+	} else if err := db.repo.Put(p); err != nil {
 		return Project{}, false, err
 	}
+	db.byID[p.ID] = p
 	return p.clone(), true, nil
 }
 

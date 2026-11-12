@@ -3,17 +3,17 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
 import { getJSON, postJSON, putText } from "../api/http";
-import type { Project, ServerConfig, UndoPlan } from "../api/types";
-import { useHeat, useTree } from "../hooks/useBrowse";
+import type { Node, Project, ServerConfig, UndoPlan } from "../api/types";
+import { applyTreeDeltas, useHeat, useTree } from "../hooks/useBrowse";
 import { useProjectEvents } from "../hooks/useProjectEvents";
 import { usePresence } from "../hooks/usePresence";
 import { PresenceBar } from "../components/PresenceBar";
-import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
+import { fileURLFor, textQueryOptions, type BlobText } from "../hooks/useBlob";
 import { useFolders, useShares } from "../hooks/useHub";
 import { ruleFor } from "../lib/folders";
 import { urlForPath, urlForView, withoutFull, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
-import { CSV_EXT, HTML_EXT, IMG_EXT, MD_EXT, PDF_EXT, copyText } from "../util";
+import { CSV_EXT, HTML_EXT, IMG_EXT, MD_EXT, PDF_EXT, copyText, headingSlug } from "../util";
 import { toast } from "../toast";
 import { modalConfirm, modalPrompt } from "../modal";
 import { onSearchRequest } from "../search";
@@ -27,7 +27,7 @@ import { clearFilter, useSidebarSearch } from "../lib/sidebarSearch";
 import { treeStats } from "../lib/treeview";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
-import { FileSkeleton, FileView, prefetchEditText, preloadEditor, renderQuery } from "../components/FileView";
+import { FileSkeleton, FileView, prefetchEditText, prefetchFile, preloadEditorForPath, renderQuery } from "../components/FileView";
 import { ShareDialog } from "../components/ShareDialog";
 import { ShareBanner } from "../components/ShareBanner";
 import { CommentPanel, CommentSurface } from "../components/Comments";
@@ -39,10 +39,15 @@ import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
 import { WidthHandles } from "../components/WidthHandle";
 import type { Run } from "../lib/runs";
-import { armGoal, applyGoal, noteScroll, type Goal } from "../lib/scroll";
+import { anchorFromHash, armGoal, applyGoal, noteScroll, retarget, type Goal } from "../lib/scroll";
 import { VersionBanner } from "../components/VersionBanner";
 import { ConflictBanner } from "../components/ConflictBanner";
 import { parseConflict } from "../lib/conflict";
+
+// Files the browser editor can only refuse: images (not SVG — that is XML
+// text, and its source edits fine), PDFs, archives, media and fonts. Edit
+// would open on "this file is not text", so it is not offered.
+const NO_EDIT_EXT = /\.(png|jpe?g|gif|webp|ico|bmp|avif|pdf|zip|tar|gz|tgz|7z|rar|mp4|webm|mov|mp3|wav|m4a|ogg|woff2?|ttf|otf|eot)$/i;
 
 // The browsing surface shared by hub projects and single-volume mode: the
 // file tree, folder listings, file views, and every topbar action. Sidebar
@@ -99,6 +104,10 @@ export default function Browser(props: {
   }, [insightsOpen, isHome, apiBase, qc]);
 
   const path = route.path;
+  const conflictCopies = useMemo(
+    () => flatFiles.filter((f) => parseConflict(f.path)?.original === path),
+    [flatFiles, path],
+  );
   // ?v= belongs to the file page; a view route or folder ignores it.
   const version = !route.view ? route.version : undefined;
   // On scoped view routes (/dashboard/<p>, /history/<p>) the subject of the
@@ -110,7 +119,40 @@ export default function Browser(props: {
   // version (?v=) is the exception: it names exact bytes, which outlive the
   // file, so a deleted file's past versions stay openable.
   const isFile = !!path && loaded && !isDir && flatFiles.some((f) => f.path === path);
-  const isMissing = !!path && loaded && !isDir && !isFile && !version;
+  /* The same name in another Unicode form. A Mac writes names decomposed
+     (NFD), a typed or pasted URL is composed (NFC): /notes/한글.md and the
+     synced file look identical and compare unequal. The tree's own spelling
+     wins — it is what the hub stores — so the address is rewritten to it. */
+  const nfcCandidates = useMemo(() => {
+    if (!path || !loaded || isDir || isFile) return [];
+    const want = path.normalize("NFC");
+    if (want === path && !/[^\x00-\x7f]/.test(path)) return [];
+    const seen = new Set<string>();
+    const out: Array<{ path: string; kind: "dir" | "file" }> = [];
+    for (const d of dirIndex.keys()) {
+      if (d.normalize("NFC") === want && !seen.has(d)) {
+        seen.add(d);
+        out.push({ path: d, kind: "dir" });
+      }
+    }
+    for (const f of flatFiles) {
+      if (f.path.normalize("NFC") === want && !seen.has(f.path)) {
+        seen.add(f.path);
+        out.push({ path: f.path, kind: "file" });
+      }
+    }
+    return out;
+  }, [path, loaded, isDir, isFile, dirIndex, flatFiles]);
+  const nfcTwin = nfcCandidates.length === 1 ? nfcCandidates[0] : undefined;
+  const ambiguousNfcTwins = nfcCandidates.length > 1 ? nfcCandidates : undefined;
+  const isMissing = !!path && loaded && !isDir && !isFile && !version && !nfcTwin && !ambiguousNfcTwins;
+  useEffect(() => {
+    if (!nfcTwin) return;
+    navigate(
+      urlForPath(nfcTwin.path, project?.id, version, route.full, nfcTwin.kind === "file" && route.editing) + window.location.hash,
+      { replace: true },
+    );
+  }, [nfcTwin, project?.id, version, route.full, route.editing]);
   const listingShowing = isDir && !route.view;
   // Home's "Jump back in": the current version of a file, opened in a project.
   useEffect(() => {
@@ -190,16 +232,36 @@ export default function Browser(props: {
   const onRendered = useCallback(() => {
     const c = contentRef.current;
     if (!c) return;
-    const top = applyGoal(scrollGoal.current, routeKey);
+    const g = scrollGoal.current;
+    if (g.anchor && g.key === routeKey) {
+      const el = findAnchor(c, g.anchor);
+      if (!el) {
+        // Not rendered yet (or no such heading): hold the page at the goal's
+        // base offset without spending an attempt, so the heading still
+        // lands when the document does.
+        if (g.attempts === 0 && Math.abs(c.scrollTop - g.want) > 2) c.scrollTo({ top: g.want, behavior: "instant" });
+        return;
+      }
+      retarget(g, routeKey, el.getBoundingClientRect().top - c.getBoundingClientRect().top + c.scrollTop);
+    }
+    const top = applyGoal(g, routeKey);
     // "instant" is load-bearing: #content carries scroll-behavior: smooth
     // (style.css), and an animated restore would fire intermediate scroll
     // events that noteScroll would read as the reader taking over.
     if (top !== null) c.scrollTo({ top, behavior: "instant" });
   }, [routeKey]);
+  const onRenderedRef = useRef(onRendered);
+  onRenderedRef.current = onRendered;
+  const routeKeyRef = useRef(routeKey);
+  routeKeyRef.current = routeKey;
   useEffect(() => {
+    // A #heading is an explicit destination, including on Back/Forward.
+    // Without one, Back/Forward restores the remembered offset.
+    const remembered = currentNavType() === "POP" ? memo.current.get(routeKey) : undefined;
     scrollGoal.current = armGoal(
       routeKey,
-      currentNavType() === "POP" ? (memo.current.get(routeKey) ?? 0) : 0,
+      remembered ?? 0,
+      anchorFromHash(window.location.hash),
     );
     // Apply once right here. Views call onRendered from their own effects,
     // and React runs CHILD effects before the parent's — so this route's
@@ -217,15 +279,48 @@ export default function Browser(props: {
     noteScroll(scrollGoal.current, routeKey, c.scrollTop, c.scrollHeight - c.clientHeight);
   }, [routeKey]);
 
+  /* A #heading on the page already showing: no route change re-arms the
+     goal, so arm it here. Back/Forward between two headings of one file is
+     that case too — the address differs only in its hash, which the route
+     key does not see. */
+  const jumpToAnchor = useCallback((hash: string) => {
+    const anchor = anchorFromHash(hash);
+    const c = contentRef.current;
+    if (!anchor || !c) return;
+    scrollGoal.current = armGoal(routeKeyRef.current, c.scrollTop, anchor);
+    onRenderedRef.current();
+  }, []);
+  useEffect(() => {
+    const onPop = () => {
+      // A different page is the route effect's to arm.
+      if (withoutFull(window.location.pathname + window.location.search) !== routeKeyRef.current) return;
+      jumpToAnchor(window.location.hash);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [jumpToAnchor]);
+
   /* ---- navigation ---- */
   const openPath = useCallback(
     // A version (a history row's content hash) pins the file page to those
-    // exact bytes; without one the page is the current file.
+    // exact bytes; without one the page is the current file. Fullscreen
+    // carries over: it is the reading mode, not a property of one file, and
+    // a folder target drops out of it on its own (see `full` below).
     (p: string, v?: string) => {
-      navigate(urlForPath(p, project?.id, v));
+      navigate(urlForPath(p, project?.id, v, route.full));
       closeSidebarOnMobile();
     },
-    [project?.id],
+    [project?.id, route.full],
+  );
+  // A link out of a rendered document, optionally to one of its headings.
+  const openLink = useCallback(
+    (p: string, hash?: string) => {
+      const before = routeKeyRef.current;
+      navigate(urlForPath(p, project?.id, undefined, route.full) + (hash || ""));
+      closeSidebarOnMobile();
+      if (hash && withoutFull(window.location.pathname + window.location.search) === before) jumpToAnchor(hash);
+    },
+    [project?.id, route.full, jumpToAnchor],
   );
   const openHistory = useCallback(
     (target: string) => navigate(urlForView("history", project?.id, target)),
@@ -297,15 +392,25 @@ export default function Browser(props: {
   // ?v= version, so the editor never opens on bytes it would overwrite.
   const editing = !!route.editing && canEdit;
   // Someone who can edit what they are reading may well press Edit, and the
-  // editor is a separate download: fetch it once the page has settled.
+  // editor is a separate download: fetch it once the page has settled — at
+  // once when the page IS the editor. Only the chunk this file edits with.
   useEffect(() => {
-    if (!canEdit || !isFile || editing) return;
+    if (!canEdit || !isFile) return;
+    if (editing) {
+      preloadEditorForPath(path);
+      return;
+    }
     const idle = window.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 1500));
-    idle(() => preloadEditor());
-  }, [canEdit, isFile, editing]);
+    idle(() => preloadEditorForPath(path));
+  }, [canEdit, isFile, editing, path]);
   // HTML edits as its rendered page by default; this is the way down to its
   // markup. Only meaningful for HTML — every other type has one surface.
   const [editSource, setEditSource] = useState(false);
+  // Back to the rendered page whenever the editor closes or the file changes,
+  // so the next Edit on an HTML file opens where Edit always opens.
+  useEffect(() => {
+    if (!editing) setEditSource(false);
+  }, [editing]);
   useEffect(() => {
     setEditSource(false);
   }, [path, version]);
@@ -409,7 +514,14 @@ export default function Browser(props: {
     if (!full) return;
     const onKey = (e: KeyboardEvent) => {
       // The palette owns Escape while it is open, like every other overlay.
-      if (e.key === "Escape" && !paletteOpen) exitFull();
+      if (e.key !== "Escape" || paletteOpen) return;
+      // Already handled: CodeMirror closing its completion list, a menu
+      // closing itself. One Escape is one dismissal, never two.
+      if (e.defaultPrevented) return;
+      // An overlay still on screen owns the key even if it did not claim it
+      // (a completion tooltip, a dialog or confirm on top of the page).
+      if (document.querySelector('.cm-tooltip-autocomplete, [role="dialog"], [role="alertdialog"], [aria-modal="true"]')) return;
+      exitFull();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -499,13 +611,12 @@ export default function Browser(props: {
 
   // Copy is Download's counterpart: the same bytes, to the clipboard instead
   // of to disk — whole file, frontmatter included, so what you paste back is
-  // the file. It re-fetches rather than reading the ["text", url] query cache
-  // on purpose: TextView stores a bare string under that key and SniffView
-  // stores a BlobText object, so a cache read would refuse .csv/.txt files
-  // while working fine on the markdown a reviewer would test with.
+  // the file. Through the shared ["text", url] query, so a file already on
+  // screen copies without a second request (every reader stores the same
+  // BlobText under that key now).
   const copyNow = useCallback(async () => {
     try {
-      const data = await fetchBlobText(fileURLFor(apiBase, path, version));
+      const data = await qc.fetchQuery(textQueryOptions(fileURLFor(apiBase, path, version), !!version));
       if (data.kind !== "text")
         return toast(
           data.kind === "too-large" ? "Too large to copy — use Download." : "That file isn't text — use Download.",
@@ -519,7 +630,7 @@ export default function Browser(props: {
     } catch (err) {
       toast("Copy failed: " + (err as Error).message, true);
     }
-  }, [apiBase, path, version]);
+  }, [apiBase, path, version, qc]);
 
   /* Opening the dialog IS the action now. The mint, its 409 credential gate
      and track("share_created") moved into ShareDialog: the gate used to be a
@@ -532,10 +643,8 @@ export default function Browser(props: {
      Restore button rather than one that 403s. The restore itself is a new
      change: the tree, the file, and the history feed all move — so it asks
      first, like every other action here that leaves the browser (BEA-129).
-     The second line is case-aware because the two cases really differ:
-     swapping a live file's content is walk-backable from History, bringing a
-     deleted file back is not — the run card's "undo — remove file" is the
-     only delete control in the web UI, and a restore produces no run card.
+     The second line distinguishes replacing the current content from
+     recreating a deleted file. Both leave the earlier versions in History.
      Non-danger styling on purpose: restore adds content, it takes none away. */
   const [restoring, setRestoring] = useState("");
   // On desktop project.perm already carries the hub's answer (HubApp resolves
@@ -548,7 +657,7 @@ export default function Browser(props: {
           "Restore this version of " + p + "?",
           "It syncs to every device as a new change. " +
             (recreates
-              ? "The file comes back on every device. Removing it again isn't available from History yet."
+              ? "The file comes back on every device, and History records the restore like any other change."
               : "You can restore any other version afterwards."),
           "Restore",
         ))
@@ -558,9 +667,14 @@ export default function Browser(props: {
       try {
         await postJSON(apiBase + "restore", { path: p, sha });
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history-summary", apiBase] });
+        qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
-        qc.invalidateQueries({ queryKey: ["render", apiBase, p] });
-        qc.invalidateQueries({ queryKey: ["text"] });
+        // Reset, not just invalidated: an invalidated query keeps painting
+        // its old data while it refetches, which showed the overwritten
+        // version for a moment on opening the file after a restore.
+        void qc.resetQueries({ queryKey: ["render", apiBase, p] });
+        void qc.resetQueries({ queryKey: ["text", fileURLFor(apiBase, p)] });
         toast("Restored " + p + " — it syncs to every device like any other change.");
       } catch (err) {
         toast("Restore failed: " + (err as Error).message, true);
@@ -591,6 +705,8 @@ export default function Browser(props: {
       try {
         await postJSON(apiBase + "remove", { path: p });
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history-summary", apiBase] });
+        qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["render", apiBase, p] });
         qc.invalidateQueries({ queryKey: ["text"] });
@@ -682,6 +798,8 @@ export default function Browser(props: {
         if (!ok) return;
         const done = await postJSON<UndoPlan>(apiBase + "undo-run", sel);
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history-summary", apiBase] });
+        qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["render", apiBase] });
         qc.invalidateQueries({ queryKey: ["text"] });
@@ -818,20 +936,68 @@ export default function Browser(props: {
       const name = (await modalPrompt("New file", "File name", "untitled.md", "Create"))?.trim().replace(/^\/+/, "");
       if (!name) return;
       const p = (folder ? folder + "/" : "") + name;
-      if (filePaths.has(p) || dirIndex.has(p)) {
+      if (dirIndex.has(p)) {
         toast(p + " already exists", true);
         return;
       }
+      if (flatFiles.some((f) => f.path === p)) {
+        navigate(urlForPath(p, project?.id, undefined, route.full, true));
+        closeSidebarOnMobile();
+        return;
+      }
+      const normalized = p.normalize("NFC");
+      for (const d of dirIndex.keys()) {
+        if (d.normalize("NFC") === normalized) {
+          toast(d + " already exists", true);
+          return;
+        }
+      }
+      const nfcMatches = flatFiles.filter((f) => f.path.normalize("NFC") === normalized);
+      if (nfcMatches.length > 1) {
+        toast(`Multiple files already match "${p}" in different Unicode forms — choose one from the file tree`, true);
+        return;
+      }
+      if (nfcMatches.length === 1) {
+        navigate(urlForPath(nfcMatches[0].path, project?.id, undefined, route.full, true));
+        closeSidebarOnMobile();
+        return;
+      }
+      const caseTwin = flatFiles.find((f) => f.path.normalize("NFC").toLowerCase() === normalized.toLowerCase());
+      if (caseTwin) {
+        toast(`A file named "${caseTwin.path}" already exists — macOS and Windows treat uppercase/lowercase names as the same file`, true);
+        return;
+      }
       try {
-        await putText(apiBase + "upload/content?path=" + encodeURIComponent(p), "");
-        await qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        const res = await putText(apiBase + "upload/content?path=" + encodeURIComponent(p), "");
+        /* The new file is on screen at once: in the tree, and as the empty
+           buffer the editor opens on, so the edit page neither waits for a
+           tree refetch nor shows a skeleton for bytes we already know. A tree
+           read already in flight predates the create and would drop the row,
+           so it is cancelled first; the refetch after carries this write's
+           receipt, so whichever hub process answers includes the file. */
+        await qc.cancelQueries({ queryKey: ["tree", apiBase] });
+        qc.setQueryData<Node>(["tree", apiBase], (t) =>
+          t ? applyTreeDeltas(t, [{ path: p, op: "put", size: 0, time: new Date().toISOString() }]) : t,
+        );
+        const seeded: BlobText = res.sha ? { kind: "text", text: "", sha: res.sha } : { kind: "text", text: "" };
+        qc.setQueryData(textQueryOptions(fileURLFor(apiBase, p)).queryKey, seeded);
         navigate(urlForPath(p, project?.id, undefined, false, true));
         closeSidebarOnMobile();
+        void qc.invalidateQueries({ queryKey: ["tree", apiBase] });
       } catch (err) {
         toast("Could not create " + p + ": " + (err as Error).message, true);
       }
     },
-    [apiBase, filePaths, dirIndex, project?.id, qc],
+    [apiBase, flatFiles, dirIndex, project?.id, qc, route.full],
+  );
+  // A file row the pointer rests on is likely the next page: start its reads,
+  // and on a press the editor chunk too for someone who could edit it.
+  const prefetchRow = useCallback(
+    (p: string, press: boolean) => {
+      prefetchFile(qc, apiBase, p);
+      if (press && canWrite) preloadEditorForPath(p);
+    },
+    [qc, apiBase, canWrite],
   );
   const treeActions = useMemo<TreeActions>(
     () => ({
@@ -865,9 +1031,10 @@ export default function Browser(props: {
       history: hub && project ? (p) => openHistory(p) : undefined,
       insights: hub && project ? (p) => navigate(urlForView("dashboard", project.id, p)) : undefined,
       remove: canRestore ? onRemove : undefined,
+      prefetch: prefetchRow,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [canWrite, newFile, canCreateIn, pid, hub, project, shares, openPath, openHistory, canRestore, onRemove, props.onClosePanel],
+    [canWrite, newFile, canCreateIn, pid, hub, project, shares, openPath, openHistory, canRestore, onRemove, props.onClosePanel, prefetchRow],
   );
 
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
@@ -931,8 +1098,35 @@ export default function Browser(props: {
       />
     );
   } else if (path) {
-    if (!loaded) {
+    if (!loaded || nfcTwin) {
       view = MD_EXT.test(path) ? <FileSkeleton /> : <div className="empty">Loading…</div>;
+    } else if (ambiguousNfcTwins) {
+      const unicodeForm = (s: string) =>
+        s === s.normalize("NFC") ? "NFC" : s === s.normalize("NFD") ? "NFD" : "mixed Unicode";
+      view = (
+        <div className="notfound" id="ambiguous-nfc">
+          <h1>Multiple entries match this name</h1>
+          <p>
+            <code>{path}</code> matches {ambiguousNfcTwins.length} stored paths with different Unicode normalization. Choose the exact entry to open:
+          </p>
+          <div className="vb-actions" style={{ justifyContent: "center", flexWrap: "wrap", marginTop: 12 }}>
+            {ambiguousNfcTwins.map((c) => (
+              <button
+                key={c.path}
+                type="button"
+                className="pbtn"
+                onClick={() =>
+                  navigate(
+                    urlForPath(c.path, project?.id, version, route.full, c.kind === "file" && route.editing) + window.location.hash,
+                  )
+                }
+              >
+                {c.kind === "dir" ? `${c.path}/` : c.path} ({unicodeForm(c.path)})
+              </button>
+            ))}
+          </div>
+        </div>
+      );
     } else if (isMissing) {
       // The tree polls every few seconds, so a file that's mid-upload (or
       // mid-sync from a teammate's device) appears here on its own.
@@ -966,6 +1160,7 @@ export default function Browser(props: {
           onOpen={openPath}
           onFullHistory={openHistory}
           onRendered={onRendered}
+          onPrefetch={prefetchRow}
         />
       );
     } else {
@@ -985,11 +1180,26 @@ export default function Browser(props: {
               path={path}
               version={version}
               onViewCurrent={() => openPath(path)}
+              onRestore={canRestore && atLeast(folderPerm(path) ?? project?.perm, "write") ? () => void onRestore(path, version, !isFile) : undefined}
             />
+          )}
+          {!version && !conflict && conflictCopies.length > 0 && (
+            <div className="banner" role="status">
+              Other edits to this file were preserved separately.{" "}
+              {conflictCopies.map((f) => (
+                <Button key={f.path} variant="link" onClick={() => openPath(f.path)}>
+                  Resolve conflict copy
+                </Button>
+              ))}
+            </div>
           )}
           {conflict && (
             <ConflictBanner
               conflict={conflict}
+              apiBase={apiBase}
+              conflictPath={path}
+              canEdit={canEdit}
+              onResolved={(target) => openPath(target)}
               originalHref={
                 flatFiles.some((f) => f.path === conflict.original)
                   ? () => openPath(conflict.original)
@@ -1006,7 +1216,7 @@ export default function Browser(props: {
                 heatMap={heatMap}
                 flatFiles={flatFiles}
                 projectId={project?.id}
-                onOpenFile={openPath}
+                onOpenFile={openLink}
                 onMeta={setMeta}
                 onRendered={onRendered}
                 editing={editing}
@@ -1140,18 +1350,23 @@ export default function Browser(props: {
               <Icon name="hist" /> <span className="lbl">History</span>
             </Button>
           )}
-          {canEdit && (
+          {canEdit && (editing || !NO_EDIT_EXT.test(path)) && (
             <Button
               id="edit-btn"
               variant="toolbar"
               onPointerEnter={() => {
                 if (editing) return;
-                preloadEditor();
+                preloadEditorForPath(path);
+                prefetchEditText(qc, apiBase, path);
+              }}
+              onPointerDown={() => {
+                if (editing) return;
+                preloadEditorForPath(path);
                 prefetchEditText(qc, apiBase, path);
               }}
               onFocus={() => {
                 if (editing) return;
-                preloadEditor();
+                preloadEditorForPath(path);
                 prefetchEditText(qc, apiBase, path);
               }}
               title={editing ? "Stop editing" : "Edit this file"}
@@ -1439,4 +1654,22 @@ export default function Browser(props: {
       />
     </>
   );
+}
+
+/* The element a #fragment names, inside the content pane: the rendered
+   document first (an app control's id must not win over a heading's), then
+   the pane. An exact id, else the hub's slug of it — `#Target Heading` and
+   `#target-heading` reach the same heading. */
+function findAnchor(c: HTMLElement, id: string): HTMLElement | null {
+  const ids = [id];
+  const slug = headingSlug(id);
+  if (slug !== id) ids.push(slug);
+  for (const scope of [c.querySelector<HTMLElement>(".fv-prose"), c]) {
+    if (!scope) continue;
+    for (const v of ids) {
+      const el = scope.querySelector<HTMLElement>(`[id="${CSS.escape(v)}"]`);
+      if (el) return el;
+    }
+  }
+  return null;
 }

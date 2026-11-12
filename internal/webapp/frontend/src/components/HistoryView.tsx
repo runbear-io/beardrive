@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HistoryEntry, Node } from "../api/types";
 import { HistoryRow, NoteText, type RemoveAction, type RestoreAction } from "./HistoryRow";
@@ -129,6 +129,59 @@ export function HistoryView(props: {
   }, [data, onRendered]);
 
   const entries = useMemo(() => (data ? data.pages.flatMap((p) => p.entries || []) : []), [data]);
+  // A row's identity is the op it describes, never its position: a live
+  // change lands at the TOP of the feed and shifts every index under it, so
+  // an index-keyed selection or open diff would jump to the neighbour. With
+  // device.id, seq names one op; the rest covers older hubs that send no seq.
+  // A repeat (only possible without seq) gets an occurrence suffix so React
+  // keys stay unique.
+  const keys = useMemo(() => {
+    const seen = new Map<string, number>();
+    return entries.map((e) => {
+      const k = entryKey(e);
+      const n = seen.get(k) ?? 0;
+      seen.set(k, n + 1);
+      return n ? k + "#" + n : k;
+    });
+  }, [entries]);
+  const indexOf = useMemo(() => new Map(keys.map((k, i) => [k, i])), [keys]);
+
+  // A path's current content. Unfiltered, the feed itself says: entries are
+  // strictly newest-first, so a path's first occurrence is its head. A
+  // filtered feed (one person, one device, a date window) holds only some of
+  // a path's ops, and its first occurrence is merely the newest MATCHING one
+  // — guessing from it hid Restore on a superseded version and offered it on
+  // the current one (a 409). So a filtered feed asks the unfiltered scope for
+  // its newest ops, and any path still unaccounted for asks for its own head.
+  // The tree cannot answer this: its nodes carry no content hash.
+  const filtered = hasHistoryFilters(filters);
+  const { data: headWindow } = useQuery({
+    queryKey: ["history", apiBase, "heads", scope],
+    queryFn: () => getJSON<{ entries: HistoryEntry[] }>(apiBase + "history?" + scope + "&n=" + HEAD_WINDOW),
+    enabled: filtered,
+    staleTime: 15_000,
+  });
+  const windowHead = useMemo(() => headsOf(headWindow?.entries ?? []), [headWindow]);
+  const unresolved = useMemo(() => {
+    if (!filtered || !headWindow) return [];
+    const out = new Set<string>();
+    for (const e of entries) if (!windowHead.has(e.path)) out.add(e.path);
+    return [...out];
+  }, [filtered, headWindow, windowHead, entries]);
+  const pathHeads = useQueries({
+    queries: unresolved.map((p) => ({
+      queryKey: ["history", apiBase, "head", p],
+      queryFn: () => getJSON<{ entries: HistoryEntry[] }>(apiBase + "history?path=" + encodeURIComponent(p) + "&n=1"),
+      staleTime: 15_000,
+    })),
+  });
+  const pathHead = new Map<string, string>();
+  unresolved.forEach((p, k) => {
+    const d = pathHeads[k]?.data;
+    if (!d) return;
+    const e = (d.entries ?? []).find((x) => x.path === p);
+    pathHead.set(p, !e || e.kind === "delete" ? "" : (e.blob ?? ""));
+  });
   // The author and device lists accumulate and never shrink: filtering BY
   // one leaves only its rows loaded, so a list rebuilt from the current feed
   // would drop every other choice and strand the reader on "Anyone" as the
@@ -151,15 +204,19 @@ export function HistoryView(props: {
   const items = useMemo(() => groupRuns(entries), [entries]);
   // Keyboard order: every row as it sits on screen, run rows in card order.
   const order = useMemo(() => items.flatMap((it) => (it.run ? it.run.idx : [it.i])), [items]);
-  const [sel, setSel] = useState<number | null>(null);
-  useEffect(() => setSel(null), [qs]);
+  // The open row, by identity. Its index is re-derived every render, so a
+  // row that scrolled off the loaded window simply closes the panel.
+  const [selKey, setSelKey] = useState<string | null>(null);
+  const sel = selKey === null ? null : (indexOf.get(selKey) ?? null);
+  const setSel = (i: number | null) => setSelKey(i === null ? null : (keys[i] ?? null));
+  useEffect(() => setSelKey(null), [qs]);
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.defaultPrevented) return;
       const t = ev.target as HTMLElement | null;
       if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
       if (ev.key === "Escape" && sel !== null) {
-        setSel(null);
+        setSelKey(null);
         return;
       }
       if (ev.key !== "j" && ev.key !== "k") return;
@@ -167,17 +224,19 @@ export function HistoryView(props: {
       ev.preventDefault();
       const at = sel === null ? -1 : order.indexOf(sel);
       const next = ev.key === "j" ? Math.min(order.length - 1, at + 1) : Math.max(0, at === -1 ? 0 : at - 1);
-      setSel(order[next]);
+      setSelKey(keys[order[next]] ?? null);
     };
     // Capture phase: the row's own buttons stop key propagation so their
     // Enter/Space stay theirs, which would otherwise swallow J/K/Esc too.
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [order, sel]);
+  }, [order, sel, keys]);
+  // On a new selection only: a live update that merely moves the open row
+  // must not scroll the feed out from under the reader.
   useEffect(() => {
     if (sel === null) return;
     document.querySelector(`.history [data-hidx="${sel}"]`)?.scrollIntoView({ block: "nearest" });
-  }, [sel]);
+  }, [selKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Nothing loaded yet. The filters are in the query key, so every keystroke
   // in the path box drops `data` back to undefined — returning a bare filter
@@ -212,15 +271,14 @@ export function HistoryView(props: {
       if (entries[j].path === entries[i].path && entries[j].kind !== "delete") return entries[j].blob;
     }
   };
-  // A path's current content, from the loaded window: entries are strictly
-  // newest-first, so a path's FIRST occurrence decides. A newest-delete leaves
-  // the path out — the file is gone, so putting its content back is a real
-  // change and its rows stay restorable.
-  const headBlob = new Map<string, string>();
-  for (const e of entries) {
-    if (headBlob.has(e.path)) continue;
-    headBlob.set(e.path, e.kind === "delete" ? "" : (e.blob ?? "")); // deleted: nothing is current
-  }
+  // A path's current content: "" when its newest op is a delete (the file is
+  // gone, so putting its content back is a real change and its rows stay
+  // restorable), undefined while a filtered feed is still finding out.
+  const localHead = headsOf(entries);
+  const headOf = (path: string): string | undefined => {
+    if (!filtered) return localHead.get(path);
+    return windowHead.get(path) ?? pathHead.get(path);
+  };
   // What a row restores: its own bytes, or — for a delete — the content it
   // removed, which is how a deleted file comes back. Unlike diffs, this is
   // available in every feed, so the predecessor lookup runs regardless.
@@ -228,19 +286,33 @@ export function HistoryView(props: {
   // could only write a +0 −0 change to every device, and the server 409s it
   // (restore.go), so offering the button would only produce an error. The rule
   // is content equality, not row index — a hand-reverted older row is just as
-  // much of a no-op — which is exactly what the server checks.
+  // much of a no-op — which is exactly what the server checks. Nothing, too,
+  // while the head is unknown: a button that may 409 is worse than one that
+  // appears a moment later.
   const restoreSha = (i: number) => {
     const sha = entries[i].kind === "delete" ? prevBlob(i) : entries[i].blob;
-    return sha && sha === headBlob.get(entries[i].path) ? undefined : sha;
+    const head = headOf(entries[i].path);
+    return sha && head !== undefined && sha !== head ? sha : undefined;
   };
-  // "" is the marker headBlob already uses for a path whose newest op is a
-  // delete — so this restore brings the file back, which nothing in the
-  // browser can walk back afterwards. The confirm copy says so (BEA-129).
-  const recreates = (i: number) => headBlob.get(entries[i].path) === "";
+  // "" is the marker headOf uses for a path whose newest op is a delete — so
+  // this restore brings the file back, which nothing in the browser can walk
+  // back afterwards. The confirm copy says so (BEA-129).
+  const recreates = (i: number) => headOf(entries[i].path) === "";
   // The version from before a change, when putting it back is a real change.
   const restorePrev = (i: number) => {
     const sha = prevBlob(i);
-    return sha && sha !== headBlob.get(entries[i].path) ? sha : undefined;
+    const head = headOf(entries[i].path);
+    return sha && head !== undefined && sha !== head ? sha : undefined;
+  };
+  // A run's "undo — remove file" deletes the path for every device, so it is
+  // offered only where it undoes exactly what the run did: the run CREATED
+  // the path (an add with nothing before it — never a move or re-add over
+  // older content), the file is still in the tree, and it still holds the
+  // bytes the run wrote. Anything later — a teammate's edit, a delete, a move
+  // away — makes the removal destroy work that isn't the run's.
+  const removable = (i: number) => {
+    const e = entries[i];
+    return e.kind === "add" && !e.prev && !!e.blob && known.has(e.path) && headOf(e.path) === e.blob;
   };
   const chips = filterChips(filters, devices);
   // Day headers sit between rows as siblings, never wrappers, so every row
@@ -300,7 +372,7 @@ export function HistoryView(props: {
           ) : (
             <div className="empty">No history yet.</div>
           ))}
-        {items.map((item, n) => {
+        {items.map((item) => {
           const day = localDay(new Date(entries[item.i].time));
           const head =
             day !== lastDay ? (
@@ -315,12 +387,14 @@ export function HistoryView(props: {
           lastDay = day;
           const row = item.run ? (
             <RunGroup
-              key={"g" + n}
+              key={"g" + runKey(item.run)}
               run={item.run}
               known={known}
               onOpen={props.onOpen}
               apiBase={apiBase}
               prevBlob={prevBlob}
+              keyOf={(i) => keys[i]}
+              removable={removable}
               restoreSha={restoreSha}
               recreates={recreates}
               restore={restore}
@@ -331,7 +405,7 @@ export function HistoryView(props: {
             />
           ) : (
             <HistoryRow
-              key={"r" + item.i}
+              key={"r" + keys[item.i]}
               idx={item.i}
               entry={entries[item.i]}
               apiBase={apiBase}
@@ -369,7 +443,7 @@ export function HistoryView(props: {
       </div>
       {selEntry && sel !== null ? (
         <ActivityPanel
-          key={sel}
+          key={selKey ?? undefined}
           entry={selEntry}
           apiBase={apiBase}
           prev={prevBlob(sel)}
@@ -407,6 +481,29 @@ function PanelGuide() {
 }
 
 const HISTORY_TIMEOUT_MS = 10_000;
+
+// Settle most paths with one request; cached per-path lookups handle paths
+// whose latest op lies outside this window without guessing from filters.
+const HEAD_WINDOW = 200;
+
+// One op's identity (see `keys` in HistoryView).
+function entryKey(e: HistoryEntry): string {
+  return [e.device?.id ?? "", e.seq ?? "", e.time, e.kind, e.path, e.blob ?? ""].join("\0");
+}
+
+// One run's identity: the same session-or-note + device pair groupRuns
+// groups on, so a card keeps its state as the run grows.
+function runKey(run: Run): string {
+  return (run.session ? "s\0" + run.session : "n\0" + run.note) + "\0" + (run.entries[0]?.device?.id ?? "");
+}
+
+// Each path's head in a newest-first list of ops: its first occurrence
+// decides, "" for a path whose newest op is a delete.
+function headsOf(entries: HistoryEntry[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const e of entries) if (!out.has(e.path)) out.set(e.path, e.kind === "delete" ? "" : (e.blob ?? ""));
+  return out;
+}
 
 function HistorySkeleton() {
   return (
@@ -639,6 +736,8 @@ function RunGroup({
   onOpen,
   apiBase,
   prevBlob,
+  keyOf,
+  removable,
   restoreSha,
   recreates,
   restore,
@@ -652,6 +751,10 @@ function RunGroup({
   onOpen: (path: string, version?: string) => void;
   apiBase: string;
   prevBlob: (i: number) => string | undefined;
+  keyOf: (i: number) => string;
+  // Whether undoing this row by removing the file undoes exactly what the
+  // run did (see `removable` in HistoryView).
+  removable: (i: number) => boolean;
   restoreSha: (i: number) => string | undefined;
   recreates: (i: number) => boolean;
   restore?: RestoreAction;
@@ -747,7 +850,7 @@ function RunGroup({
         <div className="hrun-body">
           {run.entries.map((e, k) => (
             <HistoryRow
-              key={k}
+              key={keyOf(run.idx[k])}
               entry={e}
               apiBase={apiBase}
               onOpen={onOpen}
@@ -756,7 +859,7 @@ function RunGroup({
                  in the card. */
               diff={{ apiBase, prev: prevBlob(run.idx[k]) }}
               restore={restore}
-              remove={remove}
+              remove={removable(run.idx[k]) ? remove : undefined}
               restoreSha={restoreSha(run.idx[k])}
               recreates={recreates(run.idx[k])}
               inRun

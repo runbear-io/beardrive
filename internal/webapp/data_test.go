@@ -741,18 +741,21 @@ func TestDataIndexSQLCompletesOnlyUnderItsGeneration(t *testing.T) {
 			if err := x.start(ctx, project); err != nil {
 				t.Fatal(err)
 			}
-			old, err := x.generation(ctx, project)
-			if err != nil {
-				t.Fatal(err)
+			old, epoch, exists, err := x.passFence(ctx, project)
+			if err != nil || !exists {
+				t.Fatalf("read initial fence: exists=%v err=%v", exists, err)
 			}
 			if err := x.lower(ctx, project); err != nil { // a change, after that pass read its fold
 				t.Fatal(err)
 			}
-			if ok, err := x.finish(ctx, project, old, time.Now()); err != nil || ok || complete() {
+			if ok, err := x.finish(ctx, project, old, epoch, time.Now()); err != nil || ok || complete() {
 				t.Fatalf("a pass older than a change raised complete: ok=%v err=%v", ok, err)
 			}
-			cur, _ := x.generation(ctx, project)
-			if ok, err := x.finish(ctx, project, cur, time.Now()); err != nil || !ok || !complete() {
+			cur, curEpoch, exists, err := x.passFence(ctx, project)
+			if err != nil || !exists || curEpoch != epoch {
+				t.Fatalf("write changed the build epoch: exists=%v epoch=%d want=%d err=%v", exists, curEpoch, epoch, err)
+			}
+			if ok, err := x.finish(ctx, project, cur, curEpoch, time.Now()); err != nil || !ok || !complete() {
 				t.Fatalf("a pass under the current generation did not raise complete: ok=%v err=%v", ok, err)
 			}
 			// A fresh build never reuses a generation a pass from before it read.
@@ -762,7 +765,7 @@ func TestDataIndexSQLCompletesOnlyUnderItsGeneration(t *testing.T) {
 			if err := x.start(ctx, project); err != nil {
 				t.Fatal(err)
 			}
-			if ok, _ := x.finish(ctx, project, cur, time.Now()); ok {
+			if ok, _ := x.finish(ctx, project, cur, curEpoch, time.Now()); ok {
 				t.Fatal("a pass from before Data went off and on raised complete")
 			}
 		})
@@ -790,8 +793,8 @@ func TestDataIndexAddsTheGenerationToAnOlderTable(t *testing.T) {
 		if err := x.lower(context.Background(), "p"); err != nil {
 			t.Fatal(err)
 		}
-		if gen, err := x.generation(context.Background(), "p"); err != nil || gen == 0 {
-			t.Fatalf("generation %d %v", gen, err)
+		if gen, epoch, exists, err := x.passFence(context.Background(), "p"); err != nil || !exists || gen == 0 || epoch != 0 {
+			t.Fatalf("migrated fence: gen=%d epoch=%d exists=%v err=%v", gen, epoch, exists, err)
 		}
 		x.Close()
 	}

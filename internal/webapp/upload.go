@@ -22,6 +22,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/textmerge"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Uploads run in two modes, chosen by the server per request so the client
@@ -386,14 +387,21 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 		return journal.Marshal(ops)
 	}
 	key := "journal/" + r.Device.ID + ".jsonl"
+	var err error
 	if cp, ok := r.Backend.(remote.ConditionalPutter); ok {
-		return r.appendConditionalExisting(ctx, cp, key, next)
+		err = r.appendConditionalExisting(ctx, cp, key, next)
+	} else {
+		var line []byte
+		if line, err = next(nil); err == nil {
+			err = r.appendLastWriterWins(ctx, key, line)
+		}
 	}
-	line, err := next(nil)
 	if err != nil {
 		return err
 	}
-	return r.appendLastWriterWins(ctx, key, line)
+	// The stamp of the attempt that landed: every retry restamps ops.
+	noteReceipt(ctx, ops)
+	return nil
 }
 
 // stamp gives ops this server's identity and the next places in its journal
@@ -618,6 +626,9 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 	if !s.writablePath(w, r, req.Path) {
 		return
 	}
+	if !guardUploadTwin(w, r, v, req.Path) {
+		return
+	}
 	if !sizeFitsContentAddress(req.SHA256, req.Size) {
 		http.Error(w, "declared size does not match the content address", http.StatusForbidden)
 		return
@@ -663,6 +674,37 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 		s.claimGrant(project, "blobs/"+req.SHA256) // nothing was granted
 	}
 	writeJSON(w, map[string]any{"mode": "server"})
+}
+
+// uploadTwin refuses only creation of a new spelling. An exact existing path
+// remains writable, including in a project that already has twins from device
+// sync. No normalization is applied to journal paths or /store/* writes.
+func uploadTwin(files map[string]FileInfo, p string) string {
+	if _, exists := files[p]; exists {
+		return ""
+	}
+	n := norm.NFC.String(p)
+	hit := ""
+	for existing := range files {
+		e := norm.NFC.String(existing)
+		if (e == n || strings.EqualFold(e, n)) && (hit == "" || existing < hit) {
+			hit = existing
+		}
+	}
+	return hit
+}
+
+func guardUploadTwin(w http.ResponseWriter, r *http.Request, v *volume, p string) bool {
+	snap, err := v.current(r.Context())
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "could not check the file name", err)
+		return false
+	}
+	if existing := uploadTwin(snap.files, p); existing != "" {
+		http.Error(w, fmt.Sprintf("a file named %q already exists (macOS/Windows treat these names as the same file)", existing), http.StatusConflict)
+		return false
+	}
+	return true
 }
 
 // lockPath serializes writes to one path within this process. Returns the
@@ -731,6 +773,7 @@ func sharpShrink(was, now int64) bool {
 
 // handleUploadContent receives content through the server (server mode).
 func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.Request) {
+	r, _ = withReceiptSink(r)
 	up := s.gateUpload(v, w)
 	if up == nil {
 		return
@@ -755,6 +798,9 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// lock table if a hub ever writes enough distinct paths for that to show
 	// up in a heap profile.
 	defer s.lockPath(projectID(r), p)()
+	if !guardUploadTwin(w, r, v, p) {
+		return
+	}
 
 	tmp, size, blob, err := spool(r.Body)
 	if err != nil {
@@ -779,7 +825,7 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 			// nothing to refuse. A directory never names a version by its
 			// content, so the bytes are what is compared.
 			if s.holdsBytes(r.Context(), v, p, blob, size) {
-				writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head, "unchanged": true})
+				s.writeWriteOK(r.Context(), w, v, map[string]any{"ok": true, "path": p, "sha": head, "unchanged": true})
 				return
 			}
 			if s.stepConflictCopy(w, r, v, up, p, tmp, size, blob, -1) {
@@ -868,7 +914,7 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	   gate would quietly remove a door a managed provider is entitled to
 	   answer; skipping the JOURNAL is the whole point and costs it nothing. */
 	if head, ok := s.headBlob(r.Context(), v, p); ok && head == blob {
-		writeJSON(w, map[string]any{
+		s.writeWriteOK(r.Context(), w, v, map[string]any{
 			"ok": true, "path": p, "sha": head, "unchanged": true,
 		})
 		return
@@ -972,7 +1018,55 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		head = blob
 	}
 	s.adoptRoomWrite(r.Context(), projectID(r), p, head, tmp)
-	writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head})
+	s.writeWriteOK(r.Context(), w, v, map[string]any{"ok": true, "path": p, "sha": head})
+}
+
+// writeWriteOK answers a successful write with its causal receipt (see
+// snapshotWithReceipts): the op this request appended, or — for a write that
+// appended none because the content was already there — the op that produced
+// what body["path"] holds now. A reader echoing it on another hub process
+// then sees at least this version.
+func (s *Server) writeWriteOK(ctx context.Context, w http.ResponseWriter, v *volume, body map[string]any) {
+	receipt := ""
+	if sink, _ := ctx.Value(receiptSinkKey{}).(*receiptSink); sink != nil {
+		receipt = sink.String()
+	}
+	if receipt == "" {
+		// Only the op that produced the very version this answer names. A
+		// merge can acknowledge a head read from storage that this process's
+		// fold has not reached; then the fold is refreshed once, so the
+		// client still gets that head's receipt to fence its next read. An
+		// older op's receipt is never substituted: it would promise a reader
+		// less than the answer says, so a head still missing gets none.
+		p, _ := body["path"].(string)
+		sha, _ := body["sha"].(string)
+		if p != "" && sha != "" {
+			fi, ok := s.headFile(ctx, v, p)
+			if !ok || fi.Blob != sha {
+				v.invalidate()
+				fi, ok = s.headFile(ctx, v, p)
+			}
+			if ok && fi.Blob == sha {
+				receipt = fileReceipt(fi)
+			}
+			// On a journaled volume every version is an op with a receipt,
+			// so one that cannot be named means the head moved again or
+			// storage failed: an ok without a fence would let the client's
+			// next read, on another process, land before the version this
+			// answer acknowledges. Refused instead, before anything is
+			// written; the retry finds whatever the head is by then. A plain
+			// folder (DirSource) has no journal and never carries one.
+			if receipt == "" {
+				if _, journaled := v.source.(*RemoteSource); journaled {
+					w.Header().Set("Retry-After", "1")
+					http.Error(w, "storage head changed; retry", http.StatusServiceUnavailable)
+					return
+				}
+			}
+		}
+	}
+	stampReceipt(w, body, receipt)
+	writeJSON(w, body)
 }
 
 // parkStaleUpload keeps a conditional write that lost its base, and could not
@@ -990,7 +1084,7 @@ func (s *Server) parkStaleUpload(w http.ResponseWriter, r *http.Request, v *volu
 		return conflictPath(p, who, t0.Add(time.Duration(i)*time.Second))
 	}, tmp, size, blob, billed)
 	if ok {
-		writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head, "parked": parked})
+		s.writeWriteOK(r.Context(), w, v, map[string]any{"ok": true, "path": p, "sha": head, "parked": parked})
 	}
 	return true
 }
@@ -1016,7 +1110,7 @@ func (s *Server) stepConflictCopy(w http.ResponseWriter, r *http.Request, v *vol
 		if !found {
 			sha = blob
 		}
-		writeJSON(w, map[string]any{"ok": true, "path": parked, "sha": sha, "parked": parked})
+		s.writeWriteOK(r.Context(), w, v, map[string]any{"ok": true, "path": parked, "sha": sha, "parked": parked})
 	}
 	return true
 }
@@ -1212,7 +1306,7 @@ func (s *Server) mergeStaleUpload(w http.ResponseWriter, r *http.Request, v *vol
 				http.Error(w, err.Error(), http.StatusForbidden)
 				return true, head
 			}
-			writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head, "merged": true, "unchanged": true})
+			s.writeWriteOK(r.Context(), w, v, map[string]any{"ok": true, "path": p, "sha": head, "merged": true, "unchanged": true})
 			return true, head
 		}
 	}
@@ -1234,7 +1328,7 @@ func (s *Server) mergeStaleUpload(w http.ResponseWriter, r *http.Request, v *vol
 				return true, head
 			}
 			// The head already holds everything this write adds.
-			writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head, "merged": true, "unchanged": true})
+			s.writeWriteOK(r.Context(), w, v, map[string]any{"ok": true, "path": p, "sha": head, "merged": true, "unchanged": true})
 			return true, head
 		}
 		// The shrink guard holds the merge to the head it lands on.
@@ -1279,7 +1373,7 @@ func (s *Server) mergeStaleUpload(w http.ResponseWriter, r *http.Request, v *vol
 		// Not inline: a dirty room settles by writing through this door,
 		// whose path lock the caller still holds.
 		go s.notifyRoomExternalWrite(project, []string{p})
-		writeJSON(w, map[string]any{"ok": true, "path": p, "sha": blob, "merged": true})
+		s.writeWriteOK(r.Context(), w, v, map[string]any{"ok": true, "path": p, "sha": blob, "merged": true})
 		return true, blob
 	}
 	return false, head
@@ -1346,6 +1440,7 @@ func sha256Hex(b []byte) string {
 
 // handleUploadCommit journals a direct upload after the blob is in the store.
 func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Request) {
+	r, _ = withReceiptSink(r)
 	up := s.gateUpload(v, w)
 	if up == nil {
 		return
@@ -1362,6 +1457,9 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 	// Commit is what makes a blob part of the volume — it writes the op — so
 	// it is gated even though init already was: a client may call it directly.
 	if !s.writablePath(w, r, req.Path) {
+		return
+	}
+	if !guardUploadTwin(w, r, v, req.Path) {
 		return
 	}
 	// The blob may already sit in storage (direct upload), but commit is what
@@ -1404,7 +1502,7 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 	s.dataWrote(r.Context(), projectID(r))
 	s.captureChange(r, "browser", 1, 0)
 	s.publishChange(r, "browser", []string{req.Path}, 1, 0)
-	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
+	s.writeWriteOK(r.Context(), w, v, map[string]any{"ok": true, "path": req.Path})
 }
 
 /*
