@@ -192,6 +192,8 @@ func TestRefusedShrinkCopyIsRetriedAfterTheRoomCloses(t *testing.T) {
 	t.Cleanup(func() { parkBackoff = old })
 
 	srv, p, _ := newHub(t, true, nil)
+	quota := &toggleWriteQuota{refusal: &failingQuota{skip: 1, n: 3}}
+	srv.Quota = quota
 	h := srv.Handler()
 	room := p.ID + "/notes.md"
 	full := strings.Repeat("a standup line\n", 100)
@@ -210,7 +212,7 @@ func TestRefusedShrinkCopyIsRetriedAfterTheRoomCloses(t *testing.T) {
 
 	// The snapshot itself gets through to its 422; every write after it fails
 	// until the copy has been refused more than once.
-	srv.Quota = &failingQuota{skip: 1, n: 3}
+	quota.blocked.Store(true)
 	srv.finalSnapshot(context.Background(), room)
 	srv.finalSnapshot(context.Background(), room)
 	srv.rooms().drop(room)
