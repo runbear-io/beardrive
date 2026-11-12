@@ -180,10 +180,21 @@ export function useProjectEvents(
         new CustomEvent("bdrive:changed", { detail: ev.paths ?? [] }),
       );
       const changes = (ev.puts || 0) + (ev.deletes || 0);
-      const oldTree = qc.getQueryData<Node>(["tree", apiBase]);
+      const treeKey = ["tree", apiBase] as const;
+      const oldTree = qc.getQueryData<Node>(treeKey);
+      const treeFetching = qc.getQueryState(treeKey)?.fetchStatus === "fetching";
       const canPatchTree = ev.type === "change" && !ev.more && changes > 0 && !!ev.files?.length && !!oldTree;
       if (canPatchTree) {
-        qc.setQueryData<Node>(["tree", apiBase], (old) => (old ? applyTreeDeltas(old, ev.files!) : old));
+        const deltas = ev.files!;
+        qc.setQueryData<Node>(treeKey, (old) => (old ? applyTreeDeltas(old, deltas) : old));
+        if (treeFetching) {
+          // An earlier tree read still in flight would overwrite the delta
+          // when it lands; cancel it and fetch a post-event tree instead.
+          void qc.cancelQueries({ queryKey: treeKey }).then(() => {
+            qc.setQueryData<Node>(treeKey, (old) => (old ? applyTreeDeltas(old, deltas) : old));
+            return qc.invalidateQueries({ queryKey: treeKey });
+          });
+        }
         invalidateHistory();
       } else {
         invalidateProject();
