@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { recordProjectReceipt } from "../api/http";
+import { coversProjectReceipts, recordProjectReceipt } from "../api/http";
 import { fileURLFor } from "./useBlob";
 import { applyTreeDeltas } from "./useBrowse";
 import type { ChangeFileDelta, Node } from "../api/types";
@@ -100,9 +100,21 @@ export function useProjectEvents(
     let coalesce: number | null = null;
     let historyCoalesce: number | null = null;
     let unfencedTreeTimer: number | null = null;
+    let lastUnfencedDeltaAt = 0;
     let cancelTreeInFlight = false;
-    let cancelTreeFenced = false;
+    let cancelTreeAllFenced = true;
+    const cancelRequiredReceipts = new Set<string>();
     const pendingCancelDeltas: ChangeFileDelta[] = [];
+    const scheduleUnfencedTreeRefetch = () => {
+      if (done) return;
+      if (unfencedTreeTimer) window.clearTimeout(unfencedTreeTimer);
+      const elapsed = lastUnfencedDeltaAt ? Math.max(0, Date.now() - lastUnfencedDeltaAt) : 0;
+      const delay = Math.max(250, UNFENCED_TREE_MS - elapsed);
+      unfencedTreeTimer = window.setTimeout(() => {
+        unfencedTreeTimer = null;
+        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+      }, delay);
+    };
     const invalidateHistory = () => {
       if (historyCoalesce) return;
       historyCoalesce = window.setTimeout(() => {
@@ -162,6 +174,8 @@ export function useProjectEvents(
       }
       if (ev.type === "scope") {
         pendingCancelDeltas.length = 0;
+        cancelRequiredReceipts.clear();
+        lastUnfencedDeltaAt = 0;
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
         // These two are keyed on the project id, not apiBase (useHub.ts), and
@@ -187,9 +201,8 @@ export function useProjectEvents(
       window.dispatchEvent(
         new CustomEvent("bdrive:changed", { detail: ev.paths ?? [] }),
       );
-      if (ev.receipt) {
-        recordProjectReceipt(apiBase, ev.receipt);
-      }
+      const recordedReceipts = ev.receipt ? recordProjectReceipt(apiBase, ev.receipt) : [];
+      const hasValidReceipt = recordedReceipts.length > 0;
       const changes = (ev.puts || 0) + (ev.deletes || 0);
       const treeKey = ["tree", apiBase] as const;
       const oldTree = qc.getQueryData<Node>(treeKey);
@@ -197,43 +210,59 @@ export function useProjectEvents(
       const canPatchTree = ev.type === "change" && !ev.more && changes > 0 && !!ev.files?.length && !!oldTree;
       if (canPatchTree) {
         const deltas = ev.files!;
+        if (!hasValidReceipt) {
+          lastUnfencedDeltaAt = Date.now();
+          if (unfencedTreeTimer) scheduleUnfencedTreeRefetch();
+        }
         qc.setQueryData<Node>(treeKey, (old) => (old ? applyTreeDeltas(old, deltas) : old));
         if (treeFetching || cancelTreeInFlight) {
           // An earlier tree read still in flight would overwrite the delta
           // when it lands; cancel it once, replay every delta that arrived in
-          // stream order, and revalidate with the event's causal receipt.
+          // stream order, and revalidate immediately ONLY when every delta in
+          // the batch (and any recent unreceipted delta) is causally fenced.
+          if (!cancelTreeInFlight) {
+            cancelTreeAllFenced = true;
+            cancelRequiredReceipts.clear();
+          }
           pendingCancelDeltas.push(...deltas);
-          if (ev.receipt) cancelTreeFenced = true;
+          if (hasValidReceipt) {
+            for (const tok of recordedReceipts) cancelRequiredReceipts.add(tok);
+          } else {
+            cancelTreeAllFenced = false;
+          }
           if (!cancelTreeInFlight) {
             cancelTreeInFlight = true;
             void qc.cancelQueries({ queryKey: treeKey }).then(() => {
               cancelTreeInFlight = false;
               const batch = pendingCancelDeltas.splice(0);
-              const fenced = cancelTreeFenced;
-              cancelTreeFenced = false;
+              const required = new Set(cancelRequiredReceipts);
+              const allFenced = cancelTreeAllFenced;
+              cancelRequiredReceipts.clear();
+              cancelTreeAllFenced = true;
               if (done) return;
               if (batch.length) {
                 qc.setQueryData<Node>(treeKey, (old) => (old ? applyTreeDeltas(old, batch) : old));
               }
-              if (fenced) {
+              const unfencedWindowClear =
+                lastUnfencedDeltaAt === 0 || Date.now() - lastUnfencedDeltaAt >= UNFENCED_TREE_MS;
+              if (allFenced && unfencedWindowClear && coversProjectReceipts(apiBase, required)) {
                 if (unfencedTreeTimer) {
                   window.clearTimeout(unfencedTreeTimer);
                   unfencedTreeTimer = null;
                 }
                 return qc.invalidateQueries({ queryKey: treeKey });
               }
-              if (!unfencedTreeTimer) {
-                unfencedTreeTimer = window.setTimeout(() => {
-                  unfencedTreeTimer = null;
-                  qc.invalidateQueries({ queryKey: treeKey });
-                }, UNFENCED_TREE_MS);
-              }
+              if (!lastUnfencedDeltaAt) lastUnfencedDeltaAt = Date.now();
+              scheduleUnfencedTreeRefetch();
             });
           }
         }
         invalidateHistory();
       } else {
-        pendingCancelDeltas.length = 0;
+        if (ev.type === "change" && !hasValidReceipt) {
+          lastUnfencedDeltaAt = Date.now();
+          if (unfencedTreeTimer) scheduleUnfencedTreeRefetch();
+        }
         invalidateProject();
       }
       // "resync" means frames were dropped and what was missed is unknowable,

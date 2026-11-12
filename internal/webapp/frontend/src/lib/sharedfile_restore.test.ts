@@ -57,7 +57,7 @@ const { parseConflict } = await import("./conflict.ts");
 const { merge3, merge3PreferRight, merge3ForPath, validMergedText } = await import("./merge3.ts");
 const { frameChannel, saveLocked } = await import("./frameflush.ts");
 const { ackEditedSpan, unackedExitPatches, applyRenderPatches, buildExitSaveRequest } = await import("./editbeacon.ts");
-const { latestProjectReceipt, recordProjectReceipt } = await import("../api/http.ts");
+const { coversProjectReceipts, latestProjectReceipt, recordProjectReceipt } = await import("../api/http.ts");
 
 /* toEqual's semantics: a property that is undefined is a property that is
    absent. Only plain objects and arrays are rebuilt; anything else (a
@@ -3013,11 +3013,17 @@ test("buildExitSaveRequest: hub checkpoint, plain-folder save after an autosave,
   assert.equal(buildExitSaveRequest(bigState, [{ ...para, html: "x" }]), null);
 });
 
-test("recordProjectReceipt deduplicates per device and keeps the highest seq across SSE and HTTP", () => {
+test("recordProjectReceipt deduplicates per device, rejects malformed parts, and checks full batch coverage", () => {
   const apiBase = "/api/p/proj-sse-receipt-test/";
-  recordProjectReceipt(apiBase, "hub-a:3");
-  recordProjectReceipt(apiBase, "hub-a:2"); // out-of-order older seq must not downgrade hub-a:3
-  recordProjectReceipt(apiBase, "dev-peer:11");
-  recordProjectReceipt(apiBase, "hub-a:4,dev-two:7");
+  assert.deepEqual(recordProjectReceipt(apiBase, "hub-a:3"), ["hub-a:3"]);
+  assert.deepEqual(recordProjectReceipt(apiBase, "hub-a:2"), ["hub-a:2"]); // older seq kept at 3
+  assert.deepEqual(recordProjectReceipt(apiBase, "dev-peer:11"), ["dev-peer:11"]);
+  assert.deepEqual(recordProjectReceipt(apiBase, "hub-a:4,dev-two:7"), ["hub-a:4", "dev-two:7"]);
+  assert.deepEqual(recordProjectReceipt(apiBase, "hub-a:5,not-a-receipt"), []);
   assert.equal(latestProjectReceipt(apiBase), "dev-peer:11,hub-a:4,dev-two:7");
+  assert.equal(coversProjectReceipts(apiBase, ["hub-a:3", "dev-two:7"]), true);
+  assert.equal(coversProjectReceipts(apiBase, ["hub-a:3", "missing-dev:1"]), false);
+  // Exceeding the 4-device header cap evicts the oldest device, so full-batch coverage honestly reports false.
+  recordProjectReceipt(apiBase, "dev-three:1,dev-four:1");
+  assert.equal(coversProjectReceipts(apiBase, ["dev-peer:11", "dev-four:1"]), false);
 });

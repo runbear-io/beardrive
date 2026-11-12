@@ -177,10 +177,12 @@ func (s *Server) enrichChange(project string, ev *changeEvent) {
 		var rcs []string
 		seenDev := map[string]int{}
 		bestSeq := map[string]int64{}
+		allCovered := true
 		for _, p := range ev.Paths {
 			fi, ok := snap.files[p]
 			if !ok || fi.DeviceID == "" || fi.Seq <= 0 {
-				continue
+				allCovered = false
+				break
 			}
 			if idx, dup := seenDev[fi.DeviceID]; dup {
 				if fi.Seq > bestSeq[fi.DeviceID] {
@@ -191,9 +193,14 @@ func (s *Server) enrichChange(project string, ev *changeEvent) {
 				seenDev[fi.DeviceID] = len(rcs)
 				bestSeq[fi.DeviceID] = fi.Seq
 				rcs = append(rcs, fileReceipt(fi))
+			} else {
+				allCovered = false
+				break
 			}
 		}
-		ev.Receipt = strings.Join(rcs, ",")
+		if allCovered && len(rcs) > 0 {
+			ev.Receipt = strings.Join(rcs, ",")
+		}
 	}
 	ev.Files = make([]changeFileDelta, 0, len(ev.Paths))
 	for _, p := range ev.Paths {

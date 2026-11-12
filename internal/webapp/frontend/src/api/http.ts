@@ -240,13 +240,38 @@ function held(map: Map<string, Held[]>, base: string): string[] {
 }
 
 /* Record a journal receipt for a project (from an HTTP write or SSE change
-   frame). Supports comma-joined tokens and keeps the highest seq per device. */
-export function recordProjectReceipt(apiBase: string, receipt: string | null | undefined) {
-  if (!receipt) return;
-  for (const raw of receipt.split(",")) {
-    const tok = raw.trim();
-    if (JOURNAL_RECEIPT.test(tok)) holdJournal(apiBase, tok);
+   frame). Supports comma-joined tokens and keeps the highest seq per device.
+   Returns the valid tokens recorded, or an empty list if any part is invalid. */
+export function recordProjectReceipt(apiBase: string, receipt: string | null | undefined): string[] {
+  if (!receipt) return [];
+  const parts = receipt.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!parts.length || parts.some((tok) => !JOURNAL_RECEIPT.test(tok))) return [];
+  for (const tok of parts) {
+    holdJournal(apiBase, tok);
   }
+  return parts;
+}
+
+/* Report whether every `<dev>:<seq>` token in `required` is currently covered
+   (at `>= seq`) by the live X-Bdrive-Receipt header slice for `apiBase`. */
+export function coversProjectReceipts(apiBase: string, required: Iterable<string>): boolean {
+  const liveSeq = new Map<string, number>();
+  for (const tok of held(journalReceipts, apiBase)) {
+    const sep = tok.lastIndexOf(":");
+    if (sep <= 0) continue;
+    const seq = Number(tok.slice(sep + 1));
+    if (Number.isSafeInteger(seq) && seq > 0) liveSeq.set(tok.slice(0, sep), seq);
+  }
+  let count = 0;
+  for (const req of required) {
+    count++;
+    const sep = req.lastIndexOf(":");
+    if (sep <= 0) return false;
+    const seq = Number(req.slice(sep + 1));
+    if (!Number.isSafeInteger(seq) || seq <= 0) return false;
+    if ((liveSeq.get(req.slice(0, sep)) ?? 0) < seq) return false;
+  }
+  return count > 0;
 }
 export function recordCommentReceipt(apiBase: string, key: string | null | undefined) {
   if (key && COMMENT_RECEIPT.test(key)) hold(commentReceipts, apiBase, key, MAX_COMMENT_RECEIPTS);
