@@ -623,3 +623,31 @@ func TestWave2RelayPeerAdoptsExactWriterSnapshot(t *testing.T) {
 		t.Fatalf("healthy relay parked %d conflicts", n)
 	}
 }
+
+func TestWave2FileDeviceRegistryUsesOneLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "devices.json")
+	registry, err := OpenDeviceRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Observe and Bind both enter withDeviceLock; a second flock descriptor
+	// there would wait forever on the fileMu lock this goroutine already owns.
+	registry.Observe(DeviceInfo{ID: "observed-device", User: "alice@example.com", Name: "Laptop"})
+	if err := registry.Bind("alice@example.com", DeviceInfo{ID: "bound-device", Name: "Desktop"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenDeviceRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"observed-device", "bound-device"} {
+		if !reopened.MayActAs("alice@example.com", id) || reopened.MayActAs("bob@example.com", id) {
+			t.Fatalf("device %s ownership did not persist", id)
+		}
+	}
+	// The delete path shares that lock too.
+	reopened.Release("alice@example.com")
+	if reopened.AnyOwned() {
+		t.Fatal("release did not remove persisted device rows")
+	}
+}

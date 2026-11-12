@@ -6,12 +6,9 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -130,22 +127,13 @@ func (r *fileDeviceRepo) deleteDevice(user, id string) error {
 	})
 }
 
-// The separate lock file is stable across the registry's atomic renames.
+// fileMu holds the stable lock file across reload, claim checks and write.
 func (r *fileDeviceRepo) withDeviceLock(write func([]DeviceInfo) error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
-		return err
+	if r.mu.err != nil {
+		return r.mu.err
 	}
-	lock, err := os.OpenFile(r.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	rows, err := r.reload()
 	if err != nil {
 		return err
