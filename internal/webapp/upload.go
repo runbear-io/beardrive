@@ -22,6 +22,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/textmerge"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Uploads run in two modes, chosen by the server per request so the client
@@ -625,6 +626,9 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 	if !s.writablePath(w, r, req.Path) {
 		return
 	}
+	if !guardUploadTwin(w, r, v, req.Path) {
+		return
+	}
 	if !sizeFitsContentAddress(req.SHA256, req.Size) {
 		http.Error(w, "declared size does not match the content address", http.StatusForbidden)
 		return
@@ -670,6 +674,37 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 		s.claimGrant(project, "blobs/"+req.SHA256) // nothing was granted
 	}
 	writeJSON(w, map[string]any{"mode": "server"})
+}
+
+// uploadTwin refuses only creation of a new spelling. An exact existing path
+// remains writable, including in a project that already has twins from device
+// sync. No normalization is applied to journal paths or /store/* writes.
+func uploadTwin(files map[string]FileInfo, p string) string {
+	if _, exists := files[p]; exists {
+		return ""
+	}
+	n := norm.NFC.String(p)
+	hit := ""
+	for existing := range files {
+		e := norm.NFC.String(existing)
+		if (e == n || strings.EqualFold(e, n)) && (hit == "" || existing < hit) {
+			hit = existing
+		}
+	}
+	return hit
+}
+
+func guardUploadTwin(w http.ResponseWriter, r *http.Request, v *volume, p string) bool {
+	snap, err := v.current(r.Context())
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "could not check the file name", err)
+		return false
+	}
+	if existing := uploadTwin(snap.files, p); existing != "" {
+		http.Error(w, fmt.Sprintf("a file named %q already exists (macOS/Windows treat these names as the same file)", existing), http.StatusConflict)
+		return false
+	}
+	return true
 }
 
 // lockPath serializes writes to one path within this process. Returns the
@@ -763,6 +798,9 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// lock table if a hub ever writes enough distinct paths for that to show
 	// up in a heap profile.
 	defer s.lockPath(projectID(r), p)()
+	if !guardUploadTwin(w, r, v, p) {
+		return
+	}
 
 	tmp, size, blob, err := spool(r.Body)
 	if err != nil {
@@ -1419,6 +1457,9 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 	// Commit is what makes a blob part of the volume — it writes the op — so
 	// it is gated even though init already was: a client may call it directly.
 	if !s.writablePath(w, r, req.Path) {
+		return
+	}
+	if !guardUploadTwin(w, r, v, req.Path) {
 		return
 	}
 	// The blob may already sit in storage (direct upload), but commit is what

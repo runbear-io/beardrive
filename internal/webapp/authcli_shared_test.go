@@ -71,14 +71,16 @@ func TestDeviceLoginSpansTwoProcesses(t *testing.T) {
 	}
 }
 
-/* A grant is single-use ACROSS processes, not just within one.
+/*
+A grant is single-use ACROSS processes, not just within one.
 
-   takeGranted used to peek, decide, and take in a second critical section —
-   so every poll in flight when a human approved got its own permanent token.
-   That was fixed inside one process by consuming in the same step that
-   decides. Two instances polling one grant is the same bug with a load
-   balancer in the middle, and it stays closed only because the store's Take
-   is atomic. */
+	takeGranted used to peek, decide, and take in a second critical section —
+	so every poll in flight when a human approved got its own permanent token.
+	That was fixed inside one process by consuming in the same step that
+	decides. Two instances polling one grant is the same bug with a load
+	balancer in the middle, and it stays closed only because the store's Take
+	is atomic.
+*/
 func TestAnApprovedGrantIsWonByExactlyOneProcess(t *testing.T) {
 	a, b := twoCLIAuths(t)
 

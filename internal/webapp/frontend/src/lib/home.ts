@@ -33,15 +33,38 @@ export function sinceSummary(entries: HistoryEntry[], pageFull: boolean): SinceS
   return { changes, files: files.size, agent, capped: pageFull };
 }
 
+// Older cached live entries have no seq. Once a real journal entry arrives
+// for the same path within this window, retire the synthetic stand-in.
+const SYNTHETIC_DEDUP_MS = 15_000;
+
 // Two newest-first pages as one, each change once.
 export function mergeEntries(a: HistoryEntry[], b: HistoryEntry[]): HistoryEntry[] {
   // device + seq is one op; the fallback (an older hub with no seq) can merge
   // two same-second edits of one path from one device.
   const key = (e: HistoryEntry) =>
     e.seq ? (e.device?.id ?? "") + "\0" + e.seq : e.time + "\0" + e.path + "\0" + e.kind + "\0" + (e.device?.id ?? "");
+  const all = [...a, ...b];
+  // Real (seq > 0) entry times per path, to retire the synthetic ones they
+  // supersede. A hub that sends no seq at all has none, so nothing retires.
+  const real = new Map<string, number[]>();
+  for (const e of all) {
+    if (!e.seq) continue;
+    const t = Date.parse(e.time);
+    const list = real.get(e.path);
+    if (list) list.push(t);
+    else real.set(e.path, [t]);
+  }
+  const superseded = (e: HistoryEntry) => {
+    if (e.seq) return false;
+    const times = real.get(e.path);
+    if (!times) return false;
+    const t = Date.parse(e.time);
+    return times.some((r) => Math.abs(r - t) <= SYNTHETIC_DEDUP_MS);
+  };
   const seen = new Set<string>();
   const out: HistoryEntry[] = [];
-  for (const e of [...a, ...b]) {
+  for (const e of all) {
+    if (superseded(e)) continue;
     const k = key(e);
     if (seen.has(k)) continue;
     seen.add(k);

@@ -16,9 +16,12 @@ import { markdown } from "@codemirror/lang-markdown";
 import { json } from "@codemirror/lang-json";
 import { javascript } from "@codemirror/lang-javascript";
 import { python } from "@codemirror/lang-python";
+import { html } from "@codemirror/lang-html";
+import { css } from "@codemirror/lang-css";
+import { tags } from "@lezer/highlight";
 import {
   syntaxHighlighting,
-  defaultHighlightStyle,
+  HighlightStyle,
 } from "@codemirror/language";
 import { completionKeymap } from "@codemirror/autocomplete";
 import { foldKeymap } from "@codemirror/language";
@@ -72,7 +75,25 @@ export type EditorInfo = {
   line: number;
   col: number;
   collab: CollabDoc | null;
+  jumpToLine?: (line: number) => void;
 };
+
+// Theme variables keep the same grammar readable on either editor ground.
+const editorHighlightStyle = HighlightStyle.define([
+  { tag: [tags.keyword, tags.operator], color: "var(--cm-syn-keyword)" },
+  { tag: [tags.string, tags.regexp], color: "var(--cm-syn-string)" },
+  { tag: [tags.number, tags.bool, tags.null], color: "var(--cm-syn-number)" },
+  { tag: [tags.propertyName, tags.attributeName], color: "var(--cm-syn-property)" },
+  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: "var(--cm-syn-func)" },
+  { tag: [tags.typeName, tags.className, tags.tagName], color: "var(--cm-syn-type)" },
+  { tag: tags.comment, color: "var(--cm-syn-comment)", fontStyle: "italic" },
+  { tag: [tags.meta, tags.processingInstruction], color: "var(--cm-syn-meta)" },
+  { tag: [tags.url, tags.link], color: "var(--cm-syn-url)", textDecoration: "underline" },
+  { tag: tags.heading, color: "var(--cm-syn-keyword)", fontWeight: "bold" },
+  { tag: tags.emphasis, fontStyle: "italic" },
+  { tag: tags.strong, fontWeight: "bold" },
+  { tag: tags.strikethrough, textDecoration: "line-through" },
+]);
 
 export function Editor({
   apiBase,
@@ -251,6 +272,15 @@ export function Editor({
     if (handle) handle.current = file;
 
     const who = meRef.current?.name ?? "";
+    const jumpToLine = (number: number) => {
+      if (!view) return;
+      const line = view.state.doc.line(Math.max(1, Math.min(number, view.state.doc.lines)));
+      view.dispatch({
+        selection: { anchor: line.from },
+        effects: EditorView.scrollIntoView(line.from, { y: "center" }),
+      });
+      view.focus();
+    };
     const report = (v: EditorView) => {
       const head = v.state.selection.main.head;
       const line = v.state.doc.lineAt(head);
@@ -259,6 +289,7 @@ export function Editor({
         line: line.number,
         col: head - line.from + 1,
         collab: view === v && viaRoom ? file.collab : null,
+        jumpToLine,
       });
     };
     const meetingExt = (collab: CollabDoc | null) =>
@@ -291,7 +322,7 @@ export function Editor({
           highlightActiveLine(),
           history(),
           langSlot.of(languageFor(path)),
-          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          syntaxHighlighting(editorHighlightStyle),
           slashMenu({
             me: who,
             files: () => filesRef.current,
@@ -431,6 +462,8 @@ function languageFor(path: string): Extension {
     return javascript({ jsx: /\.[jt]sx$/i.test(path), typescript: /\.tsx?$/i.test(path) });
   }
   if (/\.py$/i.test(path)) return python();
+  if (/\.(html?|svg)$/i.test(path)) return html();
+  if (/\.css$/i.test(path)) return css();
   return [];
 }
 

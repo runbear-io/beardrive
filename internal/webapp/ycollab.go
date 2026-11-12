@@ -1454,7 +1454,8 @@ func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) (f
 	if snapshotSeam != nil {
 		snapshotSeam(room)
 	}
-	cur, curSha, have, err := s.roomBytes(ctx, room)
+	cur, curFile, have, err := s.roomFile(ctx, room)
+	curSha, curWin := curFile.Blob, fileWin(curFile, path)
 	if ctx.Err() != nil {
 		return
 	}
@@ -1530,7 +1531,15 @@ func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) (f
 	if s.apiMux == nil {
 		return
 	}
-	if have && curSha != base && s.contains(ctx, doc, project, curSha) {
+	head := s.roomHeadRecord(ctx, project, path)
+	// A restore can point at a blob this room authored before. Its stored
+	// Yjs state is then a subset of doc too, but that is not proof that this
+	// journal winner is our snapshot: a newer op for a different blob than
+	// the recorded head proves an outside write AFTER that snapshot. Keep
+	// the old base, so the conditional put refuses and reconcile splices the
+	// outside version into the live room instead of overwriting the restore.
+	outside := head.Win != "" && curWin != "" && curWin > head.Win && curSha != head.SHA
+	if have && curSha != base && !outside && s.contains(ctx, doc, project, curSha) {
 		// The head was written by this room on another process — the
 		// previous lease holder — and the relay has already delivered every
 		// item it wrote, so build on it instead of parking beside it.

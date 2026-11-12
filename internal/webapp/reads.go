@@ -159,15 +159,18 @@ type ReadLedger struct {
 	mu sync.Mutex
 	// byProject holds every bucket, grouped by project so a query about one
 	// project reads only that project's rows rather than the whole hub's.
-	byProject    map[string]map[ReadStatKey]ReadStat
-	dirty        map[ReadStatKey]bool
-	pendingDel   []ReadStatKey             // retention deletions awaiting a successful flush
-	seen         map[ReadStatKey]time.Time // debounce; Day field unused ("")
-	pendingSess  map[sessionReadKey]SessionRead
-	lastFlush    time.Time
-	lastSessPrun time.Time
-	warned       bool
-	sessWarned   bool
+	byProject     map[string]map[ReadStatKey]ReadStat
+	dirty         map[ReadStatKey]bool
+	pendingDeltas map[ReadStatKey]ReadStat // increments, never loaded totals
+	ver           versionGate
+	lastRefresh   time.Time
+	pendingDel    []ReadStatKey             // retention deletions awaiting a successful flush
+	seen          map[ReadStatKey]time.Time // debounce; Day field unused ("")
+	pendingSess   map[sessionReadKey]SessionRead
+	lastFlush     time.Time
+	lastSessPrun  time.Time
+	warned        bool
+	sessWarned    bool
 }
 
 // NewReadLedger loads the ledger and immediately folds buckets older than the
@@ -178,12 +181,13 @@ func NewReadLedger(repo ReadRepo, retentionDays int) (*ReadLedger, error) {
 		retentionDays = DefaultReadRetentionDays
 	}
 	l := &ReadLedger{
-		repo:      repo,
-		retention: time.Duration(retentionDays) * 24 * time.Hour,
-		byProject: map[string]map[ReadStatKey]ReadStat{},
-		dirty:     map[ReadStatKey]bool{},
-		seen:      map[ReadStatKey]time.Time{},
-		lastFlush: time.Now(),
+		repo:          repo,
+		retention:     time.Duration(retentionDays) * 24 * time.Hour,
+		byProject:     map[string]map[ReadStatKey]ReadStat{},
+		dirty:         map[ReadStatKey]bool{},
+		pendingDeltas: map[ReadStatKey]ReadStat{},
+		seen:          map[ReadStatKey]time.Time{},
+		lastFlush:     time.Now(),
 	}
 	stats, err := repo.Load()
 	if err != nil {
@@ -252,7 +256,15 @@ func (l *ReadLedger) Record(project, path, kind, actor string) {
 	st.Count++
 	st.Last = now
 	l.setStat(key, st)
-	l.dirty[key] = true
+	if _, additive := l.repo.(readAdder); additive {
+		d := l.pendingDeltas[key]
+		d.Project, d.Path, d.Day, d.Kind, d.Actor = project, path, key.Day, kind, actor
+		d.Count++
+		d.Last = now
+		l.pendingDeltas[key] = d
+	} else {
+		l.dirty[key] = true
+	}
 	if now.Sub(l.lastFlush) >= readFlushEvery {
 		l.flushLocked()
 	}
@@ -365,6 +377,7 @@ func (l *ReadLedger) Heat(project, prefix string, since time.Time) map[string]He
 	humans := map[string]map[string]bool{} // path → distinct human actors
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.refreshLocked()
 	for key, st := range l.byProject[project] {
 		if prefix != "" && !strings.HasPrefix(key.Path, prefix+"/") {
 			continue
@@ -420,6 +433,7 @@ func (l *ReadLedger) AgentHeat(project string, since time.Time) map[string]map[s
 	out := map[string]map[string]int64{}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.refreshLocked()
 	for key, st := range l.byProject[project] {
 		if key.Kind != ReadKindAgent {
 			continue
@@ -474,6 +488,7 @@ func (l *ReadLedger) ShareOpens(project string) map[string]ShareOpen {
 	out := map[string]ShareOpen{}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.refreshLocked()
 	for key, st := range l.byProject[project] {
 		if key.Kind != ReadKindShare {
 			continue
@@ -498,7 +513,7 @@ func (l *ReadLedger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.flushLocked()
-	if n := len(l.dirty); n > 0 {
+	if n := len(l.dirty) + len(l.pendingDeltas); n > 0 {
 		return fmt.Errorf("read ledger: flush failed, %d buckets pending", n)
 	}
 	return nil
@@ -537,6 +552,42 @@ func (l *ReadLedger) setStat(k ReadStatKey, st ReadStat) {
 	rows[k] = st
 }
 
+// refreshLocked reloads sibling totals at most once per two seconds, overlaying
+// only our unflushed increments. Loaded totals are never flushed as deltas.
+// Retention folds still queued locally must land before reloading their source
+// rows, or the same old daily rows would be counted twice.
+func (l *ReadLedger) refreshLocked() {
+	if _, ok := l.repo.(readAdder); !ok || len(l.dirty) > 0 || len(l.pendingDel) > 0 {
+		return
+	}
+	now := time.Now()
+	if now.Sub(l.lastRefresh) < 2*time.Second {
+		return
+	}
+	l.lastRefresh = now
+	token, stale := l.ver.stale(l.repo, &l.mu)
+	if !stale {
+		return
+	}
+	stats, err := l.repo.Load()
+	if err != nil {
+		return // telemetry never breaks the query
+	}
+	l.byProject = map[string]map[ReadStatKey]ReadStat{}
+	for _, st := range stats {
+		l.setStat(st.key(), st)
+	}
+	for k, d := range l.pendingDeltas {
+		cur := l.byProject[k.Project][k]
+		d.Count += cur.Count
+		if cur.Last.After(d.Last) {
+			d.Last = cur.Last
+		}
+		l.setStat(k, d)
+	}
+	l.ver.fresh(token)
+}
+
 // compactLocked folds daily buckets older than the retention horizon into
 // their all-time rows, queueing the daily rows for deletion. Callers hold mu.
 func (l *ReadLedger) compactLocked() {
@@ -569,6 +620,18 @@ func (l *ReadLedger) compactLocked() {
 // dropping a deletion would resurrect folded rows on the next load and
 // double-count them.
 func (l *ReadLedger) persistLocked() error {
+	if adder, ok := l.repo.(readAdder); ok && len(l.pendingDeltas) > 0 {
+		batch := make([]ReadStat, 0, len(l.pendingDeltas))
+		for _, d := range l.pendingDeltas {
+			batch = append(batch, d)
+		}
+		if err := adder.AddBatch(batch); err != nil {
+			return err // retain exactly these deltas for the next attempt
+		}
+		l.pendingDeltas = map[ReadStatKey]ReadStat{}
+		l.ver.invalidate()
+		l.lastRefresh = time.Time{}
+	}
 	if len(l.pendingDel) > 0 {
 		if err := l.repo.DeleteBatch(l.pendingDel); err != nil {
 			// Same one-transaction problem as the put path below, worse for

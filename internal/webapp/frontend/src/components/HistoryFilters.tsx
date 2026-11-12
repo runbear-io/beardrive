@@ -19,6 +19,18 @@ import { RANGE_LABEL } from "../lib/activity";
 
 export type DeviceOption = { id: string; name: string };
 
+// Two machines a teammate never renamed answer to the same hostname, and two
+// identical options are a coin toss. A name shared by more than one device
+// carries the head of its id; a unique one stays as it is.
+export function deviceLabels(devices: DeviceOption[]): Map<string, string> {
+  const count = new Map<string, number>();
+  for (const d of devices) count.set(d.name, (count.get(d.name) ?? 0) + 1);
+  const out = new Map<string, string>();
+  for (const d of devices)
+    out.set(d.id, (count.get(d.name) ?? 0) > 1 && d.name !== d.id ? `${d.name} (${d.id.slice(0, 6)})` : d.name);
+  return out;
+}
+
 const SEGMENTS: [string, string][] = [
   ["", "Everyone"],
   ["agent", "Agents"],
@@ -77,6 +89,7 @@ export function HistoryFilters(props: {
     filters?.device && !devices.some((d) => d.id === filters.device)
       ? [{ id: filters.device, name: filters.device }, ...devices]
       : devices;
+  const labels = deviceLabels(devOptions);
   // One control narrows by machine or by account: both answer "whose
   // changes". A URL carrying both shows the device; the chips name each.
   const who = filters?.device ? "d:" + filters.device : filters?.user ? "u:" + filters.user : "";
@@ -128,7 +141,7 @@ export function HistoryFilters(props: {
             <optgroup label="Devices">
               {devOptions.map((d) => (
                 <option key={d.id} value={"d:" + d.id}>
-                  {d.name}
+                  {labels.get(d.id) ?? d.name}
                 </option>
               ))}
             </optgroup>
@@ -219,7 +232,7 @@ export function filterChips(f: Filters | undefined, devices: DeviceOption[]): [s
   const out: [string, Filters][] = [];
   if (f.q) out.push(["path: " + f.q, without("q")]);
   if (f.actor) out.push([f.actor === "agent" ? "Agents" : "People", without("actor")]);
-  if (f.device) out.push([devices.find((d) => d.id === f.device)?.name || f.device, without("device")]);
+  if (f.device) out.push([deviceLabels(devices).get(f.device) || f.device, without("device")]);
   if (f.user) out.push([f.user, without("user")]);
   if (f.range) out.push([RANGE_LABEL[f.range] || f.range, without("range")]);
   if (f.since || f.until) out.push([(f.since || "…") + " – " + (f.until || "…"), without("since", "until")]);

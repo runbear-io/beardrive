@@ -83,7 +83,9 @@ export function HistoryRow({
   diff?: { apiBase: string; prev?: string };
   restore?: RestoreAction;
   // Only ever offered on an add inside a run card, where "this run created
-  // the file" is a statement we can make.
+  // the file" is a statement we can make — and the view passes it only while
+  // the file is still in the tree holding the bytes the run wrote, so the
+  // removal takes away nothing but the run's own work.
   remove?: RemoveAction;
   // The version this row puts back: its own bytes, or — for a delete — the
   // content it removed. The view computes it, since it needs the whole feed.
@@ -114,11 +116,13 @@ export function HistoryRow({
   const clickable = kind !== "delete";
   // A delete has no content, and a first version has nothing behind it.
   const diffable = !!diff && kind !== "delete" && !!e.blob;
-  // Inside a run card an "add" is a file the run CREATED: putting its bytes
-  // back would be a no-op, so the undo it wants is a removal instead.
+  // Inside a run card an "add" with nothing before it is a file the run
+  // CREATED: putting its bytes back would be a no-op, so the undo it wants is
+  // a removal instead. An add that landed on older content (a move or re-add
+  // over a path that had bytes) replaced something, so it stays a restore.
   // Everywhere else (the per-file version list) a first version is very much
   // restorable — it is usually the version someone wants back.
-  const createdByRun = !!inRun && kind === "add";
+  const createdByRun = !!inRun && kind === "add" && !e.prev;
   const restorable = !!restore && !!restoreSha && !createdByRun;
   const removable = !!remove && createdByRun;
   const busy = !!restore?.busy && restore.busy === e.path + restoreSha;

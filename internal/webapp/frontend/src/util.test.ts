@@ -3,7 +3,16 @@
 // cheap to pin: the bare run IS the "storage missing" case.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { absTime, displayName, lastProject, rememberProject, resolveWiki } from "./util.ts";
+import {
+  absTime,
+  displayName,
+  headingSlug,
+  lastProject,
+  rememberProject,
+  resolveWiki,
+  resolveWikiTarget,
+  splitWikiTarget,
+} from "./util.ts";
 
 // Swap globalThis.localStorage for the length of one call, always putting the
 // original back — later tests in the same process must not inherit a stub.
@@ -76,6 +85,40 @@ test("an exact path beats a basename anywhere else in the tree", () => {
   assert.equal(resolveWiki("archive/guide", FILES)?.path, "archive/guide.md");
   // Bare "guide" is ambiguous by basename; the top-level path wins.
   assert.equal(resolveWiki("guide", FILES)?.path, "guide.md");
+});
+
+test("a #heading or ^block suffix names the fragment, not the file", () => {
+  assert.deepEqual(splitWikiTarget("other-doc#Target Heading"), { file: "other-doc", fragment: "#target-heading" });
+  assert.deepEqual(splitWikiTarget("doc#^abc123"), { file: "doc", fragment: "#abc123" });
+  assert.deepEqual(splitWikiTarget("doc^abc123"), { file: "doc", fragment: "#abc123" });
+  assert.deepEqual(splitWikiTarget("#Only Here"), { file: "", fragment: "#only-here" });
+  assert.deepEqual(splitWikiTarget("doc#"), { file: "doc", fragment: "" });
+  assert.equal(resolveWiki("guide#Setup", FILES)?.path, "guide.md");
+  assert.deepEqual(resolveWikiTarget("notes/readme#Install Steps", FILES), {
+    path: "notes/readme.md",
+    fragment: "#install-steps",
+  });
+  assert.deepEqual(resolveWikiTarget("#Top", FILES), { path: "", fragment: "#top" });
+  assert.equal(resolveWikiTarget("nowhere#x", FILES), undefined);
+});
+
+test("heading slugs match the hub's ids, Unicode kept", () => {
+  assert.equal(headingSlug("Target Heading"), "target-heading");
+  assert.equal(headingSlug("  Hello, World!  "), "hello-world");
+  assert.equal(headingSlug("snake_case-name"), "snake-case-name");
+  assert.equal(headingSlug("한글 제목"), "한글-제목");
+  // NFD input slugs to the NFC id the server emits.
+  assert.equal(headingSlug("한글".normalize("NFD")), "한글");
+  assert.equal(headingSlug("Ünïcode"), "ünïcode");
+  assert.equal(headingSlug("!!!"), "heading");
+});
+
+test("wikilinks match across NFC/NFD and return the tree's own path", () => {
+  const nfd = "notes/회의록.md".normalize("NFD");
+  const files = [{ path: nfd, name: "회의록.md".normalize("NFD") }];
+  assert.equal(resolveWiki("회의록", files)?.path, nfd); // NFC target, NFD file
+  assert.equal(resolveWiki("notes/회의록".normalize("NFD"), files)?.path, nfd);
+  assert.deepEqual(resolveWikiTarget("회의록#안건", files), { path: nfd, fragment: "#안건" });
 });
 
 test("storage that throws is swallowed on both sides", () => {

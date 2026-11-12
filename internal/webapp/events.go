@@ -96,7 +96,10 @@ type changeEvent struct {
 	// own writes from a peer's. It is the id the pusher named in its own
 	// header — display-grade, exactly like the one History already shows
 	// every project member — never an authorization input.
-	Device string `json:"device,omitempty"`
+	Device   string `json:"device,omitempty"`
+	User     string `json:"user,omitempty"`
+	UserName string `json:"user_name,omitempty"`
+	Kind     string `json:"kind,omitempty"` // "put" | "delete" for single-kind frames
 }
 
 type subscriber struct {
@@ -177,7 +180,10 @@ func (s *Server) enrichChange(project string, ev *changeEvent) {
 				Device: fi.Device, Link: fi.Link,
 			})
 		} else {
-			ev.Files = append(ev.Files, changeFileDelta{Path: p, Op: "delete"})
+			ev.Files = append(ev.Files, changeFileDelta{
+				Path: p, Op: "delete", Time: time.Now().UTC(),
+				User: ev.User, UserName: ev.UserName, Device: ev.DeviceName,
+			})
 		}
 	}
 	if frame, err := json.Marshal(ev); err != nil || len(frame) > maxRelayFrame {
@@ -292,6 +298,8 @@ func (h *eventHub) fanout(project string, frame []byte) {
 // the same call sites and nothing else.
 func (s *Server) publishChange(r *http.Request, source string, paths []string, puts, deletes int) {
 	if ev, ok := changeEventFor(r, source, paths, puts, deletes); ok {
+		u := s.requestUser(r)
+		ev.User, ev.UserName = u.Email, u.Name
 		s.events().publish(projectID(r), ev)
 	}
 }
@@ -307,6 +315,11 @@ func changeEventFor(r *http.Request, source string, paths []string, puts, delete
 		Type: "change", Puts: puts, Deletes: deletes,
 		Source: source, Agent: source == "sync",
 		Device: deviceID(r), DeviceName: r.Header.Get("X-Bdrive-Device-Name"),
+	}
+	if deletes > 0 && puts == 0 {
+		ev.Kind = "delete"
+	} else if puts > 0 && deletes == 0 {
+		ev.Kind = "put"
 	}
 	if len(paths) > eventPathLimit {
 		paths, ev.More = paths[:eventPathLimit], true

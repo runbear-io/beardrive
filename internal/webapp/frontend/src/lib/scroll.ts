@@ -11,15 +11,37 @@
    onRendered for something that isn't a render — a metadata refresh, a poll —
    still cannot move a reader who has taken over. */
 
-export type Goal = { key: string; want: number; attempts: number };
+export type Goal = { key: string; want: number; attempts: number; anchor?: string };
 
 export const MAX_APPLY = 3;
 
 /** How far off `want` still counts as "that was our own scrollTo". */
 const SLOP = 2;
 
-export function armGoal(key: string, want: number): Goal {
-  return { key, want, attempts: 0 };
+/** `anchor`: an element id to land on instead of `want` once it renders
+    (a `#heading` link, or Back/Forward to one). */
+export function armGoal(key: string, want: number, anchor?: string): Goal {
+  return anchor ? { key, want, attempts: 0, anchor } : { key, want, attempts: 0 };
+}
+
+/** The element id a location hash names, or undefined. A malformed escape
+    is taken literally rather than thrown. */
+export function anchorFromHash(hash: string): string | undefined {
+  const raw = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!raw) return undefined;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/** Point a live anchor goal at where its element now sits. Returns false
+    when the goal is retired, for another route, or has no anchor. */
+export function retarget(g: Goal, key: string, want: number): boolean {
+  if (g.key !== key || !g.anchor) return false;
+  g.want = want;
+  return true;
 }
 
 /** The offset to scroll to, or null for "do nothing". Counts the attempt. */

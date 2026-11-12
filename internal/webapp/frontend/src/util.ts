@@ -42,19 +42,70 @@ export function joinPath(dir: string, rel: string): string {
   return out.join("/");
 }
 
+/* A heading's id, as the hub renders it (markdown.go headingIDs): trimmed,
+   NFC, ASCII letters/digits lowercased, ASCII space/-/_ each to "-", any other
+   letter or number kept lowercased, everything else dropped, "heading" when
+   nothing is left. The -N suffix for a repeated heading is per document and
+   cannot be known from the text, so it is not applied here. */
+export function headingSlug(text: string): string {
+  let out = "";
+  for (const ch of text.trim().normalize("NFC")) {
+    if (/^[A-Za-z0-9]$/.test(ch)) out += ch.toLowerCase();
+    else if (/^[ \t\n\r\f\v_-]$/.test(ch)) out += "-";
+    else if (ch > "\x7f" && /^[\p{L}\p{N}]$/u.test(ch)) out += ch.toLowerCase();
+  }
+  return out || "heading";
+}
+
+/* Split an Obsidian wikilink target into the file part and the fragment:
+   [[doc#Some Heading]] -> "doc", "#some-heading"; [[doc#^block]] -> "doc",
+   "#block" (a block reference). A bare [[#Heading]] has an empty file part:
+   the document it is written in. */
+export function splitWikiTarget(target: string): { file: string; fragment: string } {
+  const i = target.search(/[#^]/);
+  if (i < 0) return { file: target.trim(), fragment: "" };
+  const file = target.slice(0, i).trim();
+  const rest = target.slice(i).replace(/^#?\^/, "").replace(/^#/, "").trim();
+  if (!rest) return { file, fragment: "" };
+  const block = target[i] === "^" || target.slice(i).startsWith("#^");
+  return { file, fragment: "#" + (block ? rest : headingSlug(rest)) };
+}
+
 /* Obsidian-style wikilink target -> file. Exact path first, then basename;
-   ".md" is optional on both; everything case-insensitive. The rules are the
-   product decision, so they live in one place and get tested without a
-   browser (node --test has no DOM, so this cannot live in FileView). */
-export function resolveWiki(target: string, files: { path: string; name: string }[]) {
-  const want = target.toLowerCase();
+   ".md" is optional on both; everything case-insensitive, and compared in
+   NFC — a file synced from a Mac carries an NFD name, which the same visible
+   target must still find. A #heading or ^block suffix is ignored here (see
+   resolveWikiTarget). The rules are the product decision, so they live in one
+   place and get tested without a browser (node --test has no DOM, so this
+   cannot live in FileView). */
+export function resolveWiki<F extends { path: string; name: string }>(target: string, files: F[]): F | undefined {
+  const want = splitWikiTarget(target).file.normalize("NFC").toLowerCase();
+  if (!want) return undefined;
+  const fold = (s: string) => s.normalize("NFC").toLowerCase();
   return (
-    files.find((f) => f.path.toLowerCase() === want || f.path.toLowerCase() === want + ".md") ||
     files.find((f) => {
-      const n = f.name.toLowerCase();
+      const p = fold(f.path);
+      return p === want || p === want + ".md";
+    }) ||
+    files.find((f) => {
+      const n = fold(f.name);
       return n === want || n === want + ".md";
     })
   );
+}
+
+/* A wikilink target resolved to the file's ACTUAL path (its own Unicode
+   form, which is what the tree and the URL use) plus any #fragment. `path`
+   is "" for a fragment-only link into the current document; undefined is a
+   miss. */
+export function resolveWikiTarget(
+  target: string,
+  files: { path: string; name: string }[],
+): { path: string; fragment: string } | undefined {
+  const { file, fragment } = splitWikiTarget(target);
+  if (!file) return fragment ? { path: "", fragment } : undefined;
+  const hit = resolveWiki(target, files);
+  return hit ? { path: hit.path, fragment } : undefined;
 }
 
 /* clipboard copy that never throws on a non-HTTPS origin (where

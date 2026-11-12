@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { fileURLFor } from "./useBlob";
 import { applyTreeDeltas } from "./useBrowse";
-import type { ChangeFileDelta, HistoryEntry, Node } from "../api/types";
+import type { ChangeFileDelta, Node } from "../api/types";
 
 /* Live change notification.
    The hub streams "these paths changed" over server-sent events, so a
@@ -55,20 +55,6 @@ type ChangeEvent = {
   people?: { name: string; path?: string }[];
 };
 
-const historyFromDelta = (ev: ChangeEvent, d: ChangeFileDelta): HistoryEntry => ({
-  time: d.time || new Date().toISOString(),
-  kind: d.op === "delete" ? "delete" : "edit",
-  path: d.path,
-  ...(d.size === undefined ? {} : { size: d.size }),
-  user: d.user,
-  user_name: d.user_name,
-  author: d.author,
-  device: {
-    id: ev.device || d.device,
-    name: ev.device_name || d.device,
-  },
-  session: ev.agent ? "live" : undefined,
-});
 
 export function useProjectEvents(
   apiBase: string,
@@ -110,46 +96,18 @@ export function useProjectEvents(
     const COALESCE_MS = 2_000;
     let coalesce: number | null = null;
     let historyCoalesce: number | null = null;
-    let historyIncludeSince = false;
-    const invalidateHistory = (includeSince: boolean) => {
-      if (includeSince) historyIncludeSince = true;
+    const invalidateHistory = () => {
       if (historyCoalesce) return;
       historyCoalesce = window.setTimeout(() => {
-        const since = historyIncludeSince;
         historyCoalesce = null;
-        historyIncludeSince = false;
-        qc.invalidateQueries({
-          queryKey: ["history", apiBase],
-          predicate: since ? undefined : (q) => q.queryKey[2] !== "since",
-        });
-        if (since) {
-          qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
-        }
+        // A change frame describes the current tree, not a journal entry:
+        // no seq, and sometimes no actor. Refetch instead of inventing an
+        // anonymous activity row that can survive beside the real entry.
+        qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history-summary", apiBase] });
+        qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
       }, COALESCE_MS);
-    };
-    const patchSinceHistoryCaches = (ev: ChangeEvent) => {
-      if (!ev.files?.length) return;
-      const additions = ev.files.map((d) => historyFromDelta(ev, d));
-      const merge = (key: readonly unknown[], data: { entries: HistoryEntry[] } | undefined, cap: number) => {
-        if (!data) return;
-        const seen = new Set(
-          data.entries.map((e) => `${e.device?.id || e.device?.name || ""}\0${e.time}\0${e.path}\0${e.kind}`),
-        );
-        const fresh = additions.filter((e) => {
-          const k = `${e.device?.id || e.device?.name || ""}\0${e.time}\0${e.path}\0${e.kind}`;
-          if (seen.has(k)) return false;
-          seen.add(k);
-          return true;
-        });
-        if (fresh.length) qc.setQueryData(key, { ...data, entries: [...fresh, ...data.entries].slice(0, cap) });
-      };
-      for (const [key, data] of qc.getQueriesData<{ entries: HistoryEntry[] }>({ queryKey: ["history", apiBase] })) {
-        if (key[2] === "since") merge(key, data, 100);
-      }
-      for (const [key, data] of qc.getQueriesData<{ entries: HistoryEntry[] }>({ queryKey: ["homeHistory", apiBase] })) {
-        merge(key, data, 200);
-      }
     };
     const invalidateProject = () => {
       if (coalesce) return;
@@ -157,6 +115,7 @@ export function useProjectEvents(
         coalesce = null;
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history-summary", apiBase] });
         qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         // Mounted only on the Insights view, so other pages pay nothing.
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
@@ -208,6 +167,7 @@ export function useProjectEvents(
         // History pages list paths and actors: after a scope change they may
         // name content this reader can no longer see.
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history-summary", apiBase] });
         qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         return;
       }
@@ -224,12 +184,7 @@ export function useProjectEvents(
       const canPatchTree = ev.type === "change" && !ev.more && changes > 0 && !!ev.files?.length && !!oldTree;
       if (canPatchTree) {
         qc.setQueryData<Node>(["tree", apiBase], (old) => (old ? applyTreeDeltas(old, ev.files!) : old));
-        if (changes === ev.files!.length) {
-          patchSinceHistoryCaches(ev);
-          invalidateHistory(false);
-        } else {
-          invalidateHistory(true);
-        }
+        invalidateHistory();
       } else {
         invalidateProject();
       }

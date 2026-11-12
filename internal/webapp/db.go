@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -34,13 +35,16 @@ type MetaStore interface {
 	Close() error
 }
 
-/* PendingGrant is one piece of short-lived, single-use sign-in state: a
-   pending `bdrive login`, an OAuth state nonce, an MCP consent code.
+/*
+PendingGrant is one piece of short-lived, single-use sign-in state: a
 
-   Payload is OPAQUE to the store. Those three have nothing in common except a
-   key, a deadline and single use, so encoding what each holds here would put
-   several owners' shapes into one schema and buy nothing; each owner marshals
-   its own. */
+	pending `bdrive login`, an OAuth state nonce, an MCP consent code.
+
+	Payload is OPAQUE to the store. Those three have nothing in common except a
+	key, a deadline and single use, so encoding what each holds here would put
+	several owners' shapes into one schema and buy nothing; each owner marshals
+	its own.
+*/
 type PendingGrant struct {
 	Kind    string // who owns it: "cli", "oauth-state", "mcp-code"
 	Key     string // unique within the kind
@@ -48,18 +52,20 @@ type PendingGrant struct {
 	Expires time.Time
 }
 
-/* PendingRepo persists those grants.
+/*
+PendingRepo persists those grants.
 
-   This exists because every flow that uses them spans MORE THAN ONE REQUEST —
-   `bdrive login` is mint, approve, poll; an OAuth sign-in is redirect and
-   callback — and until now each hop had to land on the same PROCESS, because
-   the state was a map inside it. That is a coin flip per hop behind two
-   instances, and it is the real blocker on raising max_instance_count, not
-   the journal (docs/hub-load-prd.md Phase 3).
+	This exists because every flow that uses them spans MORE THAN ONE REQUEST —
+	`bdrive login` is mint, approve, poll; an OAuth sign-in is redirect and
+	callback — and until now each hop had to land on the same PROCESS, because
+	the state was a map inside it. That is a coin flip per hop behind two
+	instances, and it is the real blocker on raising max_instance_count, not
+	the journal (docs/hub-load-prd.md Phase 3).
 
-   Expiry is enforced on READ, not by a sweeper: an expired grant must be
-   refused whether or not anything has pruned lately. Prune only reclaims
-   space. */
+	Expiry is enforced on READ, not by a sweeper: an expired grant must be
+	refused whether or not anything has pruned lately. Prune only reclaims
+	space.
+*/
 type PendingRepo interface {
 	Put(g PendingGrant) error
 	// Get reads without consuming — the device-flow poll reads the same grant
@@ -151,6 +157,68 @@ type ReadRepo interface {
 	PutBatch(stats []ReadStat) error // upsert by (project, path, day, kind, actor)
 	DeleteBatch(keys []ReadStatKey) error
 }
+
+// ---- atomic multi-process operations (optional) -------------------------
+//
+// A hub is more than one process, and each holds its own in-memory registry.
+// A check made against that copy ("is this the last owner?", "is this name
+// free?", "does this link still exist?") can be stale by the time the write
+// lands, so the invariants below are re-checked by the STORE, inside the same
+// transaction (SQL) or flock (file) as the write. They are optional
+// capabilities rather than interface methods so a read-only or wrapping repo
+// (the desktop's project list, test doubles that embed an interface) keeps
+// compiling and keeps the single-process behaviour it always had.
+
+var (
+	// ErrLastOwner refuses a write that would leave an org with no owner.
+	ErrLastOwner = errors.New("an organization must keep at least one owner")
+	// ErrShareNotFound refuses re-dating a share link that no longer exists.
+	ErrShareNotFound = errors.New("no such share link")
+)
+
+// ownerGuardedOrgRepo writes one membership row (role "" removes it) and
+// refuses with ErrLastOwner when the row is an owner today and the write would
+// leave the org with none — counted from the store, under the write's lock.
+type ownerGuardedOrgRepo interface {
+	PutMemberGuarded(org, email, role string, joined time.Time) error
+}
+
+// orgCreator inserts o unless an org with its id already exists.
+type orgCreator interface {
+	CreateOrgIfAbsent(o Org) (created bool, err error)
+}
+
+// projectCreator inserts a new project unless its (org, name) is taken, and
+// answers the id that holds the name either way.
+type projectCreator interface {
+	CreateProjectIfAbsent(p Project) (id string, created bool, err error)
+}
+
+// shareExpiryUpdater re-dates an existing share and fails ErrShareNotFound
+// for one that is gone — never an upsert that writes a revoked link back.
+type shareExpiryUpdater interface {
+	UpdateExpiry(token string, expires time.Time) error
+}
+
+// readAdder is the additive flush: each delta's Count is ADDED to its stored
+// bucket and the later Last kept, so hub processes flushing the same bucket
+// all count. PutBatch stays the absolute write retention folds need.
+type readAdder interface {
+	AddBatch(deltas []ReadStat) error
+}
+
+var (
+	_ ownerGuardedOrgRepo = (*fileOrgRepo)(nil)
+	_ ownerGuardedOrgRepo = (*sqlOrgRepo)(nil)
+	_ orgCreator          = (*fileOrgRepo)(nil)
+	_ orgCreator          = (*sqlOrgRepo)(nil)
+	_ projectCreator      = (*fileProjectRepo)(nil)
+	_ projectCreator      = (*sqlProjectRepo)(nil)
+	_ shareExpiryUpdater  = (*fileShareRepo)(nil)
+	_ shareExpiryUpdater  = (*sqlShareRepo)(nil)
+	_ readAdder           = (*fileReadRepo)(nil)
+	_ readAdder           = (*sqlReadRepo)(nil)
+)
 
 // SessionReadRepo persists which paths one agent session read (see
 // SessionRead). Deliberately its OWN repo rather than a session column on
@@ -278,6 +346,10 @@ func (g *versionGate) fresh(token string) {
 		g.token, g.valid = token, true
 	}
 }
+
+// invalidate forces the next stale() to answer true, for a caller that just
+// learned (from a store-side refusal) that its copy is behind.
+func (g *versionGate) invalidate() { g.valid = false }
 
 // ---- what a metadata store will hold ------------------------------------
 

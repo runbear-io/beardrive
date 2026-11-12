@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
-import { fetchBlobText, fileURLFor, isTransientBlobError, textQueryOptions, useFrameURL, type BlobText } from "../hooks/useBlob";
+import { fetchBlobText, fileURLFor, isTransientBlobError, textQueryOptions, useFrameURL, withReceipt, type BlobText } from "../hooks/useBlob";
 import type { SharedFile } from "../lib/sharedfile";
 import {
   CSV_EXT,
@@ -14,7 +14,7 @@ import {
   TEXT_EXT,
   humanSize,
   joinPath,
-  resolveWiki,
+  resolveWikiTarget,
 } from "../util";
 import { urlForPath, urlForView } from "../router";
 import { DocHeader, FileRail, useWideRail } from "./FileRail";
@@ -144,7 +144,8 @@ export function FileView(props: {
   flatFiles: Node[];
   // Hub mode only; absent in volume mode, where file URLs are "/<path>".
   projectId?: string;
-  onOpenFile: (path: string) => void;
+  // `hash`: a #fragment the link named, to scroll to once the file renders.
+  onOpenFile: (path: string, hash?: string) => void;
   onMeta: (meta: ReactNode) => void;
   onRendered?: () => void;
   // Who is editing, for the label and colour on this account's caret in
@@ -268,6 +269,14 @@ function HtmlView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
     window.addEventListener("bdrive:changed", onChanged);
     return () => window.removeEventListener("bdrive:changed", onChanged);
   }, [path]);
+  // Receipts read once per mount (rev): a pinned version is content-addressed
+  // and needs none.
+  const src = useMemo(() => {
+    if (!fileURL) return "";
+    const u = props.commentable ? fileURL + (fileURL.includes("?") ? "&" : "?") + "comment=1" : fileURL;
+    return version ? u : withReceipt(u, apiBase);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase, fileURL, version, props.commentable, rev]);
   if (!fileURL) return null;
   return (
     <iframe
@@ -276,7 +285,7 @@ function HtmlView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
       key={rev}
       className="htmlview"
       sandbox="allow-scripts allow-downloads"
-      src={props.commentable ? fileURL + (fileURL.includes("?") ? "&" : "?") + "comment=1" : fileURL}
+      src={src}
       title={path}
       onLoad={onRendered}
     />
@@ -806,6 +815,10 @@ function EditView(props: Parameters<typeof FileView>[0]) {
             : state === "error"
               ? "Not saved — still trying"
               : (collab === "live" ? "Live · " : "") + "saved" + (savedAt ? " " + agoShort(savedAt) : "");
+  // The room lists this account too, and the presence bar beside it already
+  // shows "you": drawn here as well, one person read as two ("AK AK").
+  const myName = props.me?.name;
+  const others = useMemo(() => editors.filter((n) => n !== myName), [editors, myName]);
   useEffect(() => {
     onMeta(
       <>
@@ -819,12 +832,12 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           <i aria-hidden="true" />
           {label}
         </span>
-        {editors.length > 0 && (
+        {others.length > 0 && (
           <span className="ed-editors" aria-label="People editing this file">
-            {editors.slice(0, 5).map((n) => (
+            {others.slice(0, 5).map((n) => (
               <Avatar key={n} name={n} title={n + " is editing"} />
             ))}
-            {editors.length > 5 && <span className="ed-more">+{editors.length - 5}</span>}
+            {others.length > 5 && <span className="ed-more">+{others.length - 5}</span>}
           </span>
         )}
       </>,
@@ -832,7 +845,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     // collab belongs in the deps: without it the status line keeps whatever
     // connection state it was first rendered with, so a room that came up
     // fine still reads "connecting" forever.
-  }, [state, collab, label, pending, editors, onMeta]);
+  }, [state, collab, label, pending, others, onMeta]);
   // Leaving edit mode keeps FileView mounted on the same path, so the editor
   // clears its own status rather than leaving it on a read-only page.
   useEffect(() => () => onMeta(""), [onMeta]);
@@ -851,6 +864,13 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // Nothing cached (a cold load), or a cached copy known to be behind: the
   // only cases that wait for the read.
   if (!data || behind) return <FileSkeleton />;
+  if (data.kind === "too-large") {
+    return (
+      <div className="empty">
+        This file is too large to edit in the browser.
+      </div>
+    );
+  }
   if (data.kind !== "text") {
     return (
       <div className="empty">
@@ -916,6 +936,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           typing={typing}
           versions={!!props.projectId}
           onRestore={onRestore}
+          onJumpToLine={mode === "preview" ? undefined : info?.jumpToLine}
         />
       )}
       {loadFailed.failed ? (
@@ -1201,11 +1222,13 @@ function SecretBadge({ findings }: { findings?: SecretFinding[] }) {
 
 /* Delegated click handling for rendered-markdown links: wikilinks (already
    carrying a real in-app href, see transformHTML) and relative links route
-   in-app on a plain click, everything else keeps its native behavior. */
+   in-app on a plain click, everything else keeps its native behavior. A
+   `#fragment` rides along as the second argument, split off BEFORE the path
+   is resolved: `other.md#setup` is the file `other.md`, scrolled to `setup`. */
 export function handleLinkClick(
   e: React.MouseEvent,
   p: string,
-  openFile: (path: string) => void,
+  openFile: (path: string, hash?: string) => void,
 ) {
   const a = (e.target as HTMLElement).closest("a");
   if (!a || !(e.currentTarget as HTMLElement).contains(a)) return;
@@ -1222,10 +1245,19 @@ export function handleLinkClick(
   const wiki = a.getAttribute("data-wiki");
   if (wiki !== null) {
     e.preventDefault();
-    openFile(wiki);
+    openFile(wiki, a.getAttribute("data-wiki-hash") || undefined);
   } else if (!/^([a-z]+:|\/|#)/i.test(href)) {
     e.preventDefault();
-    openFile(joinPath(dir, decodeURIComponent(href)));
+    const h = href.indexOf("#");
+    const rawPath = h < 0 ? href : href.slice(0, h);
+    const hash = h < 0 ? "" : href.slice(h);
+    let rel = rawPath;
+    try {
+      rel = decodeURIComponent(rawPath);
+    } catch {
+      // a literal % in a file name: take the href as written
+    }
+    openFile(joinPath(dir, rel), hash.length > 1 ? hash : undefined);
   }
 }
 
@@ -1262,10 +1294,20 @@ export function transformHTML(
     // middle-click and open-in-new-tab all read the attribute, and only a
     // plain click ever reaches the handler above.
     if (href.startsWith("wiki:")) {
-      const hit = resolveWiki(decodeURIComponent(href.slice(5)), files);
-      if (hit) {
-        a.setAttribute("href", urlForPath(hit.path, projectId));
+      let target = href.slice(5);
+      try {
+        target = decodeURIComponent(target);
+      } catch {
+        // malformed escape: match the target as written
+      }
+      const hit = resolveWikiTarget(target, files);
+      if (hit && !hit.path) {
+        // [[#Heading]]: a heading of this document, an ordinary in-page link.
+        a.setAttribute("href", hit.fragment);
+      } else if (hit) {
+        a.setAttribute("href", urlForPath(hit.path, projectId) + hit.fragment);
         a.setAttribute("data-wiki", hit.path);
+        if (hit.fragment) a.setAttribute("data-wiki-hash", hit.fragment);
       } else {
         // No file matches: an unusable "wiki:" string must not survive the
         // mount, so the anchor loses its href and says why on hover.

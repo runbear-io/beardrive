@@ -945,6 +945,43 @@ func (r *sqlProjectRepo) Put(p Project) error {
 	})
 }
 
+// CreateProjectIfAbsent inserts a brand-new project (no grants, no folder
+// rules — GetOrCreate's shape) unless (org, name) is already taken, in which
+// case it returns the id that holds the name and created false. The check and
+// the insert share one transaction behind the registry row lock, so two hub
+// processes creating the same name concurrently converge on one project
+// instead of each inserting its own.
+func (r *sqlProjectRepo) CreateProjectIfAbsent(p Project) (id string, created bool, err error) {
+	if err := checkProject(p); err != nil {
+		return "", false, err
+	}
+	err = r.s.inTx(regProjects, func(tx *sql.Tx) error {
+		if err := r.s.lockReg(tx, regProjects); err != nil {
+			return err
+		}
+		switch err := tx.QueryRow(r.s.q(`SELECT id FROM projects WHERE org = ? AND LOWER(name) = LOWER(?) ORDER BY created, id LIMIT 1`),
+			p.Org, p.Name).Scan(&id); {
+		case err == nil:
+			return nil
+		case err != sql.ErrNoRows:
+			return err
+		}
+		if _, err := tx.Exec(r.s.q(
+			`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template,data)
+			VALUES (?,?,?,?,?,?,?,?,?,?)`),
+			p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template,
+			boolInt(p.Data)); err != nil {
+			return err
+		}
+		id, created = p.ID, true
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return id, created, nil
+}
+
 // PutFolder writes one rule and replaces that prefix's grants, in one
 // transaction. It touches no other prefix and no project-level grant — see
 // rowScopedProjectRepo for why a permission write is never part of a metadata
@@ -1200,6 +1237,83 @@ func (r *sqlOrgRepo) PutMember(org, email, role string, joined time.Time) error 
 		org, email, role, tenc(joined))
 }
 
+// PutMemberGuarded is PutMember that refuses (ErrLastOwner) to demote or
+// remove the org's last owner, counting owners from the table inside the
+// write's own transaction. The registry row lock taken first serializes every
+// guarded write to the org registry — SQLite already does at BEGIN IMMEDIATE,
+// and on Postgres two demotions of two different owners would otherwise each
+// count two owners in their own snapshot and both commit, leaving none.
+func (r *sqlOrgRepo) PutMemberGuarded(org, email, role string, joined time.Time) error {
+	if err := storable(org, email, role); err != nil {
+		return err
+	}
+	return r.s.inTx(regOrgs, func(tx *sql.Tx) error {
+		if err := r.s.lockReg(tx, regOrgs); err != nil {
+			return err
+		}
+		if role != RoleOwner {
+			var cur string
+			err := tx.QueryRow(r.s.q(`SELECT role FROM org_members WHERE org = ? AND email = ?`), org, email).Scan(&cur)
+			if err != nil && err != sql.ErrNoRows {
+				return err
+			}
+			if cur == RoleOwner {
+				var others int
+				if err := tx.QueryRow(r.s.q(`SELECT COUNT(*) FROM org_members WHERE org = ? AND role = ? AND email <> ?`),
+					org, RoleOwner, email).Scan(&others); err != nil {
+					return err
+				}
+				if others == 0 {
+					return ErrLastOwner
+				}
+			}
+		}
+		var err error
+		if role == "" {
+			_, err = tx.Exec(r.s.q(`DELETE FROM org_members WHERE org = ? AND email = ?`), org, email)
+		} else {
+			_, err = tx.Exec(r.s.q(`INSERT INTO org_members (org,email,role,joined) VALUES (?,?,?,?)
+				ON CONFLICT(org,email) DO UPDATE SET role=excluded.role, joined=excluded.joined`),
+				org, email, role, tenc(joined))
+		}
+		return err
+	})
+}
+
+// CreateOrgIfAbsent inserts o (with its members) unless an org with its id
+// already exists, in which case the stored one wins and created is false —
+// two processes minting the same deterministic personal org converge on one.
+func (r *sqlOrgRepo) CreateOrgIfAbsent(o Org) (created bool, err error) {
+	if err := checkOrg(o); err != nil {
+		return false, err
+	}
+	err = r.s.inTx(regOrgs, func(tx *sql.Tx) error {
+		if err := r.s.lockReg(tx, regOrgs); err != nil {
+			return err
+		}
+		var n int
+		if err := tx.QueryRow(r.s.q(`SELECT COUNT(*) FROM orgs WHERE id = ?`), o.ID).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			return nil
+		}
+		if _, err := tx.Exec(r.s.q(`INSERT INTO orgs (id,name,created) VALUES (?,?,?)`),
+			o.ID, o.Name, tenc(o.Created)); err != nil {
+			return err
+		}
+		for email, role := range o.Members {
+			if _, err := tx.Exec(r.s.q(`INSERT INTO org_members (org,email,role,joined) VALUES (?,?,?,?)`),
+				o.ID, email, role, tenc(o.Joined[email])); err != nil {
+				return err
+			}
+		}
+		created = true
+		return nil
+	})
+	return created, err
+}
+
 func (r *sqlOrgRepo) DeleteOrg(id string) error {
 	return r.s.inTx(regOrgs, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(r.s.q(`DELETE FROM org_members WHERE org = ?`), id); err != nil {
@@ -1260,6 +1374,26 @@ func (r *sqlShareRepo) Put(s Share) error {
 		ON CONFLICT(token) DO UPDATE SET project=excluded.project, path=excluded.path,
 		creator=excluded.creator, created=excluded.created, expires=excluded.expires`,
 		s.Token, s.Project, s.Path, s.Creator, tenc(s.Created), tenc(s.Expires))
+}
+
+// UpdateExpiry re-dates an existing link and nothing else. An UPDATE, never
+// the upsert Put is: re-dating a link another process revoked a moment ago
+// must fail (ErrShareNotFound), not write the link back into existence.
+func (r *sqlShareRepo) UpdateExpiry(token string, expires time.Time) error {
+	return r.s.inTx(regShares, func(tx *sql.Tx) error {
+		res, err := tx.Exec(r.s.q(`UPDATE shares SET expires = ? WHERE token = ?`), tenc(expires), token)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrShareNotFound
+		}
+		return nil
+	})
 }
 
 func (r *sqlShareRepo) Delete(token string) error {
@@ -1507,6 +1641,17 @@ func (r *sqlDeviceRepo) lock(tx *sql.Tx) error {
 	return err
 }
 
+// lockReg takes reg's change-token row lock for the rest of tx — the same
+// portable transaction lock sqlDeviceRepo.lock uses, for any check-then-write
+// that must not interleave with another process's (Postgres READ COMMITTED
+// re-snapshots each statement, so the reads after the lock see every commit
+// that preceded it).
+func (s *sqlMetaStore) lockReg(tx *sql.Tx, reg string) error {
+	_, err := tx.Exec(s.q(`INSERT INTO meta_version (name,version) VALUES (?,0)
+		ON CONFLICT(name) DO UPDATE SET version = meta_version.version`), reg)
+	return err
+}
+
 func (r *sqlDeviceRepo) Delete(user, id string) error {
 	return r.s.inTx(regDevices, func(tx *sql.Tx) error {
 		if err := r.lock(tx); err != nil {
@@ -1558,6 +1703,32 @@ func (r *sqlReadRepo) PutBatch(stats []ReadStat) error {
 			if _, err := tx.Exec(r.s.q(`INSERT INTO read_stats (project,path,day,kind,actor,count,last)
 				VALUES (?,?,?,?,?,?,?)
 				ON CONFLICT(project,path,day,kind,actor) DO UPDATE SET count=excluded.count, last=excluded.last`),
+				st.Project, st.Path, st.Day, st.Kind, st.Actor, st.Count, tenc(st.Last)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// AddBatch adds increments without replacing a sibling's counts. tenc always
+// emits UTC; stripping its trailing Z before comparing also orders a whole
+// second before its fractions (RFC3339Nano omits zero fractions). REPLACE and
+// CASE are portable to both engines.
+func (r *sqlReadRepo) AddBatch(deltas []ReadStat) error {
+	for _, s := range deltas {
+		if err := checkReadStat(s); err != nil {
+			return err
+		}
+	}
+	return r.s.inTx(regReads, func(tx *sql.Tx) error {
+		for _, st := range deltas {
+			if _, err := tx.Exec(r.s.q(`INSERT INTO read_stats (project,path,day,kind,actor,count,last)
+				VALUES (?,?,?,?,?,?,?)
+				ON CONFLICT(project,path,day,kind,actor) DO UPDATE SET
+				count = read_stats.count + excluded.count,
+				last = CASE WHEN REPLACE(excluded.last, 'Z', '') > REPLACE(read_stats.last, 'Z', '')
+					THEN excluded.last ELSE read_stats.last END`),
 				st.Project, st.Path, st.Day, st.Kind, st.Actor, st.Count, tenc(st.Last)); err != nil {
 				return err
 			}

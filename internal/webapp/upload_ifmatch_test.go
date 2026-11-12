@@ -42,14 +42,17 @@ func putContent(t *testing.T, h http.Handler, url, body, ifMatch string) *httpte
 	return rec
 }
 
-/* A save that was based on a version somebody else has already replaced must
-   not be taken wholesale.
+/*
+A save that was based on a version somebody else has already replaced must
 
-   This is the door that lost real work: two browsers holding different
-   documents — one had dropped the co-editing relay — each overwriting the
-   other every few seconds, with no conflict copy and no warning. The sync
-   path has preserved the loser since the beginning (syncer.conflictCopies);
-   this one had nothing. */
+	not be taken wholesale.
+
+	This is the door that lost real work: two browsers holding different
+	documents — one had dropped the co-editing relay — each overwriting the
+	other every few seconds, with no conflict copy and no warning. The sync
+	path has preserved the loser since the beginning (syncer.conflictCopies);
+	this one had nothing.
+*/
 func TestUploadRefusesAWriteBuiltOnAStaleVersion(t *testing.T) {
 	h := writableDirServer(t, map[string]string{"notes.md": "base\n"})
 	const url = "/api/upload/content?path=notes.md"
@@ -98,16 +101,18 @@ func TestUploadWithoutIfMatchIsUnchanged(t *testing.T) {
 	}
 }
 
-/* Saving the same bytes twice is not two versions.
+/*
+Saving the same bytes twice is not two versions.
 
-   Every co-editor after the first saves the same converged text, and a client
-   whose PUT is queued behind a slow response re-sends on its next idle timer.
-   Each used to append an op — a History row, a change frame, and a full tree
-   refetch for every other client in the project.
+	Every co-editor after the first saves the same converged text, and a client
+	whose PUT is queued behind a slow response re-sends on its next idle timer.
+	Each used to append an op — a History row, a change frame, and a full tree
+	refetch for every other client in the project.
 
-   Against a real hub, not the folder viewer: a DirSource identifies a file by
-   mtime and size and has no journal to keep clean, so this is a property of
-   the thing that has one. */
+	Against a real hub, not the folder viewer: a DirSource identifies a file by
+	mtime and size and has no journal to keep clean, so this is a property of
+	the thing that has one.
+*/
 func TestUploadOfIdenticalContentIsNotAChange(t *testing.T) {
 	srv, p, _ := newHub(t, true, nil)
 	h := srv.Handler()
@@ -173,14 +178,16 @@ func TestUploadOfIdenticalContentIsNotAChange(t *testing.T) {
 	}
 }
 
-/* A late arrival is not a disagreement.
+/*
+A late arrival is not a disagreement.
 
-   If-Match is there to stop one editor's text being erased by another who
-   never saw it. A client whose base is stale but whose CONTENT already
-   matches the file has erased nothing — there is nothing to preserve — so
-   answering it with a 409 made the editor park a conflict copy of text
-   nobody disputed. Three clients sharing one hub-held document produced two
-   such copies of identical text, which is how this was found. */
+	If-Match is there to stop one editor's text being erased by another who
+	never saw it. A client whose base is stale but whose CONTENT already
+	matches the file has erased nothing — there is nothing to preserve — so
+	answering it with a 409 made the editor park a conflict copy of text
+	nobody disputed. Three clients sharing one hub-held document produced two
+	such copies of identical text, which is how this was found.
+*/
 func TestStaleBaseWithIdenticalContentIsNotAConflict(t *testing.T) {
 	srv, p, _ := newHub(t, true, nil)
 	h := srv.Handler()

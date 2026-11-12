@@ -43,6 +43,7 @@ export function EditRail(props: {
   // if the restore failed; `reconciled: false` is a restore that landed but
   // has not reached the open document yet.
   onRestore?: RestoreHost;
+  onJumpToLine?: (line: number) => void;
 }) {
   const { apiBase, path, text, meeting } = props;
   const wide = useWideRail();
@@ -80,13 +81,32 @@ export function EditRail(props: {
                 <span className="er-box" aria-hidden="true">
                   {a.done ? "✓" : ""}
                 </span>
-                <span className="er-text">
+                <button
+                  type="button"
+                  className="er-text"
+                  style={{ textAlign: "left", color: a.done ? "var(--text-faint)" : "inherit", cursor: "pointer", background: "none", border: 0, padding: 0, font: "inherit" }}
+                  aria-label={`Go to line ${a.line}: ${a.text || "untitled action item"}`}
+                  onClick={() => {
+                    if (props.onJumpToLine) {
+                      props.onJumpToLine(a.line);
+                      return;
+                    }
+                    // Preview mode has no live view to select in. Focus its
+                    // read surface instead of leaving an inert control.
+                    const preview = document.getElementById("ed-preview");
+                    if (preview) {
+                      preview.tabIndex = -1;
+                      preview.focus();
+                      preview.scrollIntoView({ block: "nearest" });
+                    }
+                  }}
+                >
                   {a.text || "(untitled)"}
                   <small>
                     {a.owner ? "@" + a.owner : "no owner"}
                     {a.section ? " · " + a.section : ""}
                   </small>
-                </span>
+                </button>
               </li>
             ))}
           </ul>

@@ -1,5 +1,5 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { getJSON, getResponse, HttpError } from "../api/http";
+import { getJSON, getResponse, HttpError, latestProjectReceipt } from "../api/http";
 import { MAX_BYTES, sniffBytes, type BlobText } from "../lib/sniff";
 
 // One URL's bytes, decoded as text when they are text. The sniff itself
@@ -134,4 +134,15 @@ export function useFrameURL(apiBase: string, path: string, fileURL: string, vers
     await refetch();
   };
   return { url, fresh };
+}
+
+/* `url` carrying this project's live journal receipts as `?r=`. An iframe
+   load cannot send the X-Bdrive-Receipt header, so a page just saved here and
+   served by another hub process would render the bytes from before the save;
+   the query param makes that process fold far enough first. Callers compute
+   it once per (re)mount: a receipt arriving mid-view must not re-point a live
+   frame. */
+export function withReceipt(url: string, apiBase: string): string {
+  const r = latestProjectReceipt(apiBase);
+  return r ? url + (url.includes("?") ? "&" : "?") + "r=" + encodeURIComponent(r) : url;
 }

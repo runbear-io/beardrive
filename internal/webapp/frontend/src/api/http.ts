@@ -227,6 +227,15 @@ export function recordCommentReceipt(apiBase: string, key: string | null | undef
   if (key && COMMENT_RECEIPT.test(key)) hold(commentReceipts, apiBase, key, MAX_COMMENT_RECEIPTS);
 }
 
+/* The live journal receipts for a project, comma-joined, or undefined when
+   none are held. For a read that cannot carry a header — an iframe src —
+   which sends them as `?r=` instead (server.go parseReceipts reads both,
+   under the one cap). */
+export function latestProjectReceipt(apiBase: string): string | undefined {
+  const t = held(journalReceipts, apiBase);
+  return t.length ? t.join(",") : undefined;
+}
+
 // Take whatever receipts a project response carries.
 function noteReceipts(url: string, r: Response) {
   const p = projectRoute(url);

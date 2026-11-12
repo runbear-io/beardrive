@@ -200,6 +200,19 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 	if err != nil {
 		return err
 	}
+	// A sibling can turn Data off (dropping both SQL rows and its own
+	// cache) and back on without this process ever observing the off state.
+	// Our cached winners then describe rows that no longer exist. Check the
+	// shared index before trusting a non-empty cache and rebuild after a drop.
+	if len(st.known) > 0 {
+		var rows int
+		if err := s.Data.w.QueryRowContext(ctx, s.Data.q(`SELECT COUNT(*) FROM data_items WHERE project = ?`), id).Scan(&rows); err != nil {
+			return err
+		}
+		if rows == 0 {
+			st.known = nil
+		}
+	}
 	if st.known == nil {
 		if st.known, err = s.Data.known(ctx, id); err != nil {
 			return err

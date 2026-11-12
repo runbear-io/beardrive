@@ -96,7 +96,10 @@ export function ShareDialog({
   const [addEmail, setAddEmail] = useState("");
   const [addLevel, setAddLevel] = useState<PermLevel>("read");
   const [pending, setPending] = useState<SecretFinding[] | null>(null);
-  const [preset, setPreset] = useState("");
+  // null = untouched: the select then shows the link's own lifetime. Starting
+  // at "" (Never) would claim a dated link is permanent, and picking Never
+  // would then fire no change at all.
+  const [preset, setPreset] = useState<string | null>(null);
   const copyRef = useRef<HTMLButtonElement>(null);
 
   const reload = () => {
@@ -293,6 +296,23 @@ export function ShareDialog({
                           </option>
                         ))}
                       </select>
+                      {isAdmin && (
+                        <button
+                          type="button"
+                          className="ai-del"
+                          aria-label={"Remove " + g.email}
+                          title="Remove this exception — they get the folder default"
+                          disabled={busy}
+                          onClick={() => {
+                            const perms: Record<string, string> = Object.fromEntries(
+                              (own?.grants || []).filter((x) => x.email !== g.email).map((x) => [x.email, x.level]),
+                            );
+                            run(() => putRule({ perms }), `${g.email} removed.`);
+                          }}
+                        >
+                          Remove
+                        </button>
+                      )}
                     </span>
                   </div>
                 ))}
@@ -338,6 +358,23 @@ export function ShareDialog({
                   </div>
                 )}
               </div>
+            )}
+            {own && isAdmin && (
+              <p className="ps-row">
+                <Button
+                  variant="subtle"
+                  disabled={busy}
+                  onClick={() =>
+                    run(
+                      () => api("DELETE", `/api/p/${project.id}/folders?prefix=${encodeURIComponent(key)}`),
+                      "Folder restriction removed.",
+                    )
+                  }
+                >
+                  Remove folder restriction
+                </Button>
+                <span className="ai-tag">back to the project's access, exceptions included</span>
+              </p>
             )}
           </>
         ) : (
@@ -423,10 +460,15 @@ export function ShareDialog({
                   <label htmlFor="share-expiry">Expires</label>
                   <select
                     id="share-expiry"
-                    value={preset}
+                    value={preset ?? (link.expires ? "existing" : "")}
                     disabled={!canWrite || busy}
                     onChange={(e) => setExpiry(e.target.value)}
                   >
+                    {link.expires && (
+                      <option value="existing" disabled>
+                        Current ({new Date(link.expires).toLocaleDateString()})
+                      </option>
+                    )}
                     {EXPIRY_PRESETS.map((o) => (
                       <option key={o.value} value={o.value}>
                         {o.label}

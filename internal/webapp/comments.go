@@ -215,14 +215,16 @@ type projectComments struct {
 	unseen map[string]time.Time
 }
 
-/* Comment receipts: read-your-own-writes across hub processes.
+/*
+Comment receipts: read-your-own-writes across hub processes.
 
-   Every comment write answers X-Bdrive-Comment-Receipt: <object key>, and a
-   client echoes its recent keys on comment requests. A process whose listing
-   (trusted for commentListTTL) lacks one relists at once, and reads a key the
-   listing still lacks straight from storage — a GCS listing can trail a
-   write the object itself already answers for. A key nothing finds is
-   remembered for commentReceiptCooldown, so a forged one costs one List. */
+	Every comment write answers X-Bdrive-Comment-Receipt: <object key>, and a
+	client echoes its recent keys on comment requests. A process whose listing
+	(trusted for commentListTTL) lacks one relists at once, and reads a key the
+	listing still lacks straight from storage — a GCS listing can trail a
+	write the object itself already answers for. A key nothing finds is
+	remembered for commentReceiptCooldown, so a forged one costs one List.
+*/
 const (
 	commentReceiptHeader   = "X-Bdrive-Comment-Receipt"
 	maxCommentReceipts     = 8

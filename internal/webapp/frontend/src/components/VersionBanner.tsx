@@ -15,9 +15,13 @@ export function VersionBanner(props: {
   apiBase: string;
   path: string;
   version: string;
+  /* The history row's own time, when the caller knows it: the same bytes
+     recur after a revert, and only the time says which row was clicked. */
+  atTime?: string;
   onViewCurrent: () => void;
+  onRestore?: (whenLabel: string) => void;
 }) {
-  const { apiBase, path, version } = props;
+  const { apiBase, path, version, atTime } = props;
   const qs = "path=" + encodeURIComponent(path);
   const { data } = useQuery({
     queryKey: ["history", apiBase, qs, 200],
@@ -26,7 +30,9 @@ export function VersionBanner(props: {
   });
   // Newest match: the same content hash recurs if a file is reverted to
   // bytes it already had, and the latest of those is the one just clicked.
-  const entry = data?.entries?.find((e) => e.blob === version);
+  const entry =
+    (atTime && data?.entries?.find((e) => e.blob === version && e.time === atTime)) ||
+    data?.entries?.find((e) => e.blob === version);
   const who = entry ? whoChanged(entry) : "";
   const when = entry?.time ? new Date(entry.time).toLocaleString() : "";
   const dl =
@@ -47,6 +53,11 @@ export function VersionBanner(props: {
         <button className="ai-btn" onClick={props.onViewCurrent}>
           View current
         </button>
+        {props.onRestore && (
+          <button className="ai-btn" onClick={() => props.onRestore!(when || "this version")}>
+            Restore this version
+          </button>
+        )}
         <a className="ai-btn" download href={dl}>
           Download this version
         </a>

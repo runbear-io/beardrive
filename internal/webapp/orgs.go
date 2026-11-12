@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -193,6 +194,22 @@ func (db *OrgDB) putMember(prev, next Org, email, role string) error {
 	return nil
 }
 
+// putMemberGuarded is putMember for the owner's deliberate member demote or
+// remove: a store with the capability makes the last-owner decision inside the
+// same transaction as the write, not from this process's potentially stale
+// map. EvictMember intentionally uses the unguarded form (an account is gone).
+func (db *OrgDB) putMemberGuarded(prev, next Org, email, role string) error {
+	if rs, ok := db.repo.(ownerGuardedOrgRepo); ok {
+		if err := rs.PutMemberGuarded(next.ID, email, role, next.Joined[email]); err != nil {
+			db.ver.invalidate()
+			return err
+		}
+		db.byID[next.ID] = next
+		return nil
+	}
+	return db.putMember(prev, next, email, role)
+}
+
 // refresh re-reads orgs and invites from the store. Callers hold mu.
 //
 // Round 12 gave ProjectDB this on its read path and stopped there. The org
@@ -266,6 +283,51 @@ func (db *OrgDB) Create(name, ownerEmail string) (Org, error) {
 		delete(db.byID, o.ID)
 		return Org{}, err
 	}
+	return o.clone(), nil
+}
+
+// CreatePersonal creates the default org for an account in no org yet. Its
+// deterministic id makes two first-project requests served by sibling hub
+// processes converge on the same org. An id collision is refused, never a
+// grant on an org belonging to somebody else.
+func (db *OrgDB) CreatePersonal(name, ownerEmail string) (Org, error) {
+	name = trimName(name)
+	e := normEmail(ownerEmail)
+	if name == "" || e == "" {
+		return Org{}, fmt.Errorf("organization name and owner must not be empty")
+	}
+	sum := sha256.Sum256([]byte(e))
+	id := fmt.Sprintf("personal-%x", sum[:16])
+	o := Org{ID: id, Name: name, Created: time.Now().UTC(),
+		Members: map[string]string{e: RoleOwner}, Joined: map[string]time.Time{}}
+	o.Joined[e] = o.Created
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	if old, ok := db.byID[id]; ok {
+		if old.Members[e] == "" {
+			return Org{}, fmt.Errorf("personal organization id collision")
+		}
+		return old.clone(), nil
+	}
+	if rs, ok := db.repo.(orgCreator); ok {
+		created, err := rs.CreateOrgIfAbsent(o)
+		if err != nil {
+			return Org{}, err
+		}
+		if !created {
+			db.ver.invalidate()
+			db.refresh()
+			old, ok := db.byID[id]
+			if !ok || old.Members[e] == "" {
+				return Org{}, fmt.Errorf("personal organization unavailable")
+			}
+			return old.clone(), nil
+		}
+	} else if err := db.repo.PutOrg(o); err != nil {
+		return Org{}, err
+	}
+	db.byID[id] = o
 	return o.clone(), nil
 }
 
@@ -364,9 +426,12 @@ func (db *OrgDB) RemoveMember(orgID, email string) error {
 		return fmt.Errorf("no such organization")
 	}
 	if o.Members[e] == RoleOwner && db.ownerCount(o) <= 1 {
-		return fmt.Errorf("cannot remove the last owner")
+		return fmt.Errorf("cannot remove the last owner: %w", ErrLastOwner)
 	}
-	return db.removeLocked(o, e)
+	next := o.clone()
+	delete(next.Members, e)
+	delete(next.Joined, e)
+	return db.putMemberGuarded(o, next, e, "")
 }
 
 // EvictMember drops an account from the org unconditionally — the form
@@ -471,17 +536,6 @@ func (db *OrgDB) heir(o Org) string {
 	return ""
 }
 
-// removeLocked deletes a member row. Callers hold mu.
-func (db *OrgDB) removeLocked(o Org, e string) error {
-	if o.Members[e] == "" {
-		return nil // already not a member: the postcondition already holds
-	}
-	next := o.clone()
-	delete(next.Members, e)
-	delete(next.Joined, e)
-	return db.putMember(o, next, e, "")
-}
-
 // SetRole changes an account's role. Demoting the last owner is refused.
 func (db *OrgDB) SetRole(orgID, email, role string) error {
 	if role != RoleOwner && role != RoleMember {
@@ -499,11 +553,11 @@ func (db *OrgDB) SetRole(orgID, email, role string) error {
 		return fmt.Errorf("%s is not a member", email)
 	}
 	if o.Members[e] == RoleOwner && role == RoleMember && db.ownerCount(o) <= 1 {
-		return fmt.Errorf("cannot demote the last owner")
+		return fmt.Errorf("cannot demote the last owner: %w", ErrLastOwner)
 	}
 	next := o.clone()
 	next.Members[e] = role
-	return db.putMember(o, next, e, role)
+	return db.putMemberGuarded(o, next, e, role)
 }
 
 // Rename changes the org's display name.
@@ -853,6 +907,10 @@ func (s *Server) handleOrgList(w http.ResponseWriter, r *http.Request) {
 // state of the world that makes it wrong. The hub never learns WHY the write
 // was refused, only where to send the user.
 func (s *Server) writeDirErr(w http.ResponseWriter, orgID string, err error) {
+	if errors.Is(err, ErrLastOwner) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	if errors.Is(err, ErrManagedElsewhere) {
 		http.Error(w, err.Error()+": "+s.Dir.ManageURL(orgID), http.StatusConflict)
 		return

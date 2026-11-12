@@ -58,8 +58,9 @@ type BuiltinAuth struct {
 	// why first-claim-on-write could not be. Installed by UseDeviceBinder.
 	BindDevice DeviceBinder
 
-	store AccountRepo
-	ver   versionGate // skips the re-read when the store has not moved
+	store      AccountRepo
+	ver        versionGate // skips the re-read when the store has not moved
+	policySeen *authPolicy // last saved toggles; unchanged startup defaults stay pinned
 
 	// cli serves `bdrive login` — the browser and device flows, shared with
 	// every other provider (see CLIAuth), which is why nothing about them
@@ -135,6 +136,8 @@ func NewBuiltinAuth(store AccountRepo, allowSignup bool, mail *Mailer) (*Builtin
 	if policy != nil {
 		a.RequireVerification = policy.RequireVerification
 		a.RequireApproval = policy.RequireApproval
+		p := *policy
+		a.policySeen = &p
 	}
 	return a, nil
 }
@@ -194,6 +197,7 @@ func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error
 	}
 	a.RequireVerification = requireVerification
 	a.RequireApproval = requireApproval
+	a.policySeen = &authPolicy{RequireVerification: requireVerification, RequireApproval: requireApproval}
 	return nil
 }
 
@@ -207,9 +211,9 @@ func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error
 // processes — and a deleted account could sign in again with its old password
 // as soon as any second-process write rewrote auth.json.
 //
-// Policy is deliberately NOT re-read: the config file overrides it at startup
-// (web.go), and reloading would let the persisted value quietly win back over
-// the value the sysadmin pinned.
+// Saved gating changes propagate to siblings. An unchanged saved policy does
+// not undo config overrides applied at startup; AllowSignup, AllowedDomains
+// and Admins remain config-owned and are never widened by a browser toggle.
 //
 // A store that cannot answer leaves the maps in place — see ProjectDB.refresh
 // for the trade.
@@ -221,7 +225,7 @@ func (a *BuiltinAuth) refresh() {
 	if !stale {
 		return
 	}
-	users, tokens, _, err := a.store.Load()
+	users, tokens, policy, err := a.store.Load()
 	if err != nil {
 		if !a.warnedLoad {
 			a.warnedLoad = true
@@ -240,6 +244,11 @@ func (a *BuiltinAuth) refresh() {
 		nextTokens[t.Hash] = t
 	}
 	a.users, a.tokens = nextUsers, nextTokens
+	if policy != nil && (a.policySeen == nil || *policy != *a.policySeen) {
+		a.RequireVerification, a.RequireApproval = policy.RequireVerification, policy.RequireApproval
+		p := *policy
+		a.policySeen = &p
+	}
 }
 
 func randHex(n int) string {
@@ -608,6 +617,7 @@ func (a *BuiltinAuth) Branding() string { return a.Brand }
 func (a *BuiltinAuth) Policy() SignupPolicy {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.refresh()
 	admins := make([]string, 0, len(a.Admins))
 	for e := range a.Admins {
 		admins = append(admins, e)

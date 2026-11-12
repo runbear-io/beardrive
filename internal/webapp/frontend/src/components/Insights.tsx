@@ -14,7 +14,7 @@ import {
   orphanPaths,
   placeLabels,
 } from "../lib/heat";
-import { linkProps } from "../nav";
+import { linkProps, navigate, useLocationPath } from "../nav";
 
 /* ---- Insights: what the team and its agents actually read ----
    Every file joined from two sources: reads over 30 days (the heat API) and
@@ -748,9 +748,30 @@ function Treemap({
   onOpenFolder: (p: string) => void;
   isFolder: (p: string) => boolean;
 }) {
-  const [drill, setDrill] = useState<string | null>(null);
-  useEffect(() => setDrill(null), [scope]);
+  // Treemap depth is part of the location, independently of the page's
+  // /insights/<scope> target. Back removes one drill step, not the whole
+  // Insights page; reload and copied links reopen the same folder.
+  const locationPath = useLocationPath();
+  const params = new URLSearchParams(locationPath.split("?")[1] ?? "");
+  const requested = params.get("prefix");
   const scopeDir = scope && isFolder(scope) ? scope : "";
+  const drill =
+    requested !== null && pts.some((p) => groupKey(p.path, scopeDir) === requested)
+      ? requested
+      : null;
+  const setDrill = (next: string | null) => {
+    const url = new URL(window.location.href);
+    if (next === null) url.searchParams.delete("prefix");
+    else url.searchParams.set("prefix", next);
+    const content = document.getElementById("content");
+    const top = content?.scrollTop;
+    navigate(url.pathname + url.search + url.hash);
+    // This is a drill within a chart, not a different page to start at the
+    // top of. Leave the map under the pointer after router scroll handling.
+    requestAnimationFrame(() => {
+      if (content && top !== undefined) content.scrollTo({ top, behavior: "instant" });
+    });
+  };
   // `pts` is every file in scope, read or not, so the range is per-scope and
   // independent of the lens.
   const range = ageRange(pts.map((p) => p.days));

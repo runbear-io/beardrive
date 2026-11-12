@@ -343,6 +343,11 @@ type volume struct {
 	// request into a storage List.
 	unseenMu sync.Mutex
 	unseen   map[string]time.Time
+	// shareMiss is the same negative cache for share links (guarded by
+	// unseenMu): a /s/<token> whose file a fresh fold still lacks is not
+	// refolded for again until receiptMissCooldown passes, so a link to a
+	// deleted file cannot buy a storage List per anonymous hit.
+	shareMiss map[string]time.Time
 
 	// Background rebuilds requested by refreshThen. bgDone holds the callbacks
 	// waiting for a rebuild that starts after they were queued.
@@ -2265,7 +2270,15 @@ func (s *Server) orgForCreate(r *http.Request, requested string) (string, error)
 	if name == "" {
 		name = strings.SplitN(me.Email, "@", 2)[0]
 	}
-	o, err := s.Dir.Create(name, me.Email)
+	var o Org
+	var err error
+	if personal, ok := s.Dir.(interface {
+		CreatePersonal(name, email string) (Org, error)
+	}); ok {
+		o, err = personal.CreatePersonal(name, me.Email)
+	} else {
+		o, err = s.Dir.Create(name, me.Email)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -2293,7 +2306,7 @@ type Node struct {
 
 func (s *Server) handleTree(v *volume, w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Vary", receiptHeader)
-	snap, err := v.snapshotWithReceipts(r.Context(), r.Header)
+	snap, err := v.snapshotForRequest(r)
 	if err != nil {
 		if errors.Is(err, errReceiptUnavailable) {
 			snapshotErr(w, err)
@@ -2439,7 +2452,7 @@ func (s *Server) lookup(v *volume, r *http.Request) (string, FileInfo, int, erro
 	// Receipt-checked: a read that follows a write through another hub
 	// process must find it — and must find it BEFORE any conditional request
 	// is answered, or a 304 for the version the write replaced comes back.
-	snap, err := v.snapshotWithReceipts(r.Context(), r.Header)
+	snap, err := v.snapshotForRequest(r)
 	if errors.Is(err, errReceiptUnavailable) {
 		return "", FileInfo{}, http.StatusServiceUnavailable, err
 	}
@@ -3011,13 +3024,30 @@ func fileReceipt(fi FileInfo) string {
 	return receiptOf(journal.Op{Device: fi.DeviceID, Seq: fi.Seq})
 }
 
-// parseReceipts reads the first maxReceipts tokens of X-Bdrive-Receipt.
-// Malformed tokens are dropped without a word: a receipt is a hint, and a bad
-// one must cost nothing, least of all a storage call.
-func parseReceipts(h http.Header) []journalReceipt {
+// parseReceipts reads the first maxReceipts tokens a request carries, from
+// X-Bdrive-Receipt and then from ?r= — an iframe's document request cannot
+// set a header, so a frame URL carries its receipt as a query parameter. Both
+// sources share the one cap, so a request cannot buy more refolds by
+// splitting its tokens. Malformed tokens are dropped without a word: a
+// receipt is a hint, and a bad one must cost nothing, least of all a storage
+// call. A receipt is never authority: it only decides whether to refold.
+func parseReceipts(r *http.Request) []journalReceipt {
+	lines := r.Header.Values(receiptHeader)
+	if r.URL != nil {
+		lines = append(lines[:len(lines):len(lines)], r.URL.Query()["r"]...)
+	}
+	return parseReceiptLines(lines)
+}
+
+// parseHeaderReceipts is parseReceipts for a caller holding only headers.
+func parseHeaderReceipts(h http.Header) []journalReceipt {
+	return parseReceiptLines(h.Values(receiptHeader))
+}
+
+func parseReceiptLines(lines []string) []journalReceipt {
 	var out []journalReceipt
 	n := 0
-	for _, line := range h.Values(receiptHeader) {
+	for _, line := range lines {
 		for _, tok := range strings.Split(line, ",") {
 			if n == maxReceipts {
 				return out
@@ -3172,7 +3202,68 @@ func insertUnseen(m map[string]time.Time, key string, now time.Time, cooldown ti
 // fold: serving the stale snapshot as if it held the write is exactly the bug
 // this exists to remove.
 func (v *volume) snapshotWithReceipts(ctx context.Context, h http.Header) (*snapshot, error) {
-	rcs := parseReceipts(h)
+	return v.snapshotForReceipts(ctx, parseHeaderReceipts(h))
+}
+
+// snapshotForShareMiss answers a share link whose file seen lacks. seen may
+// predate a write another hub process accepted — a link minted the moment a
+// file was created, opened through a sibling process — so ONE fresh fold is
+// taken before the link 404s. Concurrent misses coalesce on the fold (one
+// that landed after seen counts), and a token a fresh fold still could not
+// resolve (found false) cools down for receiptMissCooldown — marked under mu,
+// so the requests queued behind the fold see it — which caps a link to a
+// deleted file at one storage List per cooldown however hard it is hammered.
+// ok is false when no refold was taken (cooling down, or storage failed).
+func (v *volume) snapshotForShareMiss(ctx context.Context, token string, seen *snapshot, found func(*snapshot) bool) (*snapshot, bool) {
+	if v.shareCooling(token) {
+		return nil, false
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.snap != nil && v.snap != seen && v.snap.gen > seen.gen {
+		return v.snap, true // a fold that began after ours already landed
+	}
+	if v.shareCooling(token) {
+		return nil, false // the fold we queued behind already missed it
+	}
+	v.gen++
+	gen, acc := v.gen, v.acceptedNow()
+	files, moves, cov, err := v.load(ctx)
+	if err != nil {
+		log.Printf("beardrive: refold for a share link: %v", err)
+		return nil, false
+	}
+	v.install(files, moves, cov, gen, acc)
+	if !found(v.snap) {
+		v.unseenMu.Lock()
+		v.shareMiss = insertUnseen(v.shareMiss, token, time.Now(), receiptMissCooldown)
+		v.unseenMu.Unlock()
+	}
+	return v.snap, true
+}
+
+func (v *volume) shareCooling(token string) bool {
+	now := time.Now()
+	v.unseenMu.Lock()
+	defer v.unseenMu.Unlock()
+	t, ok := v.shareMiss[token]
+	if !ok {
+		return false
+	}
+	if now.Sub(t) < receiptMissCooldown {
+		return true
+	}
+	delete(v.shareMiss, token)
+	return false
+}
+
+// snapshotForRequest is snapshotWithReceipts over every receipt r carries,
+// header and ?r= alike (parseReceipts).
+func (v *volume) snapshotForRequest(r *http.Request) (*snapshot, error) {
+	return v.snapshotForReceipts(r.Context(), parseReceipts(r))
+}
+
+func (v *volume) snapshotForReceipts(ctx context.Context, rcs []journalReceipt) (*snapshot, error) {
 	snap, err := v.snapshot(ctx)
 	if err != nil || len(rcs) == 0 || snap.cov == nil {
 		return snap, err
