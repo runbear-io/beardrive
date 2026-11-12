@@ -720,7 +720,6 @@ function EditView(props: Parameters<typeof FileView>[0]) {
        page. A render that fails does not hold anyone here: the read view
        retries it as it always has. */
     const flush = async () => {
-      let f: SharedFile;
       for (;;) {
         const cur = fileHandle.current;
         if (!cur) return true;
@@ -732,29 +731,33 @@ function EditView(props: Parameters<typeof FileView>[0]) {
         }
         if (!saved || cur.askingShrink()) return false;
         if (fileHandle.current && fileHandle.current !== cur) continue;
-        f = cur;
-        break;
-      }
-      const now = f.settled();
-      const textKey = textQueryOptions(fileURL).queryKey;
-      const before = qc.getQueryData(textKey);
-      const changed = edited.current || !(before?.kind === "text" && before.text === now.text);
-      const seeded: BlobText = now.sha ? { kind: "text", text: now.text, sha: now.sha } : { kind: "text", text: now.text };
-      qc.setQueryData(textKey, seeded);
-      if (MD_EXT.test(path)) {
-        const render = renderQuery(apiBase, path);
-        const held = qc.getQueryState(render.queryKey);
-        if (changed || !held?.data || held.isInvalidated) {
-          try {
-            await qc.fetchQuery({ ...render, staleTime: 0, retry: false });
-          } catch {
-            // MarkdownView retries it.
+        const now = cur.settled();
+        if (!now.clean) continue;
+        const textKey = textQueryOptions(fileURL).queryKey;
+        const before = qc.getQueryData(textKey);
+        const changed = edited.current || !(before?.kind === "text" && before.text === now.text);
+        const seeded: BlobText = now.sha ? { kind: "text", text: now.text, sha: now.sha } : { kind: "text", text: now.text };
+        qc.setQueryData(textKey, seeded);
+        if (MD_EXT.test(path)) {
+          const render = renderQuery(apiBase, path);
+          const held = qc.getQueryState(render.queryKey);
+          if (changed || !held?.data || held.isInvalidated) {
+            try {
+              await qc.fetchQuery({ ...render, staleTime: 0, retry: false });
+            } catch {
+              // MarkdownView retries it.
+            }
+            // Typing during the render fetch must go back through saveNow()
+            // (including shrink confirmation and durable save) before Done leaves.
+            if (fileHandle.current && fileHandle.current !== cur) continue;
+            const after = cur.settled();
+            if (!after.clean || after.text !== now.text || cur.askingShrink()) continue;
           }
         }
+        // Confirmed in the background; the cache already shows the answer.
+        void qc.invalidateQueries({ queryKey: ["text", fileURL], refetchType: "none" });
+        return true;
       }
-      // Confirmed in the background; the cache already shows the answer.
-      void qc.invalidateQueries({ queryKey: ["text", fileURL], refetchType: "none" });
-      return true;
     };
     flushRef.current = flush;
     return () => {

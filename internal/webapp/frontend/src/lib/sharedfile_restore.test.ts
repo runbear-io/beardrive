@@ -236,12 +236,12 @@ test("settled() names the saved text and its sha, and no sha for unsaved typing"
     },
   });
   await waitFor(() => assert.equal(solo, true));
-  same(file.settled(), { text: "A\n", sha: "sha-a" });
+  same(file.settled(), { text: "A\n", sha: "sha-a", clean: true });
 
   buffer = "B\n";
-  same(file.settled(), { text: "B\n", sha: undefined });
+  same(file.settled(), { text: "B\n", sha: undefined, clean: false });
   assert.equal(await file.saveNow(), true);
-  same(file.settled(), { text: "B\n", sha: "sha-b" });
+  same(file.settled(), { text: "B\n", sha: "sha-b", clean: true });
   file.destroy();
 });
 

@@ -96,7 +96,7 @@ export type SharedFile = {
       head it learned) — undefined when the hub wrote it from the room and the
       version is still on its way back through the change stream. Done hands
       it to the reading view so the page it opens shows these bytes at once. */
-  settled(): { text: string; sha?: string };
+  settled(): { text: string; sha?: string; clean: boolean };
   /** Fold an outside write — an agent, a CLI, another device — into the open
       document. "blocked" means the caller should SAY so instead, because this
       refused to resolve it. `held` says the hub has already put this text
@@ -1586,7 +1586,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
     askingShrink: () => asking !== null,
     settled: () => {
       const text = current();
-      return { text, sha: text === saved ? base : undefined };
+      return { text, sha: text === saved ? base : undefined, clean: !owesSave() && asking === null };
     },
     destroy() {
       if (typeof window !== "undefined") {
