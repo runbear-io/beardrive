@@ -138,32 +138,36 @@ func (x *DataIndex) migrate() error {
 			project    TEXT PRIMARY KEY,
 			complete   INTEGER NOT NULL DEFAULT 0,
 			applied_at TEXT NOT NULL DEFAULT '',
-			gen        BIGINT NOT NULL DEFAULT 0)`,
+			gen        BIGINT NOT NULL DEFAULT 0,
+			epoch      BIGINT NOT NULL DEFAULT 0)`,
 	} {
 		if _, err := x.w.Exec(stmt); err != nil {
 			return fmt.Errorf("migrate data index: %w", err)
 		}
 	}
-	// gen came after the table did. Added where it is missing; a second
-	// process that added it first is not an error.
-	if x.d == dialectPostgres {
-		_, err := x.w.Exec(`ALTER TABLE data_projects ADD COLUMN IF NOT EXISTS gen BIGINT NOT NULL DEFAULT 0`)
-		if err != nil {
-			return fmt.Errorf("migrate data index: %w", err)
+	// Older indexes may lack either fence. A second process that adds the
+	// column first is not an error.
+	for _, column := range []string{"gen", "epoch"} {
+		if x.d == dialectPostgres {
+			if _, err := x.w.Exec(`ALTER TABLE data_projects ADD COLUMN IF NOT EXISTS ` + column + ` BIGINT NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migrate data index: %w", err)
+			}
+			continue
 		}
-		return nil
-	}
-	has := func() (bool, error) {
-		var n int
-		err := x.w.QueryRow(`SELECT count(*) FROM pragma_table_info('data_projects') WHERE name = 'gen'`).Scan(&n)
-		return n > 0, err
-	}
-	if ok, err := has(); err != nil || ok {
-		return err
-	}
-	if _, err := x.w.Exec(`ALTER TABLE data_projects ADD COLUMN gen BIGINT NOT NULL DEFAULT 0`); err != nil {
-		if ok, _ := has(); !ok {
-			return fmt.Errorf("migrate data index: %w", err)
+		has := func() (bool, error) {
+			var n int
+			err := x.w.QueryRow(`SELECT count(*) FROM pragma_table_info('data_projects') WHERE name = ?`, column).Scan(&n)
+			return n > 0, err
+		}
+		if ok, err := has(); err != nil {
+			return err
+		} else if ok {
+			continue
+		}
+		if _, err := x.w.Exec(`ALTER TABLE data_projects ADD COLUMN ` + column + ` BIGINT NOT NULL DEFAULT 0`); err != nil {
+			if ok, _ := has(); !ok {
+				return fmt.Errorf("migrate data index: %w", err)
+			}
 		}
 	}
 	return nil
@@ -322,31 +326,30 @@ func (x *DataIndex) dropProject(ctx context.Context, project string) error {
 // A fold read before a change, on any process, therefore cannot report the
 // index complete after it.
 
-// start records a fresh build: incomplete, never caught up, under a
-// generation no earlier pass read (a nanosecond clock: the row of a project
-// whose Data went off is gone, so its count cannot simply go on).
+// start records a fresh build. epoch invalidates cached winners in every hub
+// process and advances even when clocks skew or two starts share a timestamp.
 func (x *DataIndex) start(ctx context.Context, project string) error {
-	_, err := x.w.ExecContext(ctx, x.q(`INSERT INTO data_projects (project, complete, applied_at, gen) VALUES (?, 0, '', ?)
-		ON CONFLICT (project) DO UPDATE SET complete = 0, applied_at = '', gen = excluded.gen`),
-		project, time.Now().UnixNano())
+	now := time.Now().UnixNano()
+	_, err := x.w.ExecContext(ctx, x.q(`INSERT INTO data_projects (project, complete, applied_at, gen, epoch) VALUES (?, 0, '', ?, ?)
+		ON CONFLICT (project) DO UPDATE SET complete = 0, applied_at = '', gen = excluded.gen,
+		epoch = CASE WHEN excluded.epoch > data_projects.epoch THEN excluded.epoch ELSE data_projects.epoch + 1 END`),
+		project, now, now)
 	return err
 }
 
-// generation is what a pass reads before its fold.
-func (x *DataIndex) generation(ctx context.Context, project string) (int64, error) {
-	var gen int64
-	err := x.w.QueryRowContext(ctx, x.q(`SELECT gen FROM data_projects WHERE project = ?`), project).Scan(&gen)
+// passFence is the shared generation and build epoch a pass reads before its fold.
+func (x *DataIndex) passFence(ctx context.Context, project string) (gen, epoch int64, exists bool, err error) {
+	err = x.w.QueryRowContext(ctx, x.q(`SELECT gen, epoch FROM data_projects WHERE project = ?`), project).Scan(&gen, &epoch)
 	if err == sql.ErrNoRows {
-		return 0, nil
+		return 0, 0, false, nil
 	}
-	return gen, err
+	return gen, epoch, err == nil, err
 }
 
-// finish raises complete for a pass that read gen before its fold, only while
-// the generation is still gen, and reports whether it did.
-func (x *DataIndex) finish(ctx context.Context, project string, gen int64, at time.Time) (bool, error) {
-	res, err := x.w.ExecContext(ctx, x.q(`UPDATE data_projects SET complete = 1, applied_at = ? WHERE project = ? AND gen = ?`),
-		dataTime(at), project, gen)
+// finish raises complete only under the generation and epoch read before the fold.
+func (x *DataIndex) finish(ctx context.Context, project string, gen, epoch int64, at time.Time) (bool, error) {
+	res, err := x.w.ExecContext(ctx, x.q(`UPDATE data_projects SET complete = 1, applied_at = ? WHERE project = ? AND gen = ? AND epoch = ?`),
+		dataTime(at), project, gen, epoch)
 	if err != nil {
 		return false, err
 	}

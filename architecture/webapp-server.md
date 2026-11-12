@@ -421,6 +421,8 @@ classDiagram
         +AllowedDomains
         +RequireVerification bool
         +RequireApproval bool
+        +PinPolicy(verification, approval)
+        -pinnedVerification, pinnedApproval *bool
         +Admins
         +InviteValid func(token)
         +BindDevice func(email, r) error
@@ -434,7 +436,7 @@ classDiagram
         -refresh re-reads the store before every decision
     }
     note for BuiltinAuth "Revocation is now a real edge, not a cookie change: revokeTokensFor / revokeGrantsForLocked kill every device token and pending CLI grant an account holds, DELETE /api/auth/token revokes one by name, and the same path runs on offboarding. BaseURL replaces trusting the request's Host when composing a reset or verification link — a mail link built from an attacker's Host header is a credential delivered to the attacker"
-    note for BuiltinAuth "refresh propagates changed saved verification/approval toggles across processes. policySeen keeps an unchanged persisted policy from undoing startup config overrides; signup, domains and admins remain config-owned."
+    note for BuiltinAuth "refresh propagates changed saved verification/approval toggles across processes. Explicit per-field config pins survive refresh and reject conflicting SetPolicy changes; policySeen tracks the saved policy independently. Signup, domains and admins remain config-owned."
     class CLIAuth {
         +UsePending(PendingRepo)
         -pending PendingRepo
@@ -750,11 +752,12 @@ classDiagram
         +dropProject(project)
         +SetMaxConns(applier, queries) a deployment's budget
     }
-    note for DataIndex "One row per JSON file, and per Markdown file's frontmatter, of every project whose Data setting is on: data_items(project, path, win, sha, changed_at, changed_by, doc, error, deleted) + data_projects(complete, applied_at). In the metadata SQL database, or data-index.db beside file metadata. DERIVED: dropped with the setting or the project, rebuilt by the next pass. win is winKey — journal.Less as bytes over the winning op — and every upsert carries WHERE data_items.win < excluded.win, so no older fold from any process can write over a newer row; a deletion is a tombstone keyed on the path's greatest delete op for the same reason. Queries never touch a snapshot or a blob, which is what makes them the same on every instance and fast on a cold one"
+    note for DataIndex "One row per JSON file, and per Markdown file's frontmatter, of every project whose Data setting is on: data_items(project, path, win, sha, changed_at, changed_by, doc, error, deleted) + data_projects(complete, applied_at, gen, epoch). gen fences each pass against later writes; epoch fences completion and cached winners against a sibling's partial rebuild. In the metadata SQL database, or data-index.db beside file metadata. DERIVED: dropped with the setting or the project, rebuilt by the next pass. win is winKey — journal.Less as bytes over the winning op — and every upsert carries WHERE data_items.win < excluded.win, so no older fold from any process can write over a newer row; a deletion is a tombstone keyed on the path's greatest delete op for the same reason. Queries never touch a snapshot or a blob, which is what makes them the same on every instance and fast on a cold one"
     class dataProject {
         <<dataapply.go, one per project>>
         -mu one pass at a time
-        -known path→win, loaded once
+        -known path→win, reloaded per build epoch
+        -knownEpoch int64
         +dataApplyLocked() diff snapshot.files vs index
     }
     note for dataProject "The applier follows the FOLD, never the op stream. Triggers: the refreshThen callback after a device push lands (dataApplyAsync, coalesced), inside every hub-door write's own request (dataWrote: the writer reads its write), and once after boot. Each pass diffs the whole fold, so a missed one is made up by the next. Only changed shas are fetched and decoded, a slice at a time (256 files or 16 MiB), so a first build holds one slice in memory (JSON as written; frontmatter typed by YAML; over 2 MiB or undecodable is an error row, counted by queries, never silently absent)"

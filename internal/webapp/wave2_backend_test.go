@@ -463,6 +463,215 @@ func TestWave2DataReenableRebuildsSiblingCache(t *testing.T) {
 	}
 }
 
+func TestWave2PinnedSignupPolicySurvivesSiblingRefresh(t *testing.T) {
+	for _, backend := range metaBackends(t) {
+		t.Run(backend.name, func(t *testing.T) {
+			backend.reset(t)
+			sa, sb := backend.open(t), backend.open(t)
+			defer sa.Close()
+			defer sb.Close()
+			a, err := NewBuiltinAuth(sa.Accounts(), false, &Mailer{Host: "smtp.example"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := a.SetPolicy(false, true); err != nil {
+				t.Fatal(err)
+			}
+			b, err := NewBuiltinAuth(sb.Accounts(), false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			approval := true
+			b.PinPolicy(nil, &approval)
+			approval = false // the pin must own its value, not the config pointer
+			if err := a.SetPolicy(false, false); err != nil {
+				t.Fatal(err)
+			}
+			if policy := b.Policy(); !policy.RequireApproval || !b.RequireApproval {
+				t.Fatal("sibling refresh removed the server-config approval pin")
+			}
+			u, err := b.signup("pending@example.com", "Pending", "password1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if u.Status != statusPending {
+				t.Fatalf("signup status = %q, want pending", u.Status)
+			}
+			if err := b.SetPolicy(false, false); err == nil || !strings.Contains(err.Error(), "require_approval is pinned to true") {
+				t.Fatalf("removing the approval pin: %v", err)
+			}
+			if err := b.SetPolicy(false, true); err != nil {
+				t.Fatalf("setting the pinned value: %v", err)
+			}
+			verification := false
+			b.PinPolicy(&verification, nil)
+			verification = true
+			if err := a.SetPolicy(true, false); err != nil {
+				t.Fatal(err)
+			}
+			if policy := b.Policy(); policy.RequireVerification || policy.RequireApproval {
+				t.Fatalf("per-field pin or unpinned sibling refresh failed: %+v", policy)
+			}
+			if err := b.SetPolicy(true, false); err == nil || !strings.Contains(err.Error(), "require_verification is pinned to false") {
+				t.Fatalf("removing the verification pin: %v", err)
+			}
+			verification = true
+			b.PinPolicy(&verification, nil)
+			if err := b.SetPolicy(true, false); err == nil || !strings.Contains(err.Error(), "smtp") {
+				t.Fatalf("effective pinned policy skipped mailer validation: %v", err)
+			}
+		})
+	}
+}
+
+func TestWave2DataReenableWithPartialSiblingChunkRebuildsRemainingFiles(t *testing.T) {
+	a, b, p := newHubPair(t)
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), "data.db")
+	xa, err := OpenDataIndex("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xa.Close()
+	xb, err := OpenDataIndex("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xb.Close()
+	a.Data, b.Data = xa, xb
+	if err := a.Projects.SetData(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := xa.start(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"a.json", "b.json", "c.json"} {
+		putContent(t, a.Handler(), "/api/p/"+p.ID+"/upload/content?path="+path, `{"answer":42}`, "")
+	}
+	st := a.dataProjectState(p.ID)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if err := a.dataPass(ctx, p.ID, st); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.known) != 3 {
+		t.Fatalf("initial cached winners = %d, want 3", len(st.known))
+	}
+	oldEpoch := st.knownEpoch
+	first := dataRow{path: "a.json"}
+	if err := xa.w.QueryRowContext(ctx, xa.q(`SELECT win, sha, doc FROM data_items WHERE project = ? AND path = ?`), p.ID, first.path).
+		Scan(&first.win, &first.sha, &first.doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Projects.SetData(p.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := xb.dropProject(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Projects.SetData(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := xb.start(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if refused, err := xb.write(ctx, p.ID, []dataRow{first}); err != nil || refused != 0 {
+		t.Fatalf("write sibling's first chunk: refused=%d err=%v", refused, err)
+	}
+	partial, err := xb.known(ctx, p.ID)
+	if err != nil || len(partial) != 1 {
+		t.Fatalf("sibling's partial build: rows=%d err=%v", len(partial), err)
+	}
+	if err := a.dataPass(ctx, p.ID, st); err != nil {
+		t.Fatal(err)
+	}
+	if st.knownEpoch == oldEpoch || len(st.known) != 3 {
+		t.Fatalf("cached rebuild: epoch=%d old=%d rows=%d", st.knownEpoch, oldEpoch, len(st.known))
+	}
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/api/p/"+p.ID+"/data/query", strings.NewReader(`{"pattern":"*.json"}`)))
+	var answer dataAnswer
+	if rec.Code != http.StatusOK {
+		t.Fatalf("query: %d %s", rec.Code, rec.Body)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+		t.Fatal(err)
+	}
+	if len(answer.Rows) != 3 || !answer.Complete {
+		t.Fatalf("partial sibling rebuild skipped files: rows=%d complete=%v", len(answer.Rows), answer.Complete)
+	}
+}
+
+func TestWave2DataPassInitializesLegacyEnabledProject(t *testing.T) {
+	a, _, p := newHubPair(t)
+	putContent(t, a.Handler(), "/api/p/"+p.ID+"/upload/content?path=legacy.json", `{"answer":42}`, "")
+	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	a.Data = x
+	if err := a.Projects.SetData(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, _, exists, err := x.passFence(ctx, p.ID); err != nil || exists {
+		t.Fatalf("legacy project already has a state row: exists=%v err=%v", exists, err)
+	}
+	st := a.dataProjectState(p.ID)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if err := a.dataPass(ctx, p.ID, st); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := x.readTx(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if complete, _, err := x.state(ctx, tx, p.ID); err != nil || !complete {
+		t.Fatalf("legacy pass did not complete: complete=%v err=%v", complete, err)
+	}
+	if len(st.known) != 1 {
+		t.Fatalf("legacy cached winners = %d, want 1", len(st.known))
+	}
+}
+
+func TestWave2DataBuildEpochFencesCompletion(t *testing.T) {
+	for name, open := range dataBackends(t) {
+		t.Run(name, func(t *testing.T) {
+			x := open(t)
+			ctx := context.Background()
+			project := "wave2-epoch-" + name
+			if err := x.start(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+			// A clock ahead of the next process must not make start reuse or
+			// decrease an epoch. Give both builds the same generation as well.
+			future := time.Now().Add(time.Hour).UnixNano()
+			if _, err := x.w.ExecContext(ctx, x.q(`UPDATE data_projects SET gen = 7, epoch = ? WHERE project = ?`), future, project); err != nil {
+				t.Fatal(err)
+			}
+			if err := x.start(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := x.w.ExecContext(ctx, x.q(`UPDATE data_projects SET gen = 7 WHERE project = ?`), project); err != nil {
+				t.Fatal(err)
+			}
+			gen, epoch, exists, err := x.passFence(ctx, project)
+			if err != nil || !exists || gen != 7 || epoch != future+1 {
+				t.Fatalf("new build fence: gen=%d epoch=%d exists=%v err=%v", gen, epoch, exists, err)
+			}
+			if ok, err := x.finish(ctx, project, gen, future, time.Now()); err != nil || ok {
+				t.Fatalf("old epoch completed a new build: ok=%v err=%v", ok, err)
+			}
+			if ok, err := x.finish(ctx, project, gen, epoch, time.Now()); err != nil || !ok {
+				t.Fatalf("current epoch did not complete: ok=%v err=%v", ok, err)
+			}
+		})
+	}
+}
+
 func TestWave2UnicodeHeadingIDs(t *testing.T) {
 	out, err := RenderMarkdown([]byte("# Body\n## 한글 제목\n## 한글 제목\n## Café\n## Cafe\u0301\n# Body\n# Body-1\n"))
 	if err != nil {

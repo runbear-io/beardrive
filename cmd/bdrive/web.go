@@ -368,15 +368,9 @@ credentials); otherwise it is relayed through this server.`,
 				}
 				if cfg.Auth != nil {
 					auth.AllowedDomains = cfg.Auth.AllowedDomains
-					// Toggles: an explicit config value pins the setting each
-					// boot; otherwise the UI-saved policy (loaded from auth.json)
-					// stands.
-					if cfg.Auth.RequireVerification != nil {
-						auth.RequireVerification = *cfg.Auth.RequireVerification
-					}
-					if cfg.Auth.RequireApproval != nil {
-						auth.RequireApproval = *cfg.Auth.RequireApproval
-					}
+					// Explicit config gates stay pinned across UI policy
+					// changes on this process and its siblings.
+					auth.PinPolicy(cfg.Auth.RequireVerification, cfg.Auth.RequireApproval)
 					auth.Brand = cfg.Auth.Brand
 					auth.BaseURL = cfg.Auth.BaseURL
 					if len(cfg.Auth.Admins) > 0 {
