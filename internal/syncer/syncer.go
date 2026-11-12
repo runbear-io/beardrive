@@ -613,7 +613,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	// machine authored them (`bdrive init --only`, `bdrive scope`, an editor).
 	// Runs before the scan and before the pull, so the floor the scan applies
 	// is always the last rules this device agreed to. See Filter.SkipUp.
-	if cur, err := os.ReadFile(filepath.Join(s.Folder, IgnoreFile)); err == nil || os.IsNotExist(err) {
+	if cur, err := readRegularIgnoreFile(s.Folder); err == nil || os.IsNotExist(err) {
 		text := string(cur)
 		// Both fields are omitempty, so a SyncState written before they existed
 		// carries neither — and the accept test below then reads whatever is on
@@ -815,7 +815,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 				// last op is a delete there is no version to adopt, so the local
 				// file is this device's own and keeps its clock.
 				if t, ok := theirs[op.Path]; ok && t.Kind == journal.KindPut {
-					if mountJoining && op.Kind == journal.KindPut && op.Blob == t.Blob && op.Link == t.Link {
+					if mountJoining && op.Kind == journal.KindPut && sameValue(op.Blob, op.Link, t.Blob, t.Link) {
 						continue
 					}
 					op.Lamport = 0
@@ -989,7 +989,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			// never widen it until somebody here authors a change. The accepted
 			// floor carries over unchanged.
 			if len(pulled) > 0 || ignoreFromPeer {
-				if cur, err := os.ReadFile(filepath.Join(s.Folder, IgnoreFile)); err == nil {
+				if cur, err := readRegularIgnoreFile(s.Folder); err == nil {
 					st.IgnorePulled = string(cur)
 				}
 			}
@@ -1232,7 +1232,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 	}
 	err := walk(s.Folder, filter, func(p, rel string, d fs.DirEntry, v verdict) error {
-		if v != vSync && v != vSymlink {
+		if !syncsEntry(v) {
 			return nil
 		}
 		seen[rel] = true
@@ -1519,6 +1519,16 @@ func sameJournalFile(a, b string) bool {
 	return os.SameFile(fa, fb)
 }
 
+// A put's value is either file content or a link target. Blob-only comparisons
+// mistake every symlink for every other symlink (and for a missing value).
+func opHasValue(op journal.Op) bool {
+	return op.Kind == journal.KindPut && (op.Blob != "" || op.Link != "")
+}
+
+func sameValue(blob, link, otherBlob, otherLink string) bool {
+	return blob == otherBlob && link == otherLink
+}
+
 // stillHold reports whether this folder's own materialization currently stands
 // behind op — the premise step 2b rests on ("an op this device already applied
 // is a file on this disk"). The mount's state cache is the record of what THIS
@@ -1535,11 +1545,12 @@ func sameJournalFile(a, b string) bool {
 // which only the op's own author can trigger and which they can reach anyway by
 // re-putting the content.
 func (s *Session) stillHold(op journal.Op, cache map[string]store.CachedFile) bool {
-	if op.Kind != journal.KindPut || op.Blob == "" {
+	if !opHasValue(op) {
 		return false
 	}
 	c, ok := cache[op.Path]
-	return ok && c.Blob == op.Blob && s.Store.HasBlob(op.Blob)
+	return ok && sameValue(c.Blob, c.Link, op.Blob, op.Link) &&
+		(op.Link != "" || s.Store.HasBlob(op.Blob))
 }
 
 // withdrawn reports the ops in applied whose (device, seq) slot is no longer
@@ -1992,7 +2003,7 @@ func (s *Session) backfillOps(target map[string]journal.FileState, cache map[str
 		if want.Blob == "" || neverSync(rel) || unsafeRel(rel) {
 			continue
 		}
-		if c, ok := cache[rel]; ok && c.Blob == want.Blob {
+		if c, ok := cache[rel]; ok && sameValue(c.Blob, c.Link, want.Blob, want.Link) {
 			continue
 		}
 		if filter.Skip(rel) {
@@ -2111,7 +2122,7 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 			theirs = theirsList[len(theirsList)-1]
 		}
 		cur, exists := state[p]
-		mineWon := (mine.Kind == journal.KindPut && exists && cur.Blob == mine.Blob) ||
+		mineWon := (opHasValue(mine) && exists && sameValue(cur.Blob, cur.Link, mine.Blob, mine.Link)) ||
 			(mine.Kind == journal.KindDelete && !exists)
 		loser := mine
 		if mineWon {
@@ -2130,18 +2141,18 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 			}
 			loser = theirs
 		}
-		if loser.Kind != journal.KindPut || loser.Blob == "" {
+		if !opHasValue(loser) {
 			continue // a lost delete needs no preservation
 		}
 		// By blob, never by Size: a blob is the hash of its bytes, and Size
 		// is only what a peer's journal claims.
-		if loser.Blob == emptyBlob {
+		if loser.Link == "" && loser.Blob == emptyBlob {
 			continue // an empty version holds nothing to preserve
 		}
-		if exists && cur.Blob == loser.Blob {
+		if exists && sameValue(cur.Blob, cur.Link, loser.Blob, loser.Link) {
 			continue // identical content; nothing actually lost
 		}
-		if !s.Store.HasBlob(loser.Blob) {
+		if loser.Link == "" && !s.Store.HasBlob(loser.Blob) {
 			continue // content unavailable (partial pull); skip rather than fail
 		}
 		// Already preserved. `pushed` only advances on a successful push, so a
@@ -2149,7 +2160,8 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 		// cycle — and the copy's name is derived from the loser, so without
 		// this the same bytes are re-journaled under the same path forever.
 		// Only reachable now that a collision is no longer required.
-		if kept, ok := state[conflictName(p, loser.DeviceName, loser.Time)]; ok && kept.Blob == loser.Blob {
+		if kept, ok := state[conflictName(p, loser.DeviceName, loser.Time)]; ok &&
+			sameValue(kept.Blob, kept.Link, loser.Blob, loser.Link) {
 			continue
 		}
 		// Two people editing DIFFERENT parts of one text file is the common
@@ -2167,7 +2179,7 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 		// that wrote before it had the bytes. The content goes back to the
 		// real path; a copy beside an empty file leaves the reader with an
 		// empty file to look at and the work under a name nobody opens.
-		if exists && cur.Link == "" && cur.Blob == emptyBlob {
+		if loser.Link == "" && exists && cur.Link == "" && cur.Blob == emptyBlob {
 			// The size this op states is the blob's own, read here: the loser's
 			// Size is a peer's claim, and a puller bounds its read by it.
 			fi, err := os.Stat(s.Store.BlobPath(loser.Blob))
@@ -2205,7 +2217,7 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 				other, haveOther = winner, true
 			}
 		}
-		if haveOther {
+		if haveOther && mine.Link == "" && other.Link == "" {
 			if all == nil {
 				var err error
 				all, err = s.Store.AllOps()
@@ -2249,54 +2261,88 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 			Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
 			User: s.Account.Email, UserName: s.Account.Name,
 			Kind: journal.KindPut, Path: conflictName(p, loser.DeviceName, loser.Time),
-			Blob: loser.Blob, Size: loser.Size, Mode: loser.Mode,
+			Blob: loser.Blob, Link: loser.Link, Size: loser.Size, Mode: loser.Mode,
 			Note: "conflict copy of " + p,
 		})
 	}
 	return out, nil
 }
 
-// readOnlyDrifted reports whether a read-only path's file on disk no longer
-// matches what this device last materialized there — edited, or removed. Only
-// consulted for read-only paths, so it costs one Stat on exactly the files
-// whose local changes can never be journaled.
+// localEntryInfo inspects the entry itself, never a symlink's target. Parent
+// containment is shared by reads, replacement checks and local preservation.
+func localEntryInfo(root, abs string) (os.FileInfo, error) {
+	if !store.UnderRoot(root, filepath.Dir(abs)) {
+		return nil, fmt.Errorf("resolves outside the mount root")
+	}
+	return os.Lstat(abs)
+}
+
+// readOnlyDrifted compares the entry with the last materialized fingerprint.
+// Denied paths have no project version to restore.
 func (s *Session) readOnlyDrifted(rel, abs string, c store.CachedFile) bool {
-	// A denied path has no project version to put back — the hub sends no ops
-	// for it — so there is nothing to revert to and the local file is simply
-	// this machine's own.
 	if !s.readOnlyPath(rel) || s.deniedPath(rel) {
 		return false
 	}
-	fi, err := os.Stat(abs)
-	if err != nil {
-		return true // removed locally: the project still holds it, so put it back
-	}
-	return fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS
+	fi, err := localEntryInfo(s.Folder, abs)
+	return err != nil || !cachedPathMatches(abs, fi, c)
 }
 
-// keepLocalCopy preserves a read-only file's local edit beside it before the
-// project's version is written back over it. Named like a conflict copy so it
-// reads the same way in a file listing, but it is not one: no op is written,
-// no peer will ever see it, and it stays on this machine.
-//
-// A copy that already holds these exact bytes is not made again — otherwise
-// every cycle after an edit mints another one.
-func (s *Session) keepLocalCopy(abs string) error {
+const maxLocalCopyTries = 64
+
+// preserveLocalEntry keeps a displaced read-only entry beside its original,
+// under the same prefix and without a journal op. Link targets are copied as
+// strings, never opened. Directories and special entries are left untouched.
+// Identical copies are reused. After a bounded collision search, the base
+// sidecar is replaced atomically rather than minting unbounded numbered copies.
+func (s *Session) preserveLocalEntry(abs, rel string, fi os.FileInfo) error {
+	if !store.UnderRoot(s.Folder, filepath.Dir(abs)) {
+		return fmt.Errorf("resolves outside the mount root")
+	}
+	var link string
+	var data []byte
+	var err error
+	switch {
+	case fi.Mode()&os.ModeSymlink != 0:
+		link, err = os.Readlink(abs)
+	case fi.Mode().IsRegular():
+		data, err = os.ReadFile(abs)
+	default:
+		return fmt.Errorf("cannot preserve non-file entry %s", rel)
+	}
+	if err != nil {
+		return err
+	}
 	dir, base := filepath.Split(abs)
 	ext := filepath.Ext(base)
-	copyAbs := filepath.Join(dir, strings.TrimSuffix(base, ext)+" (local, not synced)"+ext)
-	mine, err := hashFile(abs)
-	if err != nil {
-		return err
+	baseCopy := filepath.Join(dir, strings.TrimSuffix(base, ext)+" (local, not synced)"+ext)
+	copyAbs := baseCopy
+	for n := 1; n <= maxLocalCopyTries; n++ {
+		candidate := baseCopy
+		if n > 1 {
+			candidate = filepath.Join(dir, strings.TrimSuffix(base, ext)+fmt.Sprintf(" (local, not synced %d)", n)+ext)
+		}
+		existing, err := localEntryInfo(s.Folder, candidate)
+		if os.IsNotExist(err) {
+			copyAbs = candidate
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if link != "" && existing.Mode()&os.ModeSymlink != 0 {
+			if target, err := os.Readlink(candidate); err == nil && target == link {
+				return nil
+			}
+		} else if link == "" && existing.Mode().IsRegular() {
+			if prior, err := os.ReadFile(candidate); err == nil && bytes.Equal(prior, data) {
+				return nil
+			}
+		}
 	}
-	if theirs, err := hashFile(copyAbs); err == nil && theirs == mine {
-		return nil
+	if link != "" {
+		return s.writeSymlink(copyAbs, link)
 	}
-	data, err := os.ReadFile(abs)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(copyAbs, data, 0o644)
+	return store.WriteFileAtomic(copyAbs, data, 0o644)
 }
 
 // conflictName builds the copy's name. Both variable parts are bounded: the
@@ -2412,7 +2458,14 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 		}
 		if fi, err := os.Lstat(abs); err == nil {
 			if !cachedPathMatches(abs, fi, c) {
-				continue // dirty; do not delete fresh local edits
+				if !s.readOnlyPath(rel) || fi.IsDir() {
+					continue // writable edits belong to scan; never destroy a directory
+				}
+				if err := s.preserveLocalEntry(abs, rel, fi); err != nil {
+					skip(err)
+					continue
+				}
+				s.reverted = append(s.reverted, rel)
 			}
 			if err := os.Remove(abs); err != nil {
 				skip(err)
@@ -2437,71 +2490,79 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 // since the scan earlier in this cycle. Split out of materialize so the cycle
 // can land .bdriveignore on its own, before the rules are needed.
 func (s *Session) materializeFile(rel string, want journal.FileState, cache map[string]store.CachedFile) (bool, error) {
-	if want.Link != "" {
-		return s.materializeSymlink(rel, want, cache)
-	}
-	want.Mode = safeMode(want.Mode) // before the cache compare, or every cycle rewrites
-	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
-	c, ok := cache[rel]
-	// The cache agreeing with the target normally means there is nothing to
-	// do — a local edit would have been journaled by the scan, which updates
-	// the cache. Under a read-only folder the scan journals nothing and
-	// updates nothing, so the cache still agrees while the file on disk has
-	// moved: the file itself is the only evidence, and without this the revert
-	// below is unreachable and a read-only file silently diverges forever.
-	if ok && c.Blob == want.Blob && c.Mode == want.Mode && !s.readOnlyDrifted(rel, abs, c) {
+	// A peer may publish any path/value pair, but shared sync policy must
+	// never become a symlink. This gate covers every materialization phase.
+	if rel == IgnoreFile && want.Link != "" {
 		return false, nil
 	}
-	if ok && !s.readOnlyPath(rel) {
-		fi, err := os.Lstat(abs)
-		if err != nil || !cachedPathMatches(abs, fi, c) {
-			// A tracked writable path is safe to replace only when the
-			// current entry still matches the cached type and fingerprint.
-			// Missing entries and local type/content changes belong to the
-			// next targeted scan.
-			return false, nil
-		}
+	want.Mode = safeMode(want.Mode)
+	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
+	c, tracked := cache[rel]
+	if tracked && sameValue(c.Blob, c.Link, want.Blob, want.Link) &&
+		(want.Link != "" || c.Mode == want.Mode) && !s.readOnlyDrifted(rel, abs, c) {
+		return false, nil
 	}
-	if !ok {
-		// An untracked symlink is local user state, even when its target is
-		// readable. Lstat is required here: Stat would follow a non-dangling
-		// link into content that can be adopted or a dangling link into an
-		// error, and both cases would fall through to writeFile and replace
-		// the link with peer bytes.
-		if fi, err := os.Lstat(abs); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return false, nil
-		}
+	// One replacement gate for BOTH entry types: inspect without following,
+	// protect writable edits, and preserve displaced read-only local state.
+	fi, err := localEntryInfo(s.Folder, abs)
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
 	}
-	if fi, err := os.Stat(abs); err == nil {
-		if ok && c.Link == "" && (fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS) {
-			// The one place a dirty file is not left alone. Everywhere else
-			// "dirty" means the next scan will commit it — under a read-only
-			// folder the next scan will NOT, so leaving it would mean a file
-			// that silently stops receiving the project's updates forever and
-			// a local edit nobody else ever sees.
-			//
-			// The user's bytes are never dropped: they are copied aside first,
-			// under the same read-only prefix, so that copy is not journaled
-			// either and stays this machine's business.
-			if !s.readOnlyPath(rel) {
-				return false, nil // dirty: changed mid-cycle, next scan commits it
-			}
-			if err := s.keepLocalCopy(abs); err != nil {
-				return false, err
-			}
-			s.reverted = append(s.reverted, rel)
+	readOnly := s.readOnlyPath(rel)
+	if tracked && !readOnly && (err != nil || !cachedPathMatches(abs, fi, c)) {
+		return false, nil // missing or dirty; the next scan owns this change
+	}
+	if fi != nil {
+		if fi.IsDir() {
+			return false, nil // never recursively remove a user's directory
 		}
-		if !ok {
-			// Untracked file already at this path: adopt if identical,
-			// otherwise leave it for the next scan to journal.
-			sum, err := hashFile(abs)
-			if err != nil || sum != want.Blob {
+		if want.Link != "" && fi.Mode()&os.ModeSymlink != 0 {
+			if target, err := os.Readlink(abs); err == nil && target == want.Link {
+				s.cacheDirty = true
+				cache[rel] = store.CachedFile{Link: want.Link, Size: fi.Size(), MTimeNS: fi.ModTime().UnixNano()}
+				return false, nil
+			}
+		}
+		if !tracked && !readOnly {
+			// Adopt only identical untracked regular files or links. A differing
+			// entry is local work, even when its symlink target is readable.
+			if want.Link != "" || !fi.Mode().IsRegular() {
+				return false, nil
+			}
+			if sum, err := hashFile(abs); err != nil || sum != want.Blob {
 				return false, nil
 			}
 		}
 	}
-	if !s.Store.HasBlob(want.Blob) {
-		return false, nil // content not fetched yet; retry next cycle
+	if want.Link == "" && !s.Store.HasBlob(want.Blob) {
+		return false, nil // content not fetched yet; do not preserve or replace
+	}
+	preserve := fi != nil && readOnly && (!tracked || !cachedPathMatches(abs, fi, c))
+	if preserve && want.Link == "" && fi.Mode().IsRegular() {
+		// A missing or stale fingerprint does not prove that local bytes
+		// differ. Adopt identical content just as we adopt an identical link;
+		// a mode-only correction needs no local copy or revert report.
+		if sum, err := hashFile(abs); err == nil && sum == want.Blob {
+			preserve = false
+			if uint32(fi.Mode().Perm()) == want.Mode {
+				dev, ino, _ := store.FileIdentity(fi)
+				cache[rel] = store.CachedFile{
+					Blob: want.Blob, Mode: want.Mode, Size: fi.Size(),
+					MTimeNS: fi.ModTime().UnixNano(), Dev: dev, Ino: ino,
+				}
+				s.cacheDirty = true
+				return false, nil
+			}
+		}
+	}
+	if preserve {
+		if err := s.preserveLocalEntry(abs, rel, fi); err != nil {
+			return false, err
+		}
+		s.reverted = append(s.reverted, rel)
+	}
+	if want.Link != "" {
+		return s.materializeSymlink(rel, want, cache)
 	}
 	// Cache the snapshot we wrote, not a later local writer's fingerprint.
 	// Otherwise that writer's bytes could be mistaken for want.Blob forever.
@@ -2654,41 +2715,7 @@ func cachedPathMatches(abs string, fi os.FileInfo, c store.CachedFile) bool {
 // device's own filesystem may resolve, but that the sync engine never opens.
 func (s *Session) materializeSymlink(rel string, want journal.FileState, cache map[string]store.CachedFile) (bool, error) {
 	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
-	c, ok := cache[rel]
-	if ok && !s.readOnlyPath(rel) {
-		fi, err := os.Lstat(abs)
-		if err != nil || !cachedPathMatches(abs, fi, c) {
-			// A tracked writable path is safe to replace only when the
-			// current entry still matches the cached type and fingerprint.
-			// Missing entries and local type/content changes belong to the
-			// next targeted scan.
-			return false, nil
-		}
-		if c.Link != "" {
-			cur, err := os.Readlink(abs)
-			if err == nil && cur == want.Link {
-				return false, nil
-			}
-		}
-	}
-	if fi, err := os.Lstat(abs); err == nil {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			// A link already here: adopt it if it points where we want, else
-			// (an untracked, differing link) leave it for the next scan.
-			cur, rerr := os.Readlink(abs)
-			if rerr == nil && cur == want.Link {
-				s.cacheDirty = true
-				cache[rel] = store.CachedFile{Link: want.Link, Size: fi.Size(), MTimeNS: fi.ModTime().UnixNano()}
-				return false, nil
-			}
-			if !ok {
-				return false, nil
-			}
-		} else if !ok {
-			// An untracked real file sits at this path: never clobber it.
-			return false, nil
-		}
-	}
+	// materializeFile already ran the shared replacement/preservation gate.
 	if err := s.writeSymlink(abs, want.Link); err != nil {
 		return false, fmt.Errorf("symlink %s: %w", rel, err)
 	}

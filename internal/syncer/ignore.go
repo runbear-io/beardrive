@@ -122,6 +122,20 @@ func LoadFilter(folder string, include []string) (*Filter, error) {
 	return loadFilter(folder, include)
 }
 
+// readRegularIgnoreFile treats sync policy as regular-file content, never as
+// the target of a symlink. Missing and non-regular entries mean no local rules.
+func readRegularIgnoreFile(folder string) ([]byte, error) {
+	abs := filepath.Join(folder, IgnoreFile)
+	fi, err := localEntryInfo(folder, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, os.ErrNotExist
+	}
+	return os.ReadFile(abs)
+}
+
 // loadFilter builds the filter for a folder from its .bdriveignore (if any)
 // plus the include list from the .bdrive settings file.
 func loadFilter(folder string, include []string) (*Filter, error) {
@@ -131,7 +145,7 @@ func loadFilter(folder string, include []string) (*Filter, error) {
 			f.include = append(f.include, p)
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(folder, IgnoreFile))
+	data, err := readRegularIgnoreFile(folder)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return f, nil
