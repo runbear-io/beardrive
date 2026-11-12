@@ -240,6 +240,8 @@ func TestARefusedConflictCopyIsRetried(t *testing.T) {
 	t.Cleanup(func() { parkBackoff = old })
 	fastRoom(t, time.Hour, time.Hour)
 	srv, p, _ := newHub(t, true, nil)
+	quota := &toggleWriteQuota{refusal: &failingQuota{skip: 1, n: 3}}
+	srv.Quota = quota
 	h := srv.Handler()
 	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
 	putContent(t, h, up, "one\ntwo\n", "")
@@ -253,7 +255,7 @@ func TestARefusedConflictCopyIsRetried(t *testing.T) {
 		txt.Insert(txn, 0, "one\nROOM\n", nil)
 	})
 	// The snapshot reaches its 409; the copy after it fails three times.
-	srv.Quota = &failingQuota{skip: 1, n: 3}
+	quota.blocked.Store(true)
 	srv.finalSnapshot(context.Background(), room)
 
 	deadline := time.Now().Add(5 * time.Second)

@@ -303,6 +303,21 @@ func TestYCollabRoomRetriesPastEightFailuresUntilStorageRecovers(t *testing.T) {
 	}
 }
 
+// toggleWriteQuota keeps the server's provider fixed while a test changes
+// whether writes reach its refusal provider.
+type toggleWriteQuota struct {
+	UnlimitedQuota
+	refusal QuotaProvider
+	blocked atomic.Bool
+}
+
+func (q *toggleWriteQuota) CheckWrite(org string, bytes int64) error {
+	if q.blocked.Load() {
+		return q.refusal.CheckWrite(org, bytes)
+	}
+	return nil
+}
+
 // A sync landing on a process that does not hold the room's lease is ok only
 // once the holder's write of it is on storage — and never when the holder
 // cannot write it.
@@ -311,7 +326,8 @@ func TestYCollabSyncNonHolderWaitsForDurableWriteAndRefusesWhenHolderBlocked(t *
 	oldWait := ycollabSyncDurableWait
 	ycollabSyncDurableWait = 1500 * time.Millisecond
 	t.Cleanup(func() { ycollabSyncDurableWait = oldWait })
-	a, b, p := newHubPair(t)
+	quota := &toggleWriteQuota{refusal: fullQuota{}}
+	a, b, p := newHubPair(t, quota)
 	relay := cluster.NewMemRelay()
 	for _, s := range []*Server{a, b} {
 		if err := s.useCollabRelay(relay); err != nil {
@@ -359,8 +375,8 @@ func TestYCollabSyncNonHolderWaitsForDurableWriteAndRefusesWhenHolderBlocked(t *
 	})
 
 	t.Run("holder blocked", func(t *testing.T) {
-		a.Quota = fullQuota{}
-		t.Cleanup(func() { a.Quota = nil })
+		quota.blocked.Store(true)
+		t.Cleanup(func() { quota.blocked.Store(false) })
 		before := get(t, ha, url).Body.String()
 		rec := syncAs(t, hb, p.ID, path, map[string]any{"base": shaOf(before), "base_text": before, "text": before + "unwritten\n"})
 		if rec.Code < 300 {
@@ -379,6 +395,49 @@ func TestYCollabSyncNonHolderWaitsForDurableWriteAndRefusesWhenHolderBlocked(t *
 		s.Close(context.Background())
 		s.rooms().settle()
 	}
+}
+
+// Probe through the actual room timer without a storage lock accidentally
+// ordering the quota read after subtest cleanup. Reassigning srv.Quota in
+// cleanup instead of toggling the provider races with this timer's read.
+func TestYCollabBlockedHolderQuotaToggleDoesNotRaceRoomTimer(t *testing.T) {
+	fastRoom(t, 5*time.Millisecond, 10*time.Millisecond)
+	srv, p, _ := newHub(t, true, nil)
+	quota := &toggleWriteQuota{refusal: fullQuota{}}
+	srv.Quota = quota
+	srv.Handler()
+	room := p.ID + "/notes.md"
+
+	for i := range 20 {
+		started := make(chan struct{})
+		done := make(chan struct{})
+		t.Run(fmt.Sprintf("toggle-%d", i), func(t *testing.T) {
+			quota.blocked.Store(true)
+			t.Cleanup(func() { quota.blocked.Store(false) })
+			srv.rooms().touched(room, func() {
+				close(started)
+				_ = srv.quota().CheckWrite("", 1)
+				close(done)
+			})
+			// The timer must start before cleanup, with no synchronization
+			// ordering its subsequent quota read against the toggle.
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("room timer never started")
+			}
+		})
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("room timer never checked quota")
+		}
+		if err := srv.quota().CheckWrite("", 1); err != nil {
+			t.Fatalf("quota still blocked after subtest cleanup: %v", err)
+		}
+	}
+	srv.Close(context.Background())
+	srv.rooms().settle()
 }
 
 // Without a relay the holder never hears this process's update: refused at
@@ -737,6 +796,8 @@ func TestMoveDocLiveSameLineConcurrentKeystrokeKeepsBothEdits(t *testing.T) {
 func TestYCollabSyncParkOnConflictWritesCopyInOneRequest(t *testing.T) {
 	fastRoom(t, time.Hour, time.Hour)
 	srv, p, _ := newHub(t, true, nil)
+	quota := &toggleWriteQuota{refusal: fullQuota{}}
+	srv.Quota = quota
 	h := srv.Handler()
 	path := "notes.md"
 	room := p.ID + "/" + path
@@ -821,8 +882,8 @@ func TestYCollabSyncParkOnConflictWritesCopyInOneRequest(t *testing.T) {
 	}
 
 	// A full org: the copy is refused like any write, and nothing is stored.
-	srv.Quota = fullQuota{}
-	t.Cleanup(func() { srv.Quota = nil })
+	quota.blocked.Store(true)
+	t.Cleanup(func() { quota.blocked.Store(false) })
 	const again = "l1 from a tab over quota\nl2\nl3\n"
 	rec = syncAs(t, h, p.ID, path, map[string]any{"base": shaOf(base), "base_text": base, "text": again, "park_on_conflict": true})
 	if rec.Code != http.StatusForbidden {

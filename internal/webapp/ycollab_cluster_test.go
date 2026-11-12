@@ -76,7 +76,7 @@ func (b *casBackend) PutIf(ctx context.Context, key string, r io.Reader, size in
 var coEditor = User{Email: "editor@example.com", Name: "An Editor"}
 
 // newHubPair is two hub processes on one storage root and one project.
-func newHubPair(t *testing.T) (a, b *Server, p Project) {
+func newHubPair(t *testing.T, quotas ...QuotaProvider) (a, b *Server, p Project) {
 	t.Helper()
 	fs, err := remote.Open(context.Background(), "file://"+t.TempDir())
 	if err != nil {
@@ -96,6 +96,10 @@ func newHubPair(t *testing.T) (a, b *Server, p Project) {
 		s := &Server{
 			Root: be, Projects: db, Device: Identity{ID: id, Name: id, Author: id + "@test"},
 			Refresh: 0, Upload: UploadConfig{Enabled: true},
+		}
+		if len(quotas) > 0 {
+			s.Quota = quotas[0]
+			quotas = quotas[1:]
 		}
 		s.Handler()
 		t.Cleanup(func() {
