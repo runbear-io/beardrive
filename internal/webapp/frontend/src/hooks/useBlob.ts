@@ -9,6 +9,8 @@ import { MAX_BYTES, sniffBytes, type BlobText } from "../lib/sniff";
 
 export type { BlobText };
 
+const FILE_SHA = /^[0-9a-f]{64}$/;
+
 export function blobURL(apiBase: string, sha: string, name?: string, download?: boolean): string {
   let u = apiBase + "blob?sha=" + encodeURIComponent(sha);
   if (name) u += "&name=" + encodeURIComponent(name);
@@ -36,13 +38,26 @@ export async function fetchBlobText(url: string, quiet = false): Promise<BlobTex
   const len = Number(
     r.headers.get("Content-Length") ?? r.headers.get("X-Uncompressed-Length"),
   );
-  if (len > MAX_BYTES) return { kind: "too-large", size: len };
-  const out = sniffBytes(new Uint8Array(await r.arrayBuffer()));
-  // The ETag IS the content hash (webapp/server.go serves blobs by sha), so
-  // this is the version the buffer is based on — not a guess we could get
-  // subtly wrong by re-hashing decoded text.
+  // The ETag is the content hash, including for binary and oversized files.
   const etag = r.headers.get("ETag")?.replace(/^W\/|"/g, "");
-  return out.kind === "text" && etag ? { ...out, sha: etag } : out;
+  if (len > MAX_BYTES) return { kind: "too-large", size: len, sha: etag };
+  const out = sniffBytes(new Uint8Array(await r.arrayBuffer()));
+  return etag ? { ...out, sha: etag } : out;
+}
+
+export async function fetchFileHeadSha(url: string): Promise<{ exists: true; sha: string } | { exists: false }> {
+  let r: Response;
+  try {
+    r = await getResponse(url, { method: "HEAD" });
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 404) return { exists: false };
+    throw e;
+  }
+  const sha = r.headers.get("ETag")?.replace(/^W\/|"/g, "");
+  if (r.status !== 200 || !sha || !FILE_SHA.test(sha)) {
+    throw new Error("Could not verify the current version of the target file");
+  }
+  return { exists: true, sha };
 }
 
 // The URL a file page reads its bytes from: content-addressed when a version

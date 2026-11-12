@@ -651,3 +651,184 @@ func TestWave2FileDeviceRegistryUsesOneLock(t *testing.T) {
 		t.Fatal("release did not remove persisted device rows")
 	}
 }
+
+func TestWave2RemoveIfMatchProtectsConcurrentCopyEdits(t *testing.T) {
+	const path = "notes (conflict copy).md"
+	remove := func(t *testing.T, hub ryowHub, base, match string, headers map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"path": path, "if_match": match})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hub.call(t, "POST", base+"/remove", body, headers)
+	}
+	t.Run("matching version", func(t *testing.T) {
+		a, _, p, _ := newRYOWHubPair(t)
+		base := "/api/p/" + p.ID
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("mine"), nil), "seed")
+		if rec := remove(t, a, base, shaOf("mine"), nil); rec.Code != http.StatusOK {
+			t.Fatalf("matching remove: %d %s", rec.Code, rec.Body)
+		}
+		if rec := a.call(t, "GET", base+"/file?path="+url.QueryEscape(path), nil, nil); rec.Code != http.StatusNotFound {
+			t.Fatalf("removed copy still exists: %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("stale version keeps edited copy", func(t *testing.T) {
+		a, b, p, _ := newRYOWHubPair(t)
+		base := "/api/p/" + p.ID
+		file := base + "/file?path=" + url.QueryEscape(path)
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("mine"), nil), "seed")
+		b.call(t, "GET", file, nil, nil) // B still believes the requested base holds.
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("teammate's edit"), nil), "edit")
+		if rec := remove(t, b, base, shaOf("mine"), nil); rec.Code != http.StatusConflict {
+			t.Fatalf("stale remove: %d %s", rec.Code, rec.Body)
+		}
+		if rec := a.call(t, "GET", file, nil, nil); rec.Code != http.StatusOK || rec.Body.String() != "teammate's edit" {
+			t.Fatalf("edited copy lost: %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("matching version refreshes sibling snapshot", func(t *testing.T) {
+		a, b, p, _ := newRYOWHubPair(t)
+		base := "/api/p/" + p.ID
+		file := base + "/file?path=" + url.QueryEscape(path)
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("old"), nil), "seed")
+		if rec := b.call(t, "GET", file, nil, nil); rec.Code != http.StatusOK || rec.Body.String() != "old" {
+			t.Fatalf("warm sibling snapshot: %d %s", rec.Code, rec.Body)
+		}
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("current"), nil), "edit")
+		if rec := b.call(t, "GET", file, nil, nil); rec.Body.String() != "old" {
+			t.Fatalf("test did not retain a stale sibling snapshot: %s", rec.Body)
+		}
+		if rec := remove(t, b, base, shaOf("current"), nil); rec.Code != http.StatusOK {
+			t.Fatalf("fresh base against cached snapshot: %d %s", rec.Code, rec.Body)
+		}
+		if rec := b.call(t, "GET", file, nil, nil); rec.Code != http.StatusNotFound {
+			t.Fatalf("matching copy not removed: %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("malformed version", func(t *testing.T) {
+		a, _, p, _ := newRYOWHubPair(t)
+		base := "/api/p/" + p.ID
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("mine"), nil), "seed")
+		for _, match := range []string{"bad", strings.Repeat("a", 63), strings.Repeat("A", 64), strings.Repeat("g", 64)} {
+			if rec := remove(t, a, base, match, nil); rec.Code != http.StatusBadRequest {
+				t.Fatalf("malformed version %q: %d %s", match, rec.Code, rec.Body)
+			}
+		}
+		if rec := a.call(t, "GET", base+"/file?path="+url.QueryEscape(path), nil, nil); rec.Body.String() != "mine" {
+			t.Fatalf("malformed request removed copy: %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("header fallback and body precedence", func(t *testing.T) {
+		a, _, p, _ := newRYOWHubPair(t)
+		base := "/api/p/" + p.ID
+		writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(path), []byte("mine"), nil), "seed")
+		if rec := remove(t, a, base, shaOf("stale"), map[string]string{"If-Match": shaOf("mine")}); rec.Code != http.StatusConflict {
+			t.Fatalf("header overrode explicit body: %d %s", rec.Code, rec.Body)
+		}
+		if rec := remove(t, a, base, "", map[string]string{"If-Match": `W/"` + shaOf("mine") + `"`}); rec.Code != http.StatusOK {
+			t.Fatalf("weak quoted header: %d %s", rec.Code, rec.Body)
+		}
+		if rec := remove(t, a, base, shaOf("mine"), nil); rec.Code != http.StatusNotFound {
+			t.Fatalf("missing copy: %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("edit during append CAS", func(t *testing.T) {
+		root, h, p := casHub(t)
+		const copyPath = "copy.md"
+		if rec := putIfMatch(h, p.ID, copyPath, "mine", ""); rec.Code != http.StatusOK {
+			t.Fatalf("seed: %d %s", rec.Code, rec.Body)
+		}
+		root.beforePutIf = func(key string) { theOtherProcessAppends(t, root, key, copyPath, "concurrent edit") }
+		rec := do(t, h, "POST", "/api/p/"+p.ID+"/remove", map[string]string{"path": copyPath, "if_match": shaOf("mine")})
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("CAS stale remove: %d %s", rec.Code, rec.Body)
+		}
+		if root.conflicts == 0 {
+			t.Fatal("append did not exercise a CAS conflict")
+		}
+		if rec := get(t, h, "/api/p/"+p.ID+"/file?path="+copyPath); rec.Code != http.StatusOK || rec.Body.String() != "concurrent edit" {
+			t.Fatalf("CAS removed edited copy: %d %s", rec.Code, rec.Body)
+		}
+	})
+}
+
+func TestWave2ConflictResolutionHeadsProtectNonTextOriginals(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "binary", body: "binary\x00original"},
+		{name: "oversized", body: strings.Repeat("x", 5<<20)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b, p, _ := newRYOWHubPair(t)
+			base := "/api/p/" + p.ID
+			writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=original.md", []byte(tc.body), nil), "original")
+			writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=copy.md", []byte("my version"), nil), "copy")
+			// net/http suppresses HEAD bodies; ResponseRecorder alone does not.
+			server := httptest.NewServer(b.h)
+			defer server.Close()
+			head, err := server.Client().Head(server.URL + base + "/file?path=original.md")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer head.Body.Close()
+			n, _ := head.Body.Read(make([]byte, 1))
+			if head.StatusCode != http.StatusOK || n != 0 || head.Header.Get("ETag") != `"`+shaOf(tc.body)+`"` {
+				t.Fatalf("HEAD must return version without bytes: %d %v body=%d", head.StatusCode, head.Header, n)
+			}
+			changed := tc.body + "\nconcurrent edit"
+			writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=original.md", []byte(changed), nil), "edit")
+			rec := b.call(t, "PUT", base+"/upload/content?path=original.md", []byte("my version"), map[string]string{
+				"If-Match": head.Header.Get("ETag"), "X-Bdrive-Confirm-Shrink": "1",
+			})
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("stale non-text original overwritten: %d %s", rec.Code, rec.Body)
+			}
+			if rec := a.call(t, "GET", base+"/file?path=original.md", nil, nil); rec.Code != http.StatusOK || rec.Body.String() != changed {
+				t.Fatalf("concurrent original lost: status=%d size=%d", rec.Code, rec.Body.Len())
+			}
+			if rec := b.call(t, "GET", base+"/file?path=copy.md", nil, nil); rec.Code != http.StatusOK || rec.Body.String() != "my version" {
+				t.Fatalf("conflict copy lost: %d %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+func TestWave2ParkedConflictResolutionReportsItsActualTarget(t *testing.T) {
+	a, _, p, _ := newRYOWHubPair(t)
+	base := "/api/p/" + p.ID
+	writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=original.md", []byte("base\x00"), nil), "seed")
+	writeReceipt(t, a.call(t, "PUT", base+"/upload/content?path=original.md", []byte("theirs\x00"), nil), "edit")
+	rec := a.call(t, "PUT", base+"/upload/content?path=original.md", []byte("mine"), map[string]string{
+		"If-Match": shaOf("base\x00"), "X-Bdrive-Park-On-Conflict": "1",
+	})
+	var out struct {
+		Path   string `json:"path"`
+		Parked string `json:"parked"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Parked == "" {
+		t.Fatalf("parked write not reported: %d %s", rec.Code, rec.Body)
+	}
+	if rec := a.call(t, "GET", base+"/file?path=original.md", nil, nil); rec.Body.String() != "theirs\x00" {
+		t.Fatal("parking replaced original")
+	}
+	if rec := a.call(t, "GET", base+"/file?path="+url.QueryEscape(out.Parked), nil, nil); rec.Body.String() != "mine" {
+		t.Fatalf("parked content missing: %d %s", rec.Code, rec.Body)
+	}
+	// A create-only retry of that conflict name must report its shifted path.
+	shifted := a.call(t, "PUT", base+"/upload/content?path="+url.QueryEscape(out.Parked), []byte("another version"), map[string]string{
+		"If-None-Match": "*", "X-Bdrive-Park-On-Conflict": "1",
+	})
+	var next struct {
+		Path   string `json:"path"`
+		Parked string `json:"parked"`
+	}
+	if shifted.Code != http.StatusOK || json.Unmarshal(shifted.Body.Bytes(), &next) != nil || next.Parked == "" || next.Path != next.Parked || next.Path == out.Parked {
+		t.Fatalf("shifted write not reported: %d %s", shifted.Code, shifted.Body)
+	}
+	if rec := a.call(t, "GET", base+"/file?path="+url.QueryEscape(out.Parked), nil, nil); rec.Body.String() != "mine" {
+		t.Fatal("shifted retry replaced first copy")
+	}
+}

@@ -12,8 +12,8 @@ export type BlobText =
   // fetchBlobText. An editor needs it to say what its buffer was built on,
   // so a save cannot silently land on top of somebody else's work.
   | { kind: "text"; text: string; sha?: string }
-  | { kind: "binary" }
-  | { kind: "too-large"; size: number };
+  | { kind: "binary"; sha?: string }
+  | { kind: "too-large"; size: number; sha?: string };
 
 export function sniffBytes(buf: Uint8Array): BlobText {
   if (buf.byteLength > MAX_BYTES) return { kind: "too-large", size: buf.byteLength };

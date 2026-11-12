@@ -284,8 +284,8 @@ export async function getJSON<T>(url: string): Promise<T> {
 
 // Same auth/error handling as getJSON, but hands back the raw Response —
 // for endpoints that serve bytes rather than JSON (blob?sha=).
-export async function getResponse(url: string): Promise<Response> {
-  const r = await projectFetch(url);
+export async function getResponse(url: string, init?: RequestInit): Promise<Response> {
+  const r = await projectFetch(url, init);
   if (r.status === 401) toLogin();
   if (!r.ok) await fail(r);
   return r;
