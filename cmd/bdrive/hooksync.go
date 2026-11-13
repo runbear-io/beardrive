@@ -172,7 +172,13 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string, cycle bool
 	// true.
 	var paths []store.InboundEvent
 	var found map[string][]secrets.Finding
-	release, current := daemonCurrent(sess.Store, sess.MountID)
+	// Without a cycle to skip there is no reason to wait up to hookCycleWait
+	// on the volume lock, once per mount: a home folder sits above many.
+	var release func()
+	current := false
+	if cycle {
+		release, current = daemonCurrent(sess.Store, sess.MountID)
+	}
 	if current {
 		paths, _ = sess.Store.DrainInboundForMount(sess.MountID)
 		found, _ = sess.Store.LoadSecrets(sess.MountID)

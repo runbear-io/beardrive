@@ -97,12 +97,18 @@ list in .bdrive/config.json is never pruned against either.`,
 					if err != nil {
 						return err
 					}
+					// Above the mount there is no cycle to skip, so nothing to
+					// wait on the volume lock for. The note goes first, so
+					// a daemon started here stamps its first scan with it.
+					if below {
+						if err := st.SaveNoteForMount(proj.ID, note, noteTTL); err != nil {
+							return err
+						}
+						daemon.EnsureRunningAsync(vdir, 3*time.Second, 10*time.Second)
+						return nil
+					}
 					if release, ok := daemonCurrent(st, proj.ID); ok {
 						defer release()
-						return st.SaveNoteForMount(proj.ID, note, noteTTL)
-					}
-					if below {
-						daemon.EnsureRunningAsync(vdir, 3*time.Second, 10*time.Second)
 						return st.SaveNoteForMount(proj.ID, note, noteTTL)
 					}
 				}

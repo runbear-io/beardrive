@@ -437,3 +437,35 @@ func TestDeferredSyncAboveAMountOnlyRecordsTheNote(t *testing.T) {
 		t.Errorf("note = %q, want it recorded", note)
 	}
 }
+
+// Above a mount there is no cycle to skip, so neither hook waits for the
+// daemon's cycle in flight: once per mount, below a home folder, those waits
+// add up past the hook's timeout.
+func TestHooksAboveAMountDoNotWaitForTheDaemonCycle(t *testing.T) {
+	folder, proj := stampFixture(t)
+	holdDaemonLock(t, proj)
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := st.Lock() // the daemon's cycle, outlasting both hooks
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	for name, run := range map[string]func(){
+		"--hook":  func() { runHook(t, filepath.Dir(folder)) },
+		"--defer": func() { runDeferredSync(t, filepath.Dir(folder)) },
+	} {
+		start := time.Now()
+		run()
+		if took := time.Since(start); took >= hookCycleWait/2 {
+			t.Errorf("%s above the mount took %v waiting on the daemon's cycle", name, took)
+		}
+	}
+}
