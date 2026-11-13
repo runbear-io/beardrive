@@ -52,6 +52,11 @@ list in .bdrive/config.json is never pruned against either.`,
 			// mounts below it — a repo root with wiki/ and docs/ mounted syncs
 			// both, and a session inside a mount syncs its root.
 			targets := syncTargets(folder)
+			// A session above its mounts (a home folder, a repo root) gets
+			// them kept fresh by their daemons, never walked by its hooks: a
+			// home folder sits above every mount on the device, and walking
+			// all of them on each turn outlasts the hook's timeout.
+			below := syncTargetsBelow(folder)
 			if deferToDaemon && prune {
 				return fmt.Errorf("--defer cannot be combined with --prune: pruning needs a cycle of its own")
 			}
@@ -94,6 +99,10 @@ list in .bdrive/config.json is never pruned against either.`,
 					}
 					if release, ok := daemonCurrent(st, proj.ID); ok {
 						defer release()
+						return st.SaveNoteForMount(proj.ID, note, noteTTL)
+					}
+					if below {
+						daemon.EnsureRunningAsync(vdir, 3*time.Second, 10*time.Second)
 						return st.SaveNoteForMount(proj.ID, note, noteTTL)
 					}
 				}
@@ -146,7 +155,7 @@ list in .bdrive/config.json is never pruned against either.`,
 					if err != nil || !ok || syncBlocked(proj) != "" {
 						continue
 					}
-					if h, ok := runHookSync(cmd, target, sessionID, hookLabel); ok {
+					if h, ok := runHookSync(cmd, target, sessionID, hookLabel, !below); ok {
 						link := hookLinkFor(folder, target, h.base)
 						link.paths = h.paths
 						link.secrets = h.secrets

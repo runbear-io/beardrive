@@ -44,6 +44,12 @@ session and report what changed, and return in milliseconds (after waiting for
 a daemon sync already in progress to finish). Without a daemon, or when the
 daemon cannot vouch for the folder, they run a full sync themselves.
 
+A session that starts above its synced folders (your home folder, or a repo
+root whose `wiki/` is the synced folder) never runs that full sync: it records
+the session, reports what the daemon has pulled so far, and starts the daemon
+if it is not running. Walking every synced folder below your home folder on
+each prompt is slower than the hook's timeout.
+
 Every platform pipes hook JSON with a session id, so one hook command serves all
 four, and changes are stamped with `<agent> session <id>` — visible in
 `bdrive log` and the hub's history.

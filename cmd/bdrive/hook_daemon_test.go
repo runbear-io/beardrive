@@ -406,3 +406,34 @@ func TestDeferredSyncRefusesPrune(t *testing.T) {
 		t.Fatal("sync --defer --prune succeeded")
 	}
 }
+
+// A session above a mount (a home folder above every mount on the device)
+// must not walk it on each turn, even with no daemon to vouch: the mount's
+// daemon syncs it, and the turn still gets the mount's links.
+func TestHookAboveAMountLeavesTheSyncToItsDaemon(t *testing.T) {
+	folder, proj := stampFixture(t)
+
+	out := runHook(t, filepath.Dir(folder))
+
+	if ops := committed(t, proj); len(ops) != 0 {
+		t.Errorf("the hook above the mount cycled it: committed %d ops", len(ops))
+	}
+	if !strings.Contains(out, "p-12345678") {
+		t.Errorf("the hook above the mount emitted no link for it:\n%s", out)
+	}
+}
+
+// The after-edit hook above a mount records the note and leaves the edit to
+// the mount's daemon, as beside a daemon that vouches.
+func TestDeferredSyncAboveAMountOnlyRecordsTheNote(t *testing.T) {
+	folder, proj := stampFixture(t)
+
+	runDeferredSync(t, filepath.Dir(folder))
+
+	if ops := committed(t, proj); len(ops) != 0 {
+		t.Errorf("sync --defer above the mount cycled it: committed %d ops", len(ops))
+	}
+	if note := storedNote(t, proj); note != "claude-code session sess-42" {
+		t.Errorf("note = %q, want it recorded", note)
+	}
+}

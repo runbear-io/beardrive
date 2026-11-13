@@ -91,6 +91,16 @@ func syncTargets(folder string) []string {
 	return mountsUnder(folder)
 }
 
+// syncTargetsBelow reports whether syncTargets(folder) resolves to the
+// mounts below folder, rather than the mount folder is or sits inside.
+func syncTargetsBelow(folder string) bool {
+	if config.IsMount(folder) {
+		return false
+	}
+	_, inside := findMountRoot(folder)
+	return !inside
+}
+
 // workspaceRootUnder reports a workspace root strictly below folder, if this
 // device syncs a project inside one. A root's projects are its immediate
 // children and the registry knows where every mount is, so this is one stat
