@@ -469,3 +469,37 @@ func TestHooksAboveAMountDoNotWaitForTheDaemonCycle(t *testing.T) {
 		}
 	}
 }
+
+// One supervisor runs every mount's worker, so a hook above several mounts
+// starts it only once each of them holds the session note: otherwise the
+// first mount's start could scan the second before its note is in place.
+func TestHooksAboveMountsSaveEveryNoteBeforeStartingTheDaemon(t *testing.T) {
+	for name, run := range map[string]func(t *testing.T, root string){
+		"--hook":  func(t *testing.T, root string) { runHook(t, root) },
+		"--defer": func(t *testing.T, root string) { runDeferredSync(t, root) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("BDRIVE_HOME", t.TempDir())
+			root, _ := filepath.EvalSymlinks(t.TempDir())
+			a := mountAt(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa")
+			b := mountAt(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb")
+			starts := 0
+			old := ensureDaemon
+			ensureDaemon = func(string, time.Duration, time.Duration) {
+				starts++
+				for _, p := range []config.Project{a, b} {
+					if note := storedNote(t, p); note != "claude-code session sess-42" {
+						t.Errorf("daemon started before %s held the note (note %q)", p.Volume, note)
+					}
+				}
+			}
+			t.Cleanup(func() { ensureDaemon = old })
+
+			run(t, root)
+
+			if starts != 2 {
+				t.Errorf("daemon started %d times, want once per mount", starts)
+			}
+		})
+	}
+}

@@ -57,6 +57,15 @@ list in .bdrive/config.json is never pruned against either.`,
 			// home folder sits above every mount on the device, and walking
 			// all of them on each turn outlasts the hook's timeout.
 			below := syncTargetsBelow(folder)
+			// Daemons are started once every target's note is saved: one
+			// supervisor runs every mount's worker, so starting it for the
+			// first mount could scan the next before its note is in place.
+			var wake []string
+			wakeDaemons := func() {
+				for _, vdir := range wake {
+					ensureDaemon(vdir, 3*time.Second, 10*time.Second)
+				}
+			}
 			if deferToDaemon && prune {
 				return fmt.Errorf("--defer cannot be combined with --prune: pruning needs a cycle of its own")
 			}
@@ -98,13 +107,12 @@ list in .bdrive/config.json is never pruned against either.`,
 						return err
 					}
 					// Above the mount there is no cycle to skip, so nothing to
-					// wait on the volume lock for. The note goes first, so
-					// a daemon started here stamps its first scan with it.
+					// wait on the volume lock for.
 					if below {
 						if err := st.SaveNoteForMount(proj.ID, note, noteTTL); err != nil {
 							return err
 						}
-						daemon.EnsureRunningAsync(vdir, 3*time.Second, 10*time.Second)
+						wake = append(wake, vdir)
 						return nil
 					}
 					if release, ok := daemonCurrent(st, proj.ID); ok {
@@ -168,9 +176,10 @@ list in .bdrive/config.json is never pruned against either.`,
 						links = append(links, link)
 					}
 					if vdir, err := config.VolumeDir(proj.ID); err == nil {
-						daemon.EnsureRunningAsync(vdir, 3*time.Second, 10*time.Second)
+						wake = append(wake, vdir)
 					}
 				}
+				wakeDaemons()
 				emitHookContext(cmd, links)
 				return nil
 			}
@@ -186,9 +195,11 @@ list in .bdrive/config.json is never pruned against either.`,
 			}
 			for _, target := range targets {
 				if err := syncOne(target); err != nil {
+					wakeDaemons()
 					return err
 				}
 			}
+			wakeDaemons()
 			if len(refused) > 0 {
 				return fmt.Errorf("the hub refused this device's changes for %s — nothing was pushed "+
 					"(the reason is printed above; your files are safe on this device)",
