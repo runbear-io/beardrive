@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
@@ -446,6 +447,21 @@ func TestSyncHookModeInboundSpoolUnreadable(t *testing.T) {
 
 // writeSecretFile puts a credential-shaped string on the given line of rel, so
 // the hook's cycle records the finding the way a daemon scan would.
+func seedSecrets(t *testing.T, proj config.Project, found map[string][]secrets.Finding) {
+	t.Helper()
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveSecrets(proj.ID, found); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeSecretFile(t *testing.T, dir, rel, secret string, line int) {
 	t.Helper()
 	body := strings.Repeat("text\n", line-1) + secret + "\n"
@@ -488,10 +504,12 @@ func TestSyncHookModeSecretsMultipleMounts(t *testing.T) {
 	t.Setenv("BDRIVE_HOME", t.TempDir())
 	root := t.TempDir()
 	root, _ = filepath.EvalSymlinks(root)
-	mountAt(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa")
-	mountAt(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb")
-	writeSecretFile(t, filepath.Join(root, "projA"), "a.md", "-----BEGIN PRIVATE KEY-----\nMIIEowIBAAKCAQEAexampleexampleexampleexample0123456789", 1)
-	writeSecretFile(t, filepath.Join(root, "projB"), "b.md", "token: xoxb-1234567890-abcdefghij", 2)
+	a := mountAt(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa")
+	b := mountAt(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb")
+	// Mounts below the session folder belong to their daemons and the hook
+	// never cycles them, so the daemon's record is all the hook reads.
+	seedSecrets(t, a, map[string][]secrets.Finding{"a.md": {{Rule: "private_key", Line: 1}}})
+	seedSecrets(t, b, map[string][]secrets.Finding{"b.md": {{Rule: "slack_token", Line: 2}}})
 
 	got := runHook(t, root)
 	for _, want := range []string{"`projA/a.md` (a private key, line 1)", "`projB/b.md` (a Slack token, line 2)"} {
