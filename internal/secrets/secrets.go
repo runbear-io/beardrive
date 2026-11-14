@@ -14,6 +14,8 @@ package secrets
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"regexp"
 	"sort"
 )
@@ -47,9 +49,28 @@ var secretRules = []struct {
 	{"openai_api_key", regexp.MustCompile(`(?:^|[^A-Za-z0-9_/-])(sk-[A-Za-z0-9_-]{20,})`)},
 	{"github_pat", regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`)},
 	{"slack_token", regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`)},
-	{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
+	// A header alone is not a key: docs quote it as a placeholder
+	// ("-----BEGIN PRIVATE KEY-----\n..."). The body must follow, after a real
+	// or JSON-escaped line break and any RFC 1421 headers (Proc-Type:,
+	// DEK-Info:) an encrypted PEM carries: 32 base64 characters, counted
+	// across the line breaks, real or escaped, a PEM may wrap its body at, at
+	// any width, with blanks on either side of each break.
+	{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----(?:\s|\\[rnt])+(?:[A-Za-z-]+:[^\n\\]*(?:\s|\\[rnt])+)*(?:[A-Za-z0-9+/=](?:(?:[ \t]|\\t)*(?:\r?\n|\\[rn])(?:[ \t]|\\t)*)*){32}`)},
 	{"gitlab_pat", regexp.MustCompile(`glpat-[A-Za-z0-9_-]{20,}`)},
 }
+
+// rulesVersion names this rule set; see RulesVersion.
+var rulesVersion = func() string {
+	h := sha256.New()
+	for _, r := range secretRules {
+		h.Write([]byte(r.id + "\x00" + r.re.String() + "\x00"))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}()
+
+// RulesVersion changes whenever a rule does. A finding recorded under another
+// version describes a rule set no longer in force, so its file is read again.
+func RulesVersion() string { return rulesVersion }
 
 // labels are the rule ids in words. They existed only in the frontend
 // (SECRET_LABELS in Browser.tsx) while `bdrive share` printed the bare id, so

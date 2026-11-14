@@ -445,6 +445,8 @@ func TestSyncHookModeInboundSpoolUnreadable(t *testing.T) {
 	}
 }
 
+// writeSecretFile puts a credential-shaped string on the given line of rel, so
+// the hook's cycle records the finding the way a daemon scan would.
 func seedSecrets(t *testing.T, proj config.Project, found map[string][]secrets.Finding) {
 	t.Helper()
 	vdir, err := config.VolumeDir(proj.ID)
@@ -460,6 +462,14 @@ func seedSecrets(t *testing.T, proj config.Project, found map[string][]secrets.F
 	}
 }
 
+func writeSecretFile(t *testing.T, dir, rel, secret string, line int) {
+	t.Helper()
+	body := strings.Repeat("text\n", line-1) + secret + "\n"
+	if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The credential warning reaches the agent, whose own cycle found nothing:
 // the daemon scanned that write seconds ago, so — exactly like the inbound
 // spool — the record is what carries it. Advisory: the sentence says the file
@@ -468,10 +478,8 @@ func TestSyncHookModeReportsSecrets(t *testing.T) {
 	t.Setenv("BDRIVE_HOME", t.TempDir())
 	root := t.TempDir()
 	root, _ = filepath.EvalSymlinks(root)
-	proj := mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
-	seedSecrets(t, proj, map[string][]secrets.Finding{
-		"deploy.md": {{Rule: "aws_access_key_id", Line: 12}},
-	})
+	mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
+	writeSecretFile(t, filepath.Join(root, "wiki"), "deploy.md", "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE", 12)
 
 	got := runHook(t, filepath.Join(root, "wiki"))
 	for _, want := range []string{
@@ -498,6 +506,8 @@ func TestSyncHookModeSecretsMultipleMounts(t *testing.T) {
 	root, _ = filepath.EvalSymlinks(root)
 	a := mountAt(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa")
 	b := mountAt(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb")
+	// Mounts below the session folder belong to their daemons and the hook
+	// never cycles them, so the daemon's record is all the hook reads.
 	seedSecrets(t, a, map[string][]secrets.Finding{"a.md": {{Rule: "private_key", Line: 1}}})
 	seedSecrets(t, b, map[string][]secrets.Finding{"b.md": {{Rule: "slack_token", Line: 2}}})
 

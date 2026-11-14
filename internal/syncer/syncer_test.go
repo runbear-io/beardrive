@@ -1636,6 +1636,113 @@ func TestSecretScanSkipsUnchangedFiles(t *testing.T) {
 	}
 }
 
+// A peer that edits the key out clears the warning here too: the scan reads
+// only what this device changed, so the record has to follow the file to the
+// blob the peer wrote.
+func TestSecretClearsWhenAPeerFixesTheFile(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+	cycle(t, b)
+	write(t, b.Folder, "deploy.md", "key = read it from the environment\n")
+	cycle(t, b)
+
+	cycle(t, a)
+	if got := read(t, a.Folder, "deploy.md"); strings.Contains(got, testAWSKey) {
+		t.Fatalf("control: the peer's fix did not arrive: %q", got)
+	}
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found) != 0 {
+		t.Fatalf("findings = %+v, want empty once the peer removed the key", found)
+	}
+}
+
+// Findings recorded under another rule set are judged again by the rules in
+// force, on the next cycle and with nothing on disk changed: a detector fix
+// clears its false positives without anyone editing the files.
+func TestSecretFindingsFromOtherRulesAreReadAgain(t *testing.T) {
+	a := newDevice(t, "deva", sharedRemote(t))
+
+	write(t, a.Folder, "notes.md", "see https://example.com/helpdesk-agents-for-slack-and-teams\n")
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+	rec, err := a.Store.LoadSecretRecord(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := a.Store.LoadCache(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What an older detector left behind: a false positive on notes.md, under
+	// another rule set, for the blob the file still holds.
+	rec.Rules = "older-rules"
+	rec.Paths["notes.md"] = store.SecretEntry{Blob: cache["notes.md"].Blob, Found: []secrets.Finding{{Rule: "openai_api_key", Line: 1}}}
+	if err := a.Store.SaveSecretRecord(a.mountID(), rec); err != nil {
+		t.Fatal(err)
+	}
+
+	cycle(t, a) // nothing changed on disk
+	found, err := a.Store.LoadSecrets(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := found["notes.md"]; ok {
+		t.Errorf("findings = %+v, want the false positive gone under the current rules", found)
+	}
+	if len(found["deploy.md"]) == 0 {
+		t.Errorf("findings = %+v, want the real key still reported", found)
+	}
+	if rec, _ := a.Store.LoadSecretRecord(a.mountID()); rec.Rules != secrets.RulesVersion() {
+		t.Errorf("record rules = %q, want %q", rec.Rules, secrets.RulesVersion())
+	}
+}
+
+// A finding whose blob cannot be read stays, and so do the rules it was
+// recorded under: the next cycle reads it again instead of the warning
+// vanishing on one failed read.
+func TestSecretFindingSurvivesAnUnreadableBlob(t *testing.T) {
+	a := newDevice(t, "deva", sharedRemote(t))
+
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+	rec, err := a.Store.LoadSecretRecord(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Rules = "older-rules"
+	if err := a.Store.SaveSecretRecord(a.mountID(), rec); err != nil {
+		t.Fatal(err)
+	}
+	blob := a.Store.BlobPath(rec.Paths["deploy.md"].Blob)
+	data, err := os.ReadFile(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(blob); err != nil {
+		t.Fatal(err)
+	}
+
+	cycle(t, a) // nothing changed on disk; the blob cannot be read
+	got, _ := a.Store.LoadSecretRecord(a.mountID())
+	if len(got.Paths["deploy.md"].Found) == 0 {
+		t.Fatalf("record = %+v, want the finding kept when its blob cannot be read", got)
+	}
+	if got.Rules != "older-rules" {
+		t.Fatalf("rules = %q, want the old rules kept so the next cycle retries", got.Rules)
+	}
+
+	if err := os.WriteFile(blob, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	if got, _ := a.Store.LoadSecretRecord(a.mountID()); got.Rules != secrets.RulesVersion() || len(got.Paths["deploy.md"].Found) == 0 {
+		t.Fatalf("record = %+v, want it re-read under the current rules once readable", got)
+	}
+}
+
 func TestPullRejectsSymlinkTargetOnlySlotRedefinition(t *testing.T) {
 	be := sharedRemote(t)
 	s := newDevice(t, "local", be)

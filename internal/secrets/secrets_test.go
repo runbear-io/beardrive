@@ -14,7 +14,17 @@ const (
 	fakeSlackTok  = "xoxb-1234567890-abcdefghij"
 	fakeGitLabPAT = "glpat-abcdefghij0123456789XY"
 	fakePrivKey   = "-----BEGIN RSA PRIVATE KEY-----"
+	fakeKeyBody   = "MIIEowIBAAKCAQEAexampleexampleexampleexample0123456789"
 )
+
+// wrap breaks s into lines of n characters, as a PEM body may be.
+func wrap(s string, n int) string {
+	var lines []string
+	for len(s) > n {
+		lines, s = append(lines, s[:n]), s[n:]
+	}
+	return strings.Join(append(lines, s), "\n")
+}
 
 func TestScanSecrets(t *testing.T) {
 	for _, tc := range []struct {
@@ -39,7 +49,18 @@ func TestScanSecrets(t *testing.T) {
 		{"github", "\n\n" + fakeGitHubPAT, []Finding{{"github_pat", 3}}},
 		{"slack", "token: " + fakeSlackTok, []Finding{{"slack_token", 1}}},
 		{"gitlab", "x\n" + fakeGitLabPAT, []Finding{{"gitlab_pat", 2}}},
-		{"private key", "a\nb\nc\n" + fakePrivKey + "\nMIIE...\n", []Finding{{"private_key", 4}}},
+		{"private key", "a\nb\nc\n" + fakePrivKey + "\n" + fakeKeyBody + "\n", []Finding{{"private_key", 4}}},
+		{"private key, JSON-escaped", `{"key": "` + fakePrivKey + `\n` + fakeKeyBody + `\n"}`, []Finding{{"private_key", 1}}},
+		{"private key, encrypted PEM headers", fakePrivKey + "\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n" + fakeKeyBody + "\n", []Finding{{"private_key", 1}}},
+		{"private key wrapped in short lines", fakePrivKey + "\n" + wrap(fakeKeyBody, 16) + "\n", []Finding{{"private_key", 1}}},
+		{"private key wrapped in short lines with trailing blanks", fakePrivKey + " \n" + strings.ReplaceAll(wrap(fakeKeyBody, 16), "\n", " \t\n") + " \n", []Finding{{"private_key", 1}}},
+		{"private key wrapped in short CRLF lines with trailing blanks", fakePrivKey + "\r\n" + strings.ReplaceAll(wrap(fakeKeyBody, 16), "\n", " \r\n") + "\r\n", []Finding{{"private_key", 1}}},
+		{"JSON-escaped private key wrapped in short lines with trailing blanks", `{"key": "` + fakePrivKey + ` \n` + strings.ReplaceAll(wrap(fakeKeyBody, 16), "\n", ` \n`) + ` \n"}`, []Finding{{"private_key", 1}}},
+		{"JSON-escaped private key wrapped in short tab-indented lines", `{"key": "` + fakePrivKey + `\n\t` + strings.ReplaceAll(wrap(fakeKeyBody, 16), "\n", `\t\n\t`) + `\n"}`, []Finding{{"private_key", 1}}},
+		{"private key wrapped in short indented lines", "key: |\n  " + fakePrivKey + "\n  " + strings.ReplaceAll(wrap(fakeKeyBody, 8), "\n", "\n  ") + "\n", []Finding{{"private_key", 2}}},
+		// A doc quoting the header as a placeholder holds no key.
+		{"private key header as a placeholder", "E.g. `-----BEGIN PRIVATE KEY-----\\n...` in the field", nil},
+		{"private key header alone", fakePrivKey + "\n...\n", nil},
 		{
 			// One line, one rule, three keys: one finding, not three.
 			"multi key line deduped",
