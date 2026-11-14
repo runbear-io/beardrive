@@ -52,6 +52,22 @@ var sharedHTTPTransport = func() *http.Transport {
 	return tr
 }()
 
+// directUploadTransport carries presigned uploads to object storage over
+// HTTP/1.1, one connection per in-flight upload. Over HTTP/2 the parallel
+// uploads of a push share one connection, and a write error on it makes the
+// transport force-close that connection ("client connection force closed via
+// ClientConn.Close"), failing every sibling upload with it.
+var directUploadTransport = func() *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ForceAttemptHTTP2 = false
+	tr.Protocols = new(http.Protocols)
+	tr.Protocols.SetHTTP1(true)
+	tr.MaxIdleConns = 100
+	tr.MaxIdleConnsPerHost = 32
+	tr.IdleConnTimeout = 90 * time.Second
+	return tr
+}()
+
 // httpBackend syncs one project through a bdrive web server instead of
 // talking to an object store. The client device is storage-blind: it only
 // knows the server URL and a project id (https://host:4173/p/<project-id>,
@@ -69,6 +85,7 @@ type httpBackend struct {
 	token   string // device token from `bdrive login`; empty on open servers
 	device  config.Device
 	hc      *http.Client
+	direct  *http.Client // presigned uploads; see directUploadTransport
 	// verifiedBlobs remembers immutable content-addressed objects confirmed
 	// present by this backend instance so retry cycles after a partial push
 	// failure do not re-query /store/sign and /store/exists for every already
@@ -144,7 +161,8 @@ func newHTTPBackend(raw string) (*httpBackend, error) {
 	base := (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
 	dev, _ := config.LoadDevice()
 	hc := &http.Client{Transport: sharedHTTPTransport, Timeout: 5 * time.Minute, CheckRedirect: refuseOffOriginRedirect}
-	return &httpBackend{base: base, project: m[1], token: deviceToken(base), device: dev, hc: hc}, nil
+	direct := &http.Client{Transport: directUploadTransport, Timeout: hc.Timeout, CheckRedirect: refuseOffOriginRedirect}
+	return &httpBackend{base: base, project: m[1], token: deviceToken(base), device: dev, hc: hc, direct: direct}, nil
 }
 
 // deviceToken finds this device's credential for the server at base:
@@ -634,7 +652,11 @@ func (b *httpBackend) putDirect(ctx context.Context, plan putPlan, r io.Reader, 
 	for k, v := range plan.Headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := b.hc.Do(req)
+	hc := b.direct
+	if hc == nil {
+		hc = b.hc
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return err
 	}
