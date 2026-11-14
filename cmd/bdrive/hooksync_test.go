@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/runbear-io/beardrive/internal/config"
-	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
@@ -445,17 +444,12 @@ func TestSyncHookModeInboundSpoolUnreadable(t *testing.T) {
 	}
 }
 
-func seedSecrets(t *testing.T, proj config.Project, found map[string][]secrets.Finding) {
+// writeSecretFile puts a credential-shaped string on the given line of rel, so
+// the hook's cycle records the finding the way a daemon scan would.
+func writeSecretFile(t *testing.T, dir, rel, secret string, line int) {
 	t.Helper()
-	vdir, err := config.VolumeDir(proj.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st, err := store.Open(vdir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SaveSecrets(proj.ID, found); err != nil {
+	body := strings.Repeat("text\n", line-1) + secret + "\n"
+	if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -468,10 +462,8 @@ func TestSyncHookModeReportsSecrets(t *testing.T) {
 	t.Setenv("BDRIVE_HOME", t.TempDir())
 	root := t.TempDir()
 	root, _ = filepath.EvalSymlinks(root)
-	proj := mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
-	seedSecrets(t, proj, map[string][]secrets.Finding{
-		"deploy.md": {{Rule: "aws_access_key_id", Line: 12}},
-	})
+	mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
+	writeSecretFile(t, filepath.Join(root, "wiki"), "deploy.md", "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE", 12)
 
 	got := runHook(t, filepath.Join(root, "wiki"))
 	for _, want := range []string{
@@ -496,10 +488,10 @@ func TestSyncHookModeSecretsMultipleMounts(t *testing.T) {
 	t.Setenv("BDRIVE_HOME", t.TempDir())
 	root := t.TempDir()
 	root, _ = filepath.EvalSymlinks(root)
-	a := mountAt(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa")
-	b := mountAt(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb")
-	seedSecrets(t, a, map[string][]secrets.Finding{"a.md": {{Rule: "private_key", Line: 1}}})
-	seedSecrets(t, b, map[string][]secrets.Finding{"b.md": {{Rule: "slack_token", Line: 2}}})
+	mountAt(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa")
+	mountAt(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb")
+	writeSecretFile(t, filepath.Join(root, "projA"), "a.md", "-----BEGIN PRIVATE KEY-----\nMIIEowIBAAKCAQEAexampleexampleexampleexample0123456789", 1)
+	writeSecretFile(t, filepath.Join(root, "projB"), "b.md", "token: xoxb-1234567890-abcdefghij", 2)
 
 	got := runHook(t, root)
 	for _, want := range []string{"`projA/a.md` (a private key, line 1)", "`projB/b.md` (a Slack token, line 2)"} {

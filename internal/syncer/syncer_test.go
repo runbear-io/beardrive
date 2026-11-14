@@ -1636,6 +1636,70 @@ func TestSecretScanSkipsUnchangedFiles(t *testing.T) {
 	}
 }
 
+// A peer that edits the key out clears the warning here too: the scan reads
+// only what this device changed, so the record has to follow the file to the
+// blob the peer wrote.
+func TestSecretClearsWhenAPeerFixesTheFile(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+	cycle(t, b)
+	write(t, b.Folder, "deploy.md", "key = read it from the environment\n")
+	cycle(t, b)
+
+	cycle(t, a)
+	if got := read(t, a.Folder, "deploy.md"); strings.Contains(got, testAWSKey) {
+		t.Fatalf("control: the peer's fix did not arrive: %q", got)
+	}
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found) != 0 {
+		t.Fatalf("findings = %+v, want empty once the peer removed the key", found)
+	}
+}
+
+// Findings recorded under another rule set are judged again by the rules in
+// force, on the next cycle and with nothing on disk changed: a detector fix
+// clears its false positives without anyone editing the files.
+func TestSecretFindingsFromOtherRulesAreReadAgain(t *testing.T) {
+	a := newDevice(t, "deva", sharedRemote(t))
+
+	write(t, a.Folder, "notes.md", "see https://example.com/helpdesk-agents-for-slack-and-teams\n")
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+	rec, err := a.Store.LoadSecretRecord(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := a.Store.LoadCache(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What an older detector left behind: a false positive on notes.md, under
+	// another rule set, for the blob the file still holds.
+	rec.Rules = "older-rules"
+	rec.Paths["notes.md"] = store.SecretEntry{Blob: cache["notes.md"].Blob, Found: []secrets.Finding{{Rule: "openai_api_key", Line: 1}}}
+	if err := a.Store.SaveSecretRecord(a.mountID(), rec); err != nil {
+		t.Fatal(err)
+	}
+
+	cycle(t, a) // nothing changed on disk
+	found, err := a.Store.LoadSecrets(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := found["notes.md"]; ok {
+		t.Errorf("findings = %+v, want the false positive gone under the current rules", found)
+	}
+	if len(found["deploy.md"]) == 0 {
+		t.Errorf("findings = %+v, want the real key still reported", found)
+	}
+	if rec, _ := a.Store.LoadSecretRecord(a.mountID()); rec.Rules != secrets.RulesVersion() {
+		t.Errorf("record rules = %q, want %q", rec.Rules, secrets.RulesVersion())
+	}
+}
+
 func TestPullRejectsSymlinkTargetOnlySlotRedefinition(t *testing.T) {
 	be := sharedRemote(t)
 	s := newDevice(t, "local", be)

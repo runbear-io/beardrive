@@ -14,6 +14,7 @@ const (
 	fakeSlackTok  = "xoxb-1234567890-abcdefghij"
 	fakeGitLabPAT = "glpat-abcdefghij0123456789XY"
 	fakePrivKey   = "-----BEGIN RSA PRIVATE KEY-----"
+	fakeKeyBody   = "MIIEowIBAAKCAQEAexampleexampleexampleexample0123456789"
 )
 
 func TestScanSecrets(t *testing.T) {
@@ -39,7 +40,12 @@ func TestScanSecrets(t *testing.T) {
 		{"github", "\n\n" + fakeGitHubPAT, []Finding{{"github_pat", 3}}},
 		{"slack", "token: " + fakeSlackTok, []Finding{{"slack_token", 1}}},
 		{"gitlab", "x\n" + fakeGitLabPAT, []Finding{{"gitlab_pat", 2}}},
-		{"private key", "a\nb\nc\n" + fakePrivKey + "\nMIIE...\n", []Finding{{"private_key", 4}}},
+		{"private key", "a\nb\nc\n" + fakePrivKey + "\n" + fakeKeyBody + "\n", []Finding{{"private_key", 4}}},
+		{"private key, JSON-escaped", `{"key": "` + fakePrivKey + `\n` + fakeKeyBody + `\n"}`, []Finding{{"private_key", 1}}},
+		{"private key, encrypted PEM headers", fakePrivKey + "\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n" + fakeKeyBody + "\n", []Finding{{"private_key", 1}}},
+		// A doc quoting the header as a placeholder holds no key.
+		{"private key header as a placeholder", "E.g. `-----BEGIN PRIVATE KEY-----\\n...` in the field", nil},
+		{"private key header alone", fakePrivKey + "\n...\n", nil},
 		{
 			// One line, one rule, three keys: one finding, not three.
 			"multi key line deduped",
