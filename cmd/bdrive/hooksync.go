@@ -132,8 +132,9 @@ type hookSync struct {
 }
 
 // runHookSync syncs one mount and reports its hub base URL, if it has one,
-// plus the peer changes waiting for this turn.
-func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync, bool) {
+// plus the peer changes waiting for this turn. With cycle false it never runs
+// a cycle of its own: it reports what the mount's daemon has recorded so far.
+func runHookSync(cmd *cobra.Command, target, sessionID, label string, cycle bool) (hookSync, bool) {
 	sess, proj, err := openSession(cmd.Context(), target, false)
 	if err != nil {
 		return hookSync{}, false // not a mount / no session: fast no-op
@@ -171,7 +172,13 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// true.
 	var paths []store.InboundEvent
 	var found map[string][]secrets.Finding
-	release, current := daemonCurrent(sess.Store, sess.MountID)
+	// Without a cycle to skip there is no reason to wait up to hookCycleWait
+	// on the volume lock, once per mount: a home folder sits above many.
+	var release func()
+	current := false
+	if cycle {
+		release, current = daemonCurrent(sess.Store, sess.MountID)
+	}
 	if current {
 		paths, _ = sess.Store.DrainInboundForMount(sess.MountID)
 		found, _ = sess.Store.LoadSecrets(sess.MountID)
@@ -190,9 +197,11 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 		}
 	}
 	if !current {
-		attachRemote(cmd.Context(), sess, proj)
-		if _, err := sess.Cycle(cmd.Context()); err != nil {
-			return hookSync{}, false // never break the turn
+		if cycle {
+			attachRemote(cmd.Context(), sess, proj)
+			if _, err := sess.Cycle(cmd.Context()); err != nil {
+				return hookSync{}, false // never break the turn
+			}
 		}
 		more, _ := sess.Store.DrainInboundForMount(sess.MountID)
 		paths = append(paths, more...)

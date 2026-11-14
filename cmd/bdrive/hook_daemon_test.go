@@ -406,3 +406,100 @@ func TestDeferredSyncRefusesPrune(t *testing.T) {
 		t.Fatal("sync --defer --prune succeeded")
 	}
 }
+
+// A session above a mount (a home folder above every mount on the device)
+// must not walk it on each turn, even with no daemon to vouch: the mount's
+// daemon syncs it, and the turn still gets the mount's links.
+func TestHookAboveAMountLeavesTheSyncToItsDaemon(t *testing.T) {
+	folder, proj := stampFixture(t)
+
+	out := runHook(t, filepath.Dir(folder))
+
+	if ops := committed(t, proj); len(ops) != 0 {
+		t.Errorf("the hook above the mount cycled it: committed %d ops", len(ops))
+	}
+	if !strings.Contains(out, "p-12345678") {
+		t.Errorf("the hook above the mount emitted no link for it:\n%s", out)
+	}
+}
+
+// The after-edit hook above a mount records the note and leaves the edit to
+// the mount's daemon, as beside a daemon that vouches.
+func TestDeferredSyncAboveAMountOnlyRecordsTheNote(t *testing.T) {
+	folder, proj := stampFixture(t)
+
+	runDeferredSync(t, filepath.Dir(folder))
+
+	if ops := committed(t, proj); len(ops) != 0 {
+		t.Errorf("sync --defer above the mount cycled it: committed %d ops", len(ops))
+	}
+	if note := storedNote(t, proj); note != "claude-code session sess-42" {
+		t.Errorf("note = %q, want it recorded", note)
+	}
+}
+
+// Above a mount there is no cycle to skip, so neither hook waits for the
+// daemon's cycle in flight: once per mount, below a home folder, those waits
+// add up past the hook's timeout.
+func TestHooksAboveAMountDoNotWaitForTheDaemonCycle(t *testing.T) {
+	folder, proj := stampFixture(t)
+	holdDaemonLock(t, proj)
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := st.Lock() // the daemon's cycle, outlasting both hooks
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	for name, run := range map[string]func(){
+		"--hook":  func() { runHook(t, filepath.Dir(folder)) },
+		"--defer": func() { runDeferredSync(t, filepath.Dir(folder)) },
+	} {
+		start := time.Now()
+		run()
+		if took := time.Since(start); took >= hookCycleWait/2 {
+			t.Errorf("%s above the mount took %v waiting on the daemon's cycle", name, took)
+		}
+	}
+}
+
+// One supervisor runs every mount's worker, so a hook above several mounts
+// starts it only once each of them holds the session note: otherwise the
+// first mount's start could scan the second before its note is in place.
+func TestHooksAboveMountsSaveEveryNoteBeforeStartingTheDaemon(t *testing.T) {
+	for name, run := range map[string]func(t *testing.T, root string){
+		"--hook":  func(t *testing.T, root string) { runHook(t, root) },
+		"--defer": func(t *testing.T, root string) { runDeferredSync(t, root) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("BDRIVE_HOME", t.TempDir())
+			root, _ := filepath.EvalSymlinks(t.TempDir())
+			a := mountAt(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa")
+			b := mountAt(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb")
+			starts := 0
+			old := ensureDaemon
+			ensureDaemon = func(string, time.Duration, time.Duration) {
+				starts++
+				for _, p := range []config.Project{a, b} {
+					if note := storedNote(t, p); note != "claude-code session sess-42" {
+						t.Errorf("daemon started before %s held the note (note %q)", p.Volume, note)
+					}
+				}
+			}
+			t.Cleanup(func() { ensureDaemon = old })
+
+			run(t, root)
+
+			if starts != 2 {
+				t.Errorf("daemon started %d times, want once per mount", starts)
+			}
+		})
+	}
+}
