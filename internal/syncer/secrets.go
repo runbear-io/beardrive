@@ -50,20 +50,28 @@ func (l *secretLog) scanBlob(st *store.Store, rel, sum string) {
 	if l == nil {
 		return
 	}
+	if found, ok := readFindings(st, sum); ok {
+		l.set(rel, sum, found)
+	}
+}
+
+// readFindings scans a blob; ok is false when it could not be read, which
+// leaves whatever was recorded before standing.
+func readFindings(st *store.Store, sum string) ([]secrets.Finding, bool) {
 	f, err := st.OpenBlob(sum)
 	if err != nil {
-		return // unreadable: skipped like every other unreadable-file case
+		return nil, false // unreadable: skipped like every other unreadable-file case
 	}
 	defer f.Close()
 	buf, err := io.ReadAll(io.LimitReader(f, secrets.ScanLimit))
 	if err != nil {
-		return
+		return nil, false
 	}
 	found := secrets.Scan(buf)
 	if len(found) > secretsPerFile {
 		found = found[:secretsPerFile]
 	}
-	l.set(rel, sum, found)
+	return found, true
 }
 
 // set records rel's current findings, dropping the entry when there are none —
@@ -84,17 +92,16 @@ func (l *secretLog) set(rel, sum string, found []secrets.Finding) {
 // scan reads only files this device changed, so without this a file a peer
 // fixed, or one a detector fix stops flagging, keeps its warning here for as
 // long as nobody on this device edits it. It costs one blob read per stale
-// finding and nothing on a quiet cycle.
+// finding and nothing on a quiet cycle. A blob that cannot be read keeps its
+// path's findings and, under other rules, keeps the record's rules too, so
+// the next cycle tries again.
 func (l *secretLog) revalidate(st *store.Store, cache map[string]store.CachedFile) {
 	if l == nil {
 		return
 	}
 	current := secrets.RulesVersion()
 	rescanAll := l.rec.Rules != current
-	if rescanAll {
-		l.rec.Rules = current
-		l.dirty = true
-	}
+	unread := false
 	rels := make([]string, 0, len(l.rec.Paths))
 	for rel := range l.rec.Paths {
 		rels = append(rels, rel)
@@ -108,8 +115,16 @@ func (l *secretLog) revalidate(st *store.Store, cache map[string]store.CachedFil
 		if !rescanAll && l.rec.Paths[rel].Blob == c.Blob {
 			continue
 		}
-		l.drop(rel)
-		l.scanBlob(st, rel, c.Blob)
+		found, ok := readFindings(st, c.Blob)
+		if !ok {
+			unread = true
+			continue
+		}
+		l.set(rel, c.Blob, found)
+	}
+	if rescanAll && !unread {
+		l.rec.Rules = current
+		l.dirty = true
 	}
 }
 

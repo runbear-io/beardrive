@@ -17,6 +17,15 @@ const (
 	fakeKeyBody   = "MIIEowIBAAKCAQEAexampleexampleexampleexample0123456789"
 )
 
+// wrap breaks s into lines of n characters, as a PEM body may be.
+func wrap(s string, n int) string {
+	var lines []string
+	for len(s) > n {
+		lines, s = append(lines, s[:n]), s[n:]
+	}
+	return strings.Join(append(lines, s), "\n")
+}
+
 func TestScanSecrets(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -43,6 +52,8 @@ func TestScanSecrets(t *testing.T) {
 		{"private key", "a\nb\nc\n" + fakePrivKey + "\n" + fakeKeyBody + "\n", []Finding{{"private_key", 4}}},
 		{"private key, JSON-escaped", `{"key": "` + fakePrivKey + `\n` + fakeKeyBody + `\n"}`, []Finding{{"private_key", 1}}},
 		{"private key, encrypted PEM headers", fakePrivKey + "\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n" + fakeKeyBody + "\n", []Finding{{"private_key", 1}}},
+		{"private key wrapped in short lines", fakePrivKey + "\n" + wrap(fakeKeyBody, 16) + "\n", []Finding{{"private_key", 1}}},
+		{"private key wrapped in short indented lines", "key: |\n  " + fakePrivKey + "\n  " + strings.ReplaceAll(wrap(fakeKeyBody, 8), "\n", "\n  ") + "\n", []Finding{{"private_key", 2}}},
 		// A doc quoting the header as a placeholder holds no key.
 		{"private key header as a placeholder", "E.g. `-----BEGIN PRIVATE KEY-----\\n...` in the field", nil},
 		{"private key header alone", fakePrivKey + "\n...\n", nil},

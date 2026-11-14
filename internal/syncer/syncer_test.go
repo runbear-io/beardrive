@@ -1700,6 +1700,49 @@ func TestSecretFindingsFromOtherRulesAreReadAgain(t *testing.T) {
 	}
 }
 
+// A finding whose blob cannot be read stays, and so do the rules it was
+// recorded under: the next cycle reads it again instead of the warning
+// vanishing on one failed read.
+func TestSecretFindingSurvivesAnUnreadableBlob(t *testing.T) {
+	a := newDevice(t, "deva", sharedRemote(t))
+
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+	rec, err := a.Store.LoadSecretRecord(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Rules = "older-rules"
+	if err := a.Store.SaveSecretRecord(a.mountID(), rec); err != nil {
+		t.Fatal(err)
+	}
+	blob := a.Store.BlobPath(rec.Paths["deploy.md"].Blob)
+	data, err := os.ReadFile(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(blob); err != nil {
+		t.Fatal(err)
+	}
+
+	cycle(t, a) // nothing changed on disk; the blob cannot be read
+	got, _ := a.Store.LoadSecretRecord(a.mountID())
+	if len(got.Paths["deploy.md"].Found) == 0 {
+		t.Fatalf("record = %+v, want the finding kept when its blob cannot be read", got)
+	}
+	if got.Rules != "older-rules" {
+		t.Fatalf("rules = %q, want the old rules kept so the next cycle retries", got.Rules)
+	}
+
+	if err := os.WriteFile(blob, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	if got, _ := a.Store.LoadSecretRecord(a.mountID()); got.Rules != secrets.RulesVersion() || len(got.Paths["deploy.md"].Found) == 0 {
+		t.Fatalf("record = %+v, want it re-read under the current rules once readable", got)
+	}
+}
+
 func TestPullRejectsSymlinkTargetOnlySlotRedefinition(t *testing.T) {
 	be := sharedRemote(t)
 	s := newDevice(t, "local", be)

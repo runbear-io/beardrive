@@ -895,6 +895,31 @@ func TestShareSecretScan(t *testing.T) {
 	}
 }
 
+// A private key's body may be wrapped at any width, and the share gate still
+// refuses it; only the header quoted as a placeholder passes.
+func TestShareRefusesAPrivateKeyWrappedInShortLines(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	body := "MIIEowIBAAKCAQEAexampleexampleexampleexample0123456789"
+	var wrapped []string
+	for len(body) > 16 {
+		wrapped, body = append(wrapped, body[:16]), body[16:]
+	}
+	wrapped = append(wrapped, body)
+	f.put("dev1", "deploy/server.pem", "-----BEGIN PRIVATE KEY-----\n"+strings.Join(wrapped, "\n")+"\n-----END PRIVATE KEY-----\n")
+	f.put("dev1", "docs/fields.md", "E.g. `-----BEGIN PRIVATE KEY-----\\n...` goes in this field\n")
+
+	rec := postShare(t, srv, h, p.ID, map[string]string{"path": "deploy/server.pem"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("share of a wrapped private key: %d %s, want 409", rec.Code, rec.Body)
+	}
+	if got := decodeFindings(t, rec); !reflect.DeepEqual(got, []secrets.Finding{{Rule: "private_key", Line: 1}}) {
+		t.Fatalf("findings = %v, want private_key on line 1", got)
+	}
+	if rec := postShare(t, srv, h, p.ID, map[string]string{"path": "docs/fields.md"}); rec.Code != 200 {
+		t.Fatalf("a doc quoting the header as a placeholder: %d %s, want 200", rec.Code, rec.Body)
+	}
+}
+
 // TestShareSecretNeverEchoed is the one rule that cannot bend: the matched
 // bytes never leave secrets.Scan — not in the body, not in the log.
 func TestShareSecretNeverEchoed(t *testing.T) {

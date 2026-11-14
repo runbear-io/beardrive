@@ -52,8 +52,9 @@ var secretRules = []struct {
 	// A header alone is not a key: docs quote it as a placeholder
 	// ("-----BEGIN PRIVATE KEY-----\n..."). The body must follow, after a real
 	// or JSON-escaped line break and any RFC 1421 headers (Proc-Type:,
-	// DEK-Info:) an encrypted PEM carries.
-	{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----(?:\s|\\[rn])+(?:[A-Za-z-]+:[^\n\\]*(?:\s|\\[rn])+)*[A-Za-z0-9+/]{32,}`)},
+	// DEK-Info:) an encrypted PEM carries: 32 base64 characters, counted
+	// across the line breaks a PEM may wrap its body at, at any width.
+	{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----(?:\s|\\[rn])+(?:[A-Za-z-]+:[^\n\\]*(?:\s|\\[rn])+)*(?:[A-Za-z0-9+/=](?:\r?\n[ \t]*|\\[rn])*){32}`)},
 	{"gitlab_pat", regexp.MustCompile(`glpat-[A-Za-z0-9_-]{20,}`)},
 }
 
