@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 var errConnForceClosed = errors.New("http2: client connection force closed via ClientConn.Close")
@@ -32,6 +34,7 @@ type pushFaultRemote struct {
 	blobPuts  int
 	failed    map[string]bool
 	violation error
+	onFail    func() // called on each persistent blob failure
 }
 
 func (f *pushFaultRemote) Put(ctx context.Context, key string, r io.Reader, size int64) error {
@@ -47,7 +50,11 @@ func (f *pushFaultRemote) Put(ctx context.Context, key string, r io.Reader, size
 			return errConnForceClosed
 		}
 		if f.failAfter > 0 && f.blobPuts >= f.failAfter {
+			onFail := f.onFail
 			f.mu.Unlock()
+			if onFail != nil {
+				onFail()
+			}
 			return errConnForceClosed
 		}
 		f.blobPuts++
@@ -126,6 +133,12 @@ func testPartialPushCommitsBatches(t *testing.T, writer, peer remote.Backend) {
 	const files = 10
 	fault := &pushFaultRemote{Backend: writer, failAfter: 5}
 	a := newDevice(t, "deva", fault)
+	var savedMidCycle atomic.Int64
+	fault.onFail = func() {
+		if st, err := a.Store.LoadSync(); err == nil {
+			savedMidCycle.Store(st.PushedOps)
+		}
+	}
 	for i := range files {
 		write(t, a.Folder, fmt.Sprintf("import/f%02d.md", i), fmt.Sprintf("content %d", i))
 	}
@@ -135,6 +148,9 @@ func testPartialPushCommitsBatches(t *testing.T, writer, peer remote.Backend) {
 	}
 	if !res.Offline {
 		t.Fatal("cycle succeeded while blob uploads were failing")
+	}
+	if got := savedMidCycle.Load(); got != 3 {
+		t.Fatalf("pushed-op cursor on disk while the push was still running = %d, want 3 (the committed batch)", got)
 	}
 
 	b := newDevice(t, "devb", peer)
@@ -189,6 +205,62 @@ func TestPushRetriesTransientUploadFailure(t *testing.T) {
 	cycle(t, a)
 
 	b := newDevice(t, "devb", be)
+	cycle(t, b)
+	if got := countSynced(t, b.Folder, files); got != files {
+		t.Fatalf("peer has %d of %d files", got, files)
+	}
+	if fault.violation != nil {
+		t.Fatal(fault.violation)
+	}
+}
+
+// A run that published batches and exited before recording them leaves the
+// hub holding more of this device's journal than the cursor says. The next
+// run's shorter publish is refused as dropping ops; it must adopt the hub's
+// length and finish instead of retrying the same refused batch forever.
+func TestPushResumesAfterExitWithUnrecordedBatches(t *testing.T) {
+	smallPushBatches(t, 2)
+	storage := sharedRemote(t)
+	ts, p := newHub(t, storage, true)
+	viaServer, err := remote.Open(context.Background(), ts.URL+"/p/"+p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer viaServer.Close()
+
+	const files = 10
+	fault := &pushFaultRemote{Backend: viaServer, failAfter: 7}
+	a := newDevice(t, "deva", fault)
+	for i := range files {
+		write(t, a.Folder, fmt.Sprintf("import/f%02d.md", i), fmt.Sprintf("content %d", i))
+	}
+	if res, err := a.Cycle(context.Background()); err != nil || !res.Offline {
+		t.Fatalf("first cycle: res=%+v err=%v, want offline", res, err)
+	}
+	st, err := a.Store.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PushedOps != 6 {
+		t.Fatalf("PushedOps = %d after three committed batches, want 6", st.PushedOps)
+	}
+	// The process exited after the first batch was recorded; the next two
+	// reached the hub but their cursor did not.
+	st.PushedOps = 2
+	if err := a.Store.SaveSync(st); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := store.Open(a.Store.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fault.set(0, false)
+	a2 := &Session{Folder: a.Folder, Store: reopened, Device: a.Device, Backend: fault}
+	cycle(t, a2)
+	cycle(t, a2)
+
+	b := newDevice(t, "devb", remote.Prefixed(storage, p.ID))
 	cycle(t, b)
 	if got := countSynced(t, b.Folder, files); got != files {
 		t.Fatalf("peer has %d of %d files", got, files)

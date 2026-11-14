@@ -3007,9 +3007,82 @@ func retryPut(ctx context.Context, put func() error) error {
 }
 
 // pushJournal publishes this device's journal up to its first upTo ops and
-// advances st.PushedOps to upTo. whole means upTo covers every op, so the
-// journal goes up to its end as it stands on disk.
+// advances st.PushedOps to upTo, persisting the cursor right away so batches
+// already on the remote survive a process exit before the cycle's final state
+// save. whole means upTo covers every op, so the journal goes up to its end as
+// it stands on disk.
+//
+// A refused publish is checked against the remote journal: when it already
+// holds more of this device's ops than st.PushedOps says (an earlier run
+// published them and exited before recording it), the cursor adopts the
+// remote's length and the publish continues from there. Without that, the
+// shorter journal this run sends is refused as dropping ops on every cycle.
 func (s *Session) pushJournal(ctx context.Context, st *store.SyncState, upTo int64, whole bool) error {
+	err := s.publishJournal(ctx, st, upTo, whole)
+	if err != nil && !errors.Is(err, remote.ErrForbidden) && ctx.Err() == nil {
+		if n, ok := s.remoteJournalAhead(ctx, st.PushedOps); ok {
+			st.PushedOps = n
+			err = nil
+			if n < upTo {
+				err = s.publishJournal(ctx, st, upTo, whole)
+			}
+		}
+	}
+	if err != nil {
+		return err
+	}
+	s.savePushCursor(st.PushedOps)
+	return nil
+}
+
+// remoteJournalAhead reports how many ops the remote copy of this device's
+// journal holds, when that copy is byte-for-byte a prefix of the local journal
+// ending on an op boundary and holds more than cursor ops.
+func (s *Session) remoteJournalAhead(ctx context.Context, cursor int64) (int64, bool) {
+	jp := s.Store.JournalPath(s.Device.ID)
+	local, err := os.ReadFile(jp)
+	if err != nil {
+		return 0, false
+	}
+	rc, err := s.Backend.Get(ctx, "journal/"+s.Device.ID+".jsonl")
+	if err != nil {
+		return 0, false
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(io.LimitReader(rc, int64(len(local))+1))
+	if err != nil || len(data) > len(local) || !bytes.Equal(data, local[:len(data)]) {
+		return 0, false
+	}
+	ops, err := journal.Parse(data)
+	if err != nil {
+		return 0, false
+	}
+	n := int64(len(ops))
+	if n <= cursor {
+		return 0, false
+	}
+	if off, _, ok := s.Store.JournalPrefixAt(s.Device.ID, n); !ok || off != int64(len(data)) {
+		return 0, false
+	}
+	return n, true
+}
+
+// savePushCursor records n as the pushed-op count in the on-disk sync state,
+// leaving every other field as it is on disk; the rest of this cycle's state is
+// saved by finish.
+func (s *Session) savePushCursor(n int64) {
+	on, err := s.Store.LoadSync()
+	if err == nil && on.PushedOps < n {
+		on.PushedOps = n
+		err = s.Store.SaveSync(on)
+	}
+	if err != nil {
+		log.Printf("beardrive: could not record push progress: %v", err)
+	}
+}
+
+// publishJournal is one attempt at pushJournal's publish.
+func (s *Session) publishJournal(ctx context.Context, st *store.SyncState, upTo int64, whole bool) error {
 	end := int64(-1)
 	if !whole {
 		off, _, ok := s.Store.JournalPrefixAt(s.Device.ID, upTo)
