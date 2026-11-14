@@ -11,6 +11,7 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/daemon"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
@@ -89,6 +90,19 @@ func syncTargets(folder string) []string {
 		return []string{root}
 	}
 	return mountsUnder(folder)
+}
+
+// ensureDaemon starts or wakes a volume's daemon without waiting for it.
+var ensureDaemon = daemon.EnsureRunningAsync
+
+// syncTargetsBelow reports whether syncTargets(folder) resolves to the
+// mounts below folder, rather than the mount folder is or sits inside.
+func syncTargetsBelow(folder string) bool {
+	if config.IsMount(folder) {
+		return false
+	}
+	_, inside := findMountRoot(folder)
+	return !inside
 }
 
 // workspaceRootUnder reports a workspace root strictly below folder, if this
