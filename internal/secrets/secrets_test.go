@@ -53,6 +53,8 @@ func TestScanSecrets(t *testing.T) {
 		{"private key, JSON-escaped", `{"key": "` + fakePrivKey + `\n` + fakeKeyBody + `\n"}`, []Finding{{"private_key", 1}}},
 		{"private key, encrypted PEM headers", fakePrivKey + "\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n" + fakeKeyBody + "\n", []Finding{{"private_key", 1}}},
 		{"private key wrapped in short lines", fakePrivKey + "\n" + wrap(fakeKeyBody, 16) + "\n", []Finding{{"private_key", 1}}},
+		{"private key wrapped in short lines with trailing blanks", fakePrivKey + " \n" + strings.ReplaceAll(wrap(fakeKeyBody, 16), "\n", " \t\n") + " \n", []Finding{{"private_key", 1}}},
+		{"private key wrapped in short CRLF lines with trailing blanks", fakePrivKey + "\r\n" + strings.ReplaceAll(wrap(fakeKeyBody, 16), "\n", " \r\n") + "\r\n", []Finding{{"private_key", 1}}},
 		{"private key wrapped in short indented lines", "key: |\n  " + fakePrivKey + "\n  " + strings.ReplaceAll(wrap(fakeKeyBody, 8), "\n", "\n  ") + "\n", []Finding{{"private_key", 2}}},
 		// A doc quoting the header as a placeholder holds no key.
 		{"private key header as a placeholder", "E.g. `-----BEGIN PRIVATE KEY-----\\n...` in the field", nil},

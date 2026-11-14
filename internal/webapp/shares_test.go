@@ -918,6 +918,11 @@ func TestShareRefusesAPrivateKeyWrappedInShortLines(t *testing.T) {
 	if rec := postShare(t, srv, h, p.ID, map[string]string{"path": "docs/fields.md"}); rec.Code != 200 {
 		t.Fatalf("a doc quoting the header as a placeholder: %d %s, want 200", rec.Code, rec.Body)
 	}
+
+	f.put("dev1", "deploy/padded.pem", "-----BEGIN PRIVATE KEY-----\n"+strings.Join(wrapped, " \n")+" \n-----END PRIVATE KEY-----\n")
+	if rec := postShare(t, srv, h, p.ID, map[string]string{"path": "deploy/padded.pem"}); rec.Code != http.StatusConflict {
+		t.Fatalf("share of a wrapped private key with trailing blanks: %d %s, want 409", rec.Code, rec.Body)
+	}
 }
 
 // TestShareSecretNeverEchoed is the one rule that cannot bend: the matched
