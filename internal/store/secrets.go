@@ -55,3 +55,32 @@ func (s *Store) SaveSecrets(mountID string, f map[string][]secrets.Finding) erro
 	}
 	return WriteJSONAtomic(p, f)
 }
+
+// The rules record names the rule set the findings were judged by (see
+// secrets.Fingerprint). It is a sibling file rather than a field so a record
+// written before it existed still loads as a plain map.
+func (s *Store) secretsRulesPath(mountID string) (string, error) {
+	return s.mountStatePath("secrets-rules-", mountID)
+}
+
+// LoadSecretsRules returns the fingerprint the findings were recorded under,
+// or "" when none was ever written.
+func (s *Store) LoadSecretsRules(mountID string) (string, error) {
+	p, err := s.secretsRulesPath(mountID)
+	if err != nil {
+		return "", err
+	}
+	var fp string
+	if err := readJSON(p, &fp); err != nil {
+		return "", err
+	}
+	return fp, nil
+}
+
+func (s *Store) SaveSecretsRules(mountID, fingerprint string) error {
+	p, err := s.secretsRulesPath(mountID)
+	if err != nil {
+		return err
+	}
+	return WriteJSONAtomic(p, fingerprint)
+}

@@ -1636,6 +1636,54 @@ func TestSecretScanSkipsUnchangedFiles(t *testing.T) {
 	}
 }
 
+// TestSecretRecordRejudgedWhenRulesChange: a finding recorded by an older rule
+// set must not outlive the rule fix. The file never changes again, so without
+// re-judging on a rule change the stale warning would stand forever.
+func TestSecretRecordRejudgedWhenRulesChange(t *testing.T) {
+	a := newDevice(t, "deva", sharedRemote(t))
+
+	write(t, a.Folder, "blog.md", "see /blog/best-it-help-desk-tools-for-slack-teams\n")
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+
+	// What an older binary left behind: a slug flagged as a key, under no
+	// recorded fingerprint.
+	stale := map[string][]secrets.Finding{
+		"blog.md":   {{Rule: "openai_api_key", Line: 1}},
+		"deploy.md": {{Rule: "aws_access_key_id", Line: 1}},
+		"gone.md":   {{Rule: "openai_api_key", Line: 3}},
+	}
+	if err := a.Store.SaveSecrets(a.mountID(), stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Store.SaveSecretsRules(a.mountID(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	cycle(t, a) // nothing changed on disk
+	found, err := a.Store.LoadSecrets(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]secrets.Finding{"deploy.md": {{Rule: "aws_access_key_id", Line: 1}}}
+	if !reflect.DeepEqual(found, want) {
+		t.Fatalf("findings = %+v, want only the real key kept", found)
+	}
+	if fp, _ := a.Store.LoadSecretsRules(a.mountID()); fp != secrets.Fingerprint() {
+		t.Fatalf("rules fingerprint = %q, want %q", fp, secrets.Fingerprint())
+	}
+
+	// Once judged under the current rules, quiet cycles go back to reading
+	// nothing: a record cleared by hand stays cleared.
+	if err := a.Store.SaveSecrets(a.mountID(), map[string][]secrets.Finding{}); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found) != 0 {
+		t.Fatalf("findings = %+v — revalidation ran again with no rule change", found)
+	}
+}
+
 func TestPullRejectsSymlinkTargetOnlySlotRedefinition(t *testing.T) {
 	be := sharedRemote(t)
 	s := newDevice(t, "local", be)
