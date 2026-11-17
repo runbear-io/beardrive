@@ -82,3 +82,43 @@ func TestLoadSecretsDropsForeignKeys(t *testing.T) {
 		t.Fatalf("mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
+
+// A record in the bare per-path shape loads with no rules and no blobs, which
+// is what makes the next cycle read every path in it again.
+func TestLoadSecretRecordReadsTheBarePerPathShape(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.secretsPath("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{"notes.md": [{"rule":"openai_api_key","line":49}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := s.LoadSecretRecord("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := rec.Paths["notes.md"]
+	if rec.Rules != "" || !ok || e.Blob != "" || len(e.Found) != 1 {
+		t.Fatalf("record = %+v, want notes.md with no rules and no blob", rec)
+	}
+
+	rec.Rules = "r1"
+	rec.Paths["notes.md"] = SecretEntry{Blob: "abc", Found: e.Found}
+	if err := s.SaveSecretRecord("m1", rec); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LoadSecretRecord("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Rules != "r1" || got.Paths["notes.md"].Blob != "abc" {
+		t.Fatalf("round trip = %+v", got)
+	}
+	if found, _ := s.LoadSecrets("m1"); len(found["notes.md"]) != 1 {
+		t.Fatalf("LoadSecrets = %+v, want notes.md", found)
+	}
+}

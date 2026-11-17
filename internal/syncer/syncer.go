@@ -48,7 +48,6 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
-	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
@@ -499,10 +498,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	loadedSync := store.CloneSyncState(st)
 	// Advisory telemetry about files this cycle will journal and push anyway,
 	// so an unreadable record starts the cycle empty rather than failing it.
-	sec := &secretLog{found: map[string][]secrets.Finding{}}
-	if found, err := s.Store.LoadSecrets(s.mountID()); err == nil {
-		sec.found = found
-	}
+	sec := newSecretLog(s.Store, s.mountID())
 	myOpCount, err := s.Store.OwnOpCount(s.Device.ID)
 	if err != nil {
 		return nil, fmt.Errorf("read own journal: %w", err)
@@ -1102,8 +1098,9 @@ func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, 
 	// advisory telemetry about ops that are already journaled and pushed, and
 	// giving it a veto over convergence is the one invariant this feature is
 	// close enough to break.
+	sec.revalidate(s.Store, cache)
 	if sec != nil && sec.dirty {
-		if err := s.Store.SaveSecrets(s.mountID(), sec.found); err != nil {
+		if err := s.Store.SaveSecretRecord(s.mountID(), sec.rec); err != nil {
 			log.Printf("beardrive: could not record credential findings: %v", err)
 		}
 	}
