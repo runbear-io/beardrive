@@ -34,6 +34,29 @@ const secretsPerFile = 8
 type secretLog struct {
 	found map[string][]secrets.Finding
 	dirty bool
+	// rulesChanged means the record was judged by another rule set and has
+	// been re-judged this cycle; finish writes the current fingerprint.
+	rulesChanged bool
+}
+
+// revalidate re-judges every recorded path under the current rules when the
+// record was written by a different rule set. Without it a rule fix never
+// reaches findings already on disk: a path is only re-read when it changes,
+// so a false positive from an older binary would stand forever. Only flagged
+// paths are read, and only once per rule change.
+func (l *secretLog) revalidate(st *store.Store, cache map[string]store.CachedFile, recorded string) {
+	if l == nil || recorded == secrets.Fingerprint() {
+		return
+	}
+	l.rulesChanged = true
+	for rel := range l.found {
+		c, ok := cache[rel]
+		if !ok || c.Blob == "" {
+			l.drop(rel)
+			continue
+		}
+		l.scanBlob(st, rel, c.Blob)
+	}
 }
 
 // scanBlob records what the blob just written for rel contains. Called only on

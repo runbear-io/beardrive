@@ -503,6 +503,9 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	if found, err := s.Store.LoadSecrets(s.mountID()); err == nil {
 		sec.found = found
 	}
+	if fp, err := s.Store.LoadSecretsRules(s.mountID()); err == nil {
+		sec.revalidate(s.Store, cache, fp)
+	}
 	myOpCount, err := s.Store.OwnOpCount(s.Device.ID)
 	if err != nil {
 		return nil, fmt.Errorf("read own journal: %w", err)
@@ -1105,6 +1108,11 @@ func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, 
 	if sec != nil && sec.dirty {
 		if err := s.Store.SaveSecrets(s.mountID(), sec.found); err != nil {
 			log.Printf("beardrive: could not record credential findings: %v", err)
+		}
+	}
+	if sec != nil && sec.rulesChanged {
+		if err := s.Store.SaveSecretsRules(s.mountID(), secrets.Fingerprint()); err != nil {
+			log.Printf("beardrive: could not record credential rule set: %v", err)
 		}
 	}
 	if !store.SyncStateEqual(st, loadedSync) {

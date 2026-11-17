@@ -14,6 +14,8 @@ package secrets
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"regexp"
 	"sort"
 )
@@ -63,6 +65,21 @@ var labels = map[string]string{
 	"slack_token":       "a Slack token",
 	"private_key":       "a private key",
 	"gitlab_pat":        "a GitLab token",
+}
+
+// Fingerprint identifies the rule set. A finding recorded under a different
+// fingerprint was judged by rules this binary no longer has, so the syncer
+// re-reads those paths instead of reporting a verdict the current rules would
+// not reach.
+func Fingerprint() string {
+	h := sha256.New()
+	for _, r := range secretRules {
+		h.Write([]byte(r.id))
+		h.Write([]byte{0})
+		h.Write([]byte(r.re.String()))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // Label renders a rule id for a human. An id with no label renders as itself —
