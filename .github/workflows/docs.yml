@@ -5,8 +5,10 @@
 # sitemap's <lastmod> comes from each page's commit date, so a depth-1 checkout
 # silently drops every lastmod. Hence `fetch-depth: 0` below.
 #
-# Needs two secrets: CLOUDFLARE_API_TOKEN (an account API token with
-# "Cloudflare Pages: Edit") and CLOUDFLARE_ACCOUNT_ID.
+# The Cloudflare token (an account API token with "Cloudflare Pages: Edit") is
+# read from Secret Manager `beardrive-docs-cloudflare-api-token` with GitHub
+# OIDC, which only runs on main can do (terraform platform/tfc/beardrive-docs.tf).
+# CLOUDFLARE_ACCOUNT_ID stays a repository secret.
 name: docs
 on:
   push:
@@ -31,6 +33,9 @@ concurrency:
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC for the Secret Manager read on main
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,10 +54,25 @@ jobs:
       - run: npm run build
         working-directory: web/docs
 
+      - name: Authenticate to Google Cloud
+        if: github.ref == 'refs/heads/main'
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: runbear
+          workload_identity_provider: projects/795661023209/locations/global/workloadIdentityPools/github-oidc-pool/providers/github-oidc-provider
+
+      - name: Read the Cloudflare token
+        id: secrets
+        if: github.ref == 'refs/heads/main'
+        uses: google-github-actions/get-secretmanager-secrets@v3
+        with:
+          secrets: |-
+            cloudflare_api_token:runbear/beardrive-docs-cloudflare-api-token
+
       - name: Deploy to Cloudflare Pages
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ steps.secrets.outputs.cloudflare_api_token }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: >
           npx --yes wrangler@4 pages deploy dist
