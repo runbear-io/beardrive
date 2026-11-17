@@ -57,6 +57,21 @@ import (
 // is the main speedup.
 const pushConcurrency = 16
 
+// pushBatchBlobs and pushBatchBytes bound one push batch: the blobs uploaded
+// before the journal is pushed up to the ops that reference them. A batch
+// closes at whichever limit it reaches first.
+var (
+	pushBatchBlobs       = 256
+	pushBatchBytes int64 = 64 << 20
+)
+
+// pushAttempts and pushRetryDelay govern retryPut: attempts per blob, and the
+// delay before the first retry (doubling after each).
+var (
+	pushAttempts   = 4
+	pushRetryDelay = time.Second
+)
+
 // pullConcurrency is pushConcurrency's mirror for fetchBlobs: a peer's large
 // batch of real changes is just as latency-bound on the download side.
 const pullConcurrency = 16
@@ -2836,6 +2851,11 @@ func (s *Session) writeFileStat(abs string, want journal.FileState) (os.FileInfo
 // push uploads blobs referenced by unpushed ops, then the journal itself.
 // Blob-before-journal ordering means peers never see an op whose content is
 // missing.
+//
+// The unpushed ops go up in batches: each batch's blobs upload, then the
+// journal is pushed up to the batch's last op and st.PushedOps advances. A
+// failure late in a large import keeps every batch already committed, and the
+// next cycle continues from there instead of re-walking the whole import.
 func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncState) error {
 	if st.PushedOps > int64(len(myOps)) {
 		st.PushedOps = int64(len(myOps))
@@ -2843,20 +2863,20 @@ func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncSt
 	// Collect the unique, not-yet-pushed blobs to upload (deduped by content
 	// hash). The backend's Put is idempotent and already skips content that's
 	// present remotely (the hub reports it during signing), so we don't pay a
-	// separate existence round-trip per blob.
+	// separate existence round-trip per blob. ends[i] is the op count the
+	// journal may be pushed up to once jobs[:i+1] are on the remote.
 	seen := map[string]bool{}
-	type blobJob struct {
-		blob string
-		size int64
-	}
 	var jobs []blobJob
+	var ends []int64
 	var totalBytes int64
-	for _, op := range myOps[st.PushedOps:] {
+	for i := st.PushedOps; i < int64(len(myOps)); i++ {
+		op := myOps[i]
 		if op.Kind != journal.KindPut || op.Blob == "" || seen[op.Blob] {
 			continue
 		}
 		seen[op.Blob] = true
 		jobs = append(jobs, blobJob{op.Blob, op.Size})
+		ends = append(ends, i+1)
 		totalBytes += op.Size
 	}
 
@@ -2871,8 +2891,45 @@ func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncSt
 	}
 	report() // announce the total up front (0 / N)
 
-	// Upload blobs in parallel — the initial import is bound on serial
-	// round-trips, not bandwidth, so concurrency is the win.
+	for start := 0; start < len(jobs); {
+		end := start
+		var batchBytes int64
+		for end < len(jobs) && end-start < pushBatchBlobs && (end == start || batchBytes < pushBatchBytes) {
+			batchBytes += jobs[end].size
+			end++
+		}
+		if err := s.pushBlobs(ctx, jobs[start:end], &done, &bytesDone, report); err != nil {
+			return err
+		}
+		upTo := int64(len(myOps))
+		if end < len(jobs) {
+			// Up to (not including) the op that names the next batch's first
+			// blob: every op before it references only uploaded content.
+			upTo = ends[end] - 1
+		}
+		if upTo > st.PushedOps {
+			if err := s.pushJournal(ctx, st, upTo, upTo == int64(len(myOps))); err != nil {
+				return err
+			}
+		}
+		start = end
+	}
+	if st.PushedOps < int64(len(myOps)) {
+		// Ops with no new blob (deletes, already-seen content) after the last
+		// batch, or no blobs at all.
+		return s.pushJournal(ctx, st, int64(len(myOps)), true)
+	}
+	return nil
+}
+
+type blobJob struct {
+	blob string
+	size int64
+}
+
+// pushBlobs uploads one batch of blobs in parallel — the initial import is
+// bound on serial round-trips, not bandwidth, so concurrency is the win.
+func (s *Session) pushBlobs(ctx context.Context, jobs []blobJob, done, bytesDone *int64, report func()) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(pushConcurrency)
 	for _, j := range jobs {
@@ -2880,92 +2937,198 @@ func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncSt
 			// Large files move as chunks + a manifest (chunks.go); the whole
 			// blob is never uploaded for them. Everything else is unchanged.
 			if j.size > chunkThreshold {
-				n, err := s.pushChunked(gctx, j.blob)
+				var n int64
+				err := retryPut(gctx, func() error {
+					var err error
+					n, err = s.pushChunked(gctx, j.blob)
+					return err
+				})
 				if err != nil {
 					return err
 				}
-				atomic.AddInt64(&done, 1)
-				atomic.AddInt64(&bytesDone, n)
+				atomic.AddInt64(done, 1)
+				atomic.AddInt64(bytesDone, n)
 				report()
 				return nil
 			}
 			key := "blobs/" + j.blob
 			if v, ok := s.Backend.(interface{ IsVerified(string) bool }); ok && v.IsVerified(key) {
-				atomic.AddInt64(&done, 1)
-				atomic.AddInt64(&bytesDone, j.size)
+				atomic.AddInt64(done, 1)
+				atomic.AddInt64(bytesDone, j.size)
 				report()
 				return nil
 			}
-			f, err := s.Store.OpenBlob(j.blob)
+			var size int64
+			err := retryPut(gctx, func() error {
+				f, err := s.Store.OpenBlob(j.blob)
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				fi, err := f.Stat()
+				if err != nil {
+					return err
+				}
+				size = fi.Size()
+				return s.Backend.Put(gctx, key, f, size)
+			})
 			if err != nil {
 				return err
 			}
-			fi, err := f.Stat()
-			if err != nil {
-				f.Close()
-				return err
-			}
-			err = s.Backend.Put(gctx, "blobs/"+j.blob, f, fi.Size())
-			f.Close()
-			if err != nil {
-				return err
-			}
-			atomic.AddInt64(&done, 1)
-			atomic.AddInt64(&bytesDone, fi.Size())
+			atomic.AddInt64(done, 1)
+			atomic.AddInt64(bytesDone, size)
 			report()
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
+	return g.Wait()
+}
+
+// retryPut runs one blob upload, retrying failures that a fresh attempt can
+// clear. Each attempt re-signs (Backend.Put asks the hub for a new upload
+// URL), so an expired presigned URL or a dropped storage connection costs a
+// retry, not the cycle. An authorization refusal or a canceled cycle is final.
+func retryPut(ctx context.Context, put func() error) error {
+	var err error
+	for attempt := 0; attempt < pushAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(pushRetryDelay << (attempt - 1)):
+			}
+		}
+		err = put()
+		if err == nil || errors.Is(err, remote.ErrForbidden) || ctx.Err() != nil {
+			return err
+		}
+	}
+	return err
+}
+
+// pushJournal publishes this device's journal up to its first upTo ops and
+// advances st.PushedOps to upTo, persisting the cursor right away so batches
+// already on the remote survive a process exit before the cycle's final state
+// save. whole means upTo covers every op, so the journal goes up to its end as
+// it stands on disk.
+//
+// A refused publish is checked against the remote journal: when it already
+// holds more of this device's ops than st.PushedOps says (an earlier run
+// published them and exited before recording it), the cursor adopts the
+// remote's length and the publish continues from there. Without that, the
+// shorter journal this run sends is refused as dropping ops on every cycle.
+func (s *Session) pushJournal(ctx context.Context, st *store.SyncState, upTo int64, whole bool) error {
+	err := s.publishJournal(ctx, st, upTo, whole)
+	if err != nil && !errors.Is(err, remote.ErrForbidden) && ctx.Err() == nil {
+		if n, ok := s.remoteJournalAhead(ctx, st.PushedOps); ok {
+			st.PushedOps = n
+			err = nil
+			if n < upTo {
+				err = s.publishJournal(ctx, st, upTo, whole)
+			}
+		}
+	}
+	if err != nil {
 		return err
 	}
+	s.savePushCursor(st.PushedOps)
+	return nil
+}
 
-	if st.PushedOps > 0 && st.PushedOps < int64(len(myOps)) {
+// remoteJournalAhead reports how many ops the remote copy of this device's
+// journal holds, when that copy is byte-for-byte a prefix of the local journal
+// ending on an op boundary and holds more than cursor ops.
+func (s *Session) remoteJournalAhead(ctx context.Context, cursor int64) (int64, bool) {
+	jp := s.Store.JournalPath(s.Device.ID)
+	local, err := os.ReadFile(jp)
+	if err != nil {
+		return 0, false
+	}
+	rc, err := s.Backend.Get(ctx, "journal/"+s.Device.ID+".jsonl")
+	if err != nil {
+		return 0, false
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(io.LimitReader(rc, int64(len(local))+1))
+	if err != nil || len(data) > len(local) || !bytes.Equal(data, local[:len(data)]) {
+		return 0, false
+	}
+	ops, err := journal.Parse(data)
+	if err != nil {
+		return 0, false
+	}
+	n := int64(len(ops))
+	if n <= cursor {
+		return 0, false
+	}
+	if off, _, ok := s.Store.JournalPrefixAt(s.Device.ID, n); !ok || off != int64(len(data)) {
+		return 0, false
+	}
+	return n, true
+}
+
+// savePushCursor records n as the pushed-op count in the on-disk sync state,
+// leaving every other field as it is on disk; the rest of this cycle's state is
+// saved by finish.
+func (s *Session) savePushCursor(n int64) {
+	on, err := s.Store.LoadSync()
+	if err == nil && on.PushedOps < n {
+		on.PushedOps = n
+		err = s.Store.SaveSync(on)
+	}
+	if err != nil {
+		log.Printf("beardrive: could not record push progress: %v", err)
+	}
+}
+
+// publishJournal is one attempt at pushJournal's publish.
+func (s *Session) publishJournal(ctx context.Context, st *store.SyncState, upTo int64, whole bool) error {
+	end := int64(-1)
+	if !whole {
+		off, _, ok := s.Store.JournalPrefixAt(s.Device.ID, upTo)
+		if !ok {
+			return fmt.Errorf("journal has no prefix of %d ops", upTo)
+		}
+		end = off
+	}
+	jf, err := os.Open(s.Store.JournalPath(s.Device.ID))
+	if err != nil {
+		return err
+	}
+	defer jf.Close()
+	if end < 0 {
+		fi, err := jf.Stat()
+		if err != nil {
+			return err
+		}
+		end = fi.Size()
+	}
+
+	if st.PushedOps > 0 && st.PushedOps < upTo {
 		if ap, ok := s.Backend.(remote.JournalAppender); ok {
-			if off, prevSHA, ok := s.Store.JournalPrefixAt(s.Device.ID, st.PushedOps); ok && off >= 0 {
-				jf, err := os.Open(s.Store.JournalPath(s.Device.ID))
-				if err != nil {
+			if off, prevSHA, ok := s.Store.JournalPrefixAt(s.Device.ID, st.PushedOps); ok && off >= 0 && off < end {
+				tailData := make([]byte, end-off)
+				if _, err := jf.ReadAt(tailData, off); err != nil {
 					return err
 				}
-				_, serr := jf.Seek(off, io.SeekStart)
-				tailData, rerr := io.ReadAll(jf)
-				jf.Close()
-				if serr != nil {
-					return serr
+				err := ap.AppendJournal(ctx, remote.JournalAppendRequest{
+					Device: s.Device.ID, PrevSize: off, PrevSHA256: prevSHA, Data: tailData,
+				})
+				if err == nil {
+					st.PushedOps = upTo
+					return nil
 				}
-				if rerr != nil {
-					return rerr
-				}
-				if len(tailData) > 0 {
-					err := ap.AppendJournal(ctx, remote.JournalAppendRequest{
-						Device: s.Device.ID, PrevSize: off, PrevSHA256: prevSHA, Data: tailData,
-					})
-					if err == nil {
-						st.PushedOps = int64(len(myOps))
-						return nil
-					}
-					if !errors.Is(err, remote.ErrJournalAppendUnsupported) &&
-						!errors.Is(err, remote.ErrJournalPrefixMismatch) {
-						return err
-					}
+				if !errors.Is(err, remote.ErrJournalAppendUnsupported) &&
+					!errors.Is(err, remote.ErrJournalPrefixMismatch) {
+					return err
 				}
 			}
 		}
 	}
-	jp := s.Store.JournalPath(s.Device.ID)
-	f, err := os.Open(jp)
-	if err != nil {
+	if err := s.Backend.Put(ctx, "journal/"+s.Device.ID+".jsonl", io.NewSectionReader(jf, 0, end), end); err != nil {
 		return err
 	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if err := s.Backend.Put(ctx, "journal/"+s.Device.ID+".jsonl", f, fi.Size()); err != nil {
-		return err
-	}
-	st.PushedOps = int64(len(myOps))
+	st.PushedOps = upTo
 	return nil
 }
 
