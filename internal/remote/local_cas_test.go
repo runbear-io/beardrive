@@ -317,3 +317,103 @@ func TestLocalPutIfIsACompareAndSwapAcrossProcesses(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalBackendRangeAndVersionedRange(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	be, err := newLocal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "journal/dev.jsonl"
+	const v1Body = "line1\nline2\n"
+	if err := be.Put(ctx, key, strings.NewReader(v1Body), int64(len(v1Body))); err != nil {
+		t.Fatal(err)
+	}
+	rcFull, fullVer, err := be.GetVersioned(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = rcFull.Close()
+
+	// Exact tail read.
+	rc, ver, err := be.GetVersionedRange(ctx, key, 6, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ver != fullVer {
+		_ = rc.Close()
+		t.Fatalf("version = %q, want %q", ver, fullVer)
+	}
+
+	// While holding the open tail reader, a concurrent PutIf rename must NOT block
+	// (flock was released) and the open reader must still read v1's tail from its inode.
+	done := make(chan error, 1)
+	go func() {
+		_, putErr := be.PutIf(ctx, key, strings.NewReader(v1Body+"line3\n"), int64(len(v1Body)+6), fullVer)
+		done <- putErr
+	}()
+	select {
+	case putErr := <-done:
+		if putErr != nil {
+			_ = rc.Close()
+			t.Fatalf("concurrent PutIf while tail reader open failed: %v", putErr)
+		}
+	case <-time.After(2 * time.Second):
+		_ = rc.Close()
+		t.Fatal("PutIf blocked while caller held GetVersionedRange reader (flock held too long)")
+	}
+	gotTail, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil || string(gotTail) != "line2\n" {
+		t.Fatalf("open tail reader after rename = (%q, %v), want %q", gotTail, err, "line2\n")
+	}
+
+	// offset == size and length == 0 return empty body + latest version.
+	rcFull2, ver2, err := be.GetVersioned(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full2Bytes, _ := io.ReadAll(rcFull2)
+	_ = rcFull2.Close()
+
+	for _, tc := range []struct {
+		name   string
+		off    int64
+		length int64
+	}{
+		{"offset_eq_size", int64(len(full2Bytes)), -1},
+		{"length_zero", 6, 0},
+	} {
+		r, v, err := be.GetVersionedRange(ctx, key, tc.off, tc.length)
+		if err != nil {
+			t.Fatalf("%s GetVersionedRange: %v", tc.name, err)
+		}
+		b, _ := io.ReadAll(r)
+		_ = r.Close()
+		if len(b) != 0 || v != ver2 {
+			t.Fatalf("%s = (%q, %q), want empty & %q", tc.name, b, v, ver2)
+		}
+		r2, err := be.GetRange(ctx, key, tc.off, tc.length)
+		if err != nil {
+			t.Fatalf("%s GetRange: %v", tc.name, err)
+		}
+		b2, _ := io.ReadAll(r2)
+		_ = r2.Close()
+		if len(b2) != 0 {
+			t.Fatalf("%s GetRange = %q, want empty", tc.name, b2)
+		}
+	}
+
+	// Out-of-bounds offsets fail closed on both GetRange and GetVersionedRange.
+	for _, off := range []int64{-1, int64(len(full2Bytes)) + 1} {
+		if r, err := be.GetRange(ctx, key, off, -1); err == nil {
+			_ = r.Close()
+			t.Fatalf("GetRange(%d) succeeded, want error", off)
+		}
+		if r, _, err := be.GetVersionedRange(ctx, key, off, -1); err == nil {
+			_ = r.Close()
+			t.Fatalf("GetVersionedRange(%d) succeeded, want error", off)
+		}
+	}
+}

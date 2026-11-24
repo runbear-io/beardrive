@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,18 +26,6 @@ type gcsBackend struct {
 	prefix string
 }
 
-// RangeGetter is the optional tail-read capability offered by backends that
-// can seek without downloading the prefix first.
-type RangeGetter interface {
-	GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
-}
-
-// VersionedRangeGetter reads a byte range pinned to the object's current
-// version and returns that version alongside the reader.
-type VersionedRangeGetter interface {
-	GetVersionedRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, Version, error)
-}
-
 func newGCS(ctx context.Context, bucket, prefix string) (*gcsBackend, error) {
 	if bucket == "" {
 		return nil, fmt.Errorf("gs remote needs a bucket: gs://bucket/prefix")
@@ -56,9 +45,12 @@ func (b *gcsBackend) key(key string) string {
 }
 
 func (b *gcsBackend) Put(ctx context.Context, key string, r io.Reader, _ int64) error {
-	w := b.bucket.Object(b.key(key)).NewWriter(ctx)
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	w := b.bucket.Object(b.key(key)).NewWriter(wctx)
 	if _, err := io.Copy(w, r); err != nil {
-		w.Close()
+		cancel()
+		_ = w.CloseWithError(err)
 		return err
 	}
 	return w.Close()
@@ -97,7 +89,39 @@ func (b *gcsBackend) Get(ctx context.Context, key string) (io.ReadCloser, error)
 // GetRange returns the bytes beginning at offset. A negative length means the
 // remainder of the object, matching storage.Reader's NewRangeReader contract.
 func (b *gcsBackend) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
-	return b.bucket.Object(b.key(key)).NewRangeReader(ctx, offset, length)
+	if offset < 0 {
+		return nil, fmt.Errorf("invalid range offset %d", offset)
+	}
+	obj := b.bucket.Object(b.key(key))
+	if length == 0 {
+		attrs, err := obj.Attrs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if offset > attrs.Size {
+			return nil, fmt.Errorf("range offset %d out of bounds for size %d", offset, attrs.Size)
+		}
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	rc, err := obj.NewRangeReader(ctx, offset, length)
+	if err != nil {
+		var apiErr *googleapi.Error
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusRequestedRangeNotSatisfiable {
+			attrs, aerr := obj.Attrs(ctx)
+			if aerr == nil {
+				if offset == attrs.Size {
+					return io.NopCloser(bytes.NewReader(nil)), nil
+				}
+				return nil, fmt.Errorf("range offset %d out of bounds for size %d", offset, attrs.Size)
+			}
+		}
+		return nil, err
+	}
+	if rc.Attrs.Decompressed || rc.Attrs.StartOffset != offset {
+		_ = rc.Close()
+		return nil, fmt.Errorf("unexpected range response (decompressed=%v start=%d want=%d)", rc.Attrs.Decompressed, rc.Attrs.StartOffset, offset)
+	}
+	return rc, nil
 }
 
 func (b *gcsBackend) List(ctx context.Context, prefix string) ([]Object, error) {
@@ -115,7 +139,14 @@ func (b *gcsBackend) List(ctx context.Context, prefix string) ([]Object, error) 
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, Object{Key: strings.TrimPrefix(attrs.Name, strip), Size: attrs.Size, Modified: attrs.Updated})
+		out = append(out, Object{
+			Key:              strings.TrimPrefix(attrs.Name, strip),
+			Size:             attrs.Size,
+			Modified:         attrs.Updated,
+			Version:          gcsVersion(attrs.Generation),
+			ImmutableVersion: true,
+			CRC32C:           attrs.CRC32C,
+		})
 	}
 	return out, nil
 }
@@ -136,6 +167,19 @@ func (b *gcsBackend) Close() error { return b.client.Close() }
 // Compile-time: this is the one backend that offers compare-and-swap, and the
 // hub's journal append silently falls back to last-writer-wins without it.
 var _ ConditionalPutter = (*gcsBackend)(nil)
+var _ VersionedMetaBackend = (*gcsBackend)(nil)
+
+func objectMetaFromGCS(attrs *gcs.ObjectAttrs) ObjectMeta {
+	if attrs == nil {
+		return ObjectMeta{}
+	}
+	return ObjectMeta{
+		Version:  gcsVersion(attrs.Generation),
+		Size:     attrs.Size,
+		CRC32C:   attrs.CRC32C,
+		Metadata: normalizeMeta(attrs.Metadata),
+	}
+}
 
 /* Compare-and-swap, which GCS gives us for free through object generations.
 
@@ -149,63 +193,99 @@ var _ ConditionalPutter = (*gcsBackend)(nil)
    which GCS would read as "match generation zero" and refuse everything. */
 
 func (b *gcsBackend) GetVersionedRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, Version, error) {
+	rc, meta, err := b.GetVersionedRangeWithMeta(ctx, key, offset, length)
+	return rc, meta.Version, err
+}
+
+func (b *gcsBackend) GetVersionedRangeWithMeta(ctx context.Context, key string, offset, length int64) (io.ReadCloser, ObjectMeta, error) {
+	if offset < 0 {
+		return nil, ObjectMeta{}, fmt.Errorf("invalid range offset %d", offset)
+	}
 	obj := b.bucket.Object(b.key(key))
 	attrs, err := obj.Attrs(ctx)
 	if err != nil {
-		return nil, VersionAbsent, err
+		return nil, ObjectMeta{}, err
 	}
-	if offset < 0 || offset > attrs.Size {
-		return nil, VersionAbsent, fmt.Errorf("range offset %d out of bounds for size %d", offset, attrs.Size)
+	if offset > attrs.Size {
+		return nil, ObjectMeta{}, fmt.Errorf("range offset %d out of bounds for size %d", offset, attrs.Size)
+	}
+	meta := objectMetaFromGCS(attrs)
+	if offset == attrs.Size || length == 0 {
+		return io.NopCloser(bytes.NewReader(nil)), meta, nil
 	}
 	rc, err := obj.Generation(attrs.Generation).NewRangeReader(ctx, offset, length)
 	if err != nil {
-		return nil, VersionAbsent, err
+		return nil, ObjectMeta{}, err
 	}
-	return rc, gcsVersion(attrs.Generation), nil
+	if rc.Attrs.Decompressed || rc.Attrs.StartOffset != offset {
+		_ = rc.Close()
+		return nil, ObjectMeta{}, fmt.Errorf("unexpected range response (decompressed=%v start=%d want=%d)", rc.Attrs.Decompressed, rc.Attrs.StartOffset, offset)
+	}
+	return rc, meta, nil
 }
 
 func (b *gcsBackend) GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error) {
+	rc, meta, err := b.GetVersionedWithMeta(ctx, key)
+	return rc, meta.Version, err
+}
+
+func (b *gcsBackend) GetVersionedWithMeta(ctx context.Context, key string) (io.ReadCloser, ObjectMeta, error) {
 	obj := b.bucket.Object(b.key(key))
 	attrs, err := obj.Attrs(ctx)
 	if err != nil {
-		return nil, VersionAbsent, err
+		return nil, ObjectMeta{}, err
 	}
 	// Read the generation we just looked at, not "latest": between Attrs and
 	// NewReader another process may have written, and a body from a different
 	// revision than the version we report is the exact bug this prevents.
 	rc, err := obj.Generation(attrs.Generation).NewReader(ctx)
 	if err != nil {
-		return nil, VersionAbsent, err
+		return nil, ObjectMeta{}, err
 	}
-	return rc, gcsVersion(attrs.Generation), nil
+	if rc.Attrs.Decompressed {
+		_ = rc.Close()
+		return nil, ObjectMeta{}, fmt.Errorf("unexpected decompressed response for %s", key)
+	}
+	return rc, objectMetaFromGCS(attrs), nil
 }
 
-func (b *gcsBackend) PutIf(ctx context.Context, key string, r io.Reader, _ int64, expect Version) (Version, error) {
+func (b *gcsBackend) PutIf(ctx context.Context, key string, r io.Reader, size int64, expect Version) (Version, error) {
+	meta, err := b.PutIfWithMeta(ctx, key, r, size, expect, nil)
+	return meta.Version, err
+}
+
+func (b *gcsBackend) PutIfWithMeta(ctx context.Context, key string, r io.Reader, _ int64, expect Version, meta map[string]string) (ObjectMeta, error) {
 	obj := b.bucket.Object(b.key(key))
 	if expect == VersionAbsent {
 		obj = obj.If(gcs.Conditions{DoesNotExist: true})
 	} else {
 		gen, err := strconv.ParseInt(string(expect), 10, 64)
 		if err != nil {
-			return VersionAbsent, fmt.Errorf("bad version %q: %w", expect, err)
+			return ObjectMeta{}, fmt.Errorf("bad version %q: %w", expect, err)
 		}
 		obj = obj.If(gcs.Conditions{GenerationMatch: gen})
 	}
-	w := obj.NewWriter(ctx)
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	w := obj.NewWriter(wctx)
+	if len(meta) > 0 {
+		w.Metadata = normalizeMeta(meta)
+	}
 	if _, err := io.Copy(w, r); err != nil {
-		w.Close()
-		return VersionAbsent, err
+		cancel()
+		_ = w.CloseWithError(err)
+		return ObjectMeta{}, err
 	}
 	if err := w.Close(); err != nil {
 		// 412 is the precondition failing, which is not an error so much as
 		// "somebody else got there" — the caller re-reads and retries.
 		var apiErr *googleapi.Error
 		if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
-			return VersionAbsent, ErrVersionMismatch
+			return ObjectMeta{}, ErrVersionMismatch
 		}
-		return VersionAbsent, err
+		return ObjectMeta{}, err
 	}
-	return gcsVersion(w.Attrs().Generation), nil
+	return objectMetaFromGCS(w.Attrs()), nil
 }
 
 func gcsVersion(gen int64) Version { return Version(strconv.FormatInt(gen, 10)) }
