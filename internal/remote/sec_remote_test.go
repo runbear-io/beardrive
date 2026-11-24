@@ -158,7 +158,7 @@ func TestSec_Prefixed_ListedKeysStayInsideTheNamespace(t *testing.T) {
 			t.Errorf("List handed back %q, which is not a clean relative key", o.Key)
 		}
 		// The real test: feed it back in, as every caller does (syncer.pull,
-		// exportStore, RemoteSource.loadOps all Get what List named).
+		// exportStore, RemoteSource.loadSourcedJournals all Get what List named).
 		rec.calls = nil
 		p.Get(context.Background(), o.Key)
 		for _, c := range rec.calls {

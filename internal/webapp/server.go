@@ -735,6 +735,12 @@ type RemoteSource struct {
 	fbytes int64
 	fseq   uint64
 
+	vshaMu      sync.Mutex
+	vshaFP      string
+	vshaCache   map[string]vshaEntry
+	vshaEntries int
+	vshaSeq     uint64
+
 	rmu          sync.Mutex
 	reassembling map[string]*reassembledBlob
 
@@ -770,7 +776,7 @@ type versionedBlobBackend interface {
 }
 
 // cachedJournal is one journal's parsed ops plus the (size, modified) that
-// proves the parse is still current. See loadSourcedOps.
+// proves the parse is still current. See loadSourcedJournals.
 type cachedJournal struct {
 	size          int64
 	mod           time.Time
@@ -1239,19 +1245,6 @@ type Identity struct {
 	ID, Name, Author string
 }
 
-// loadOps fetches and parses every journal on the remote.
-func (r *RemoteSource) loadOps(ctx context.Context) ([]journal.Op, error) {
-	sourced, err := r.loadSourcedOps(ctx)
-	if err != nil {
-		return nil, err
-	}
-	all := make([]journal.Op, len(sourced))
-	for i, s := range sourced {
-		all[i] = s.Op
-	}
-	return all, nil
-}
-
 // sourcedOp is an op plus the device whose journal it was actually read from.
 // Everything inside an op — including its Device field — is JSON the pusher
 // chose; the journal KEY is the one part the hub binds to the pushing device
@@ -1261,10 +1254,28 @@ type sourcedOp struct {
 	From string
 }
 
-// loadSourcedOps folds every journal on the remote into one slice of ops. It
-// is the funnel every reader goes through — history, folder listings, restore,
-// and the hub's own appendOp — so re-downloading and re-parsing every journal
-// here was the whole cost of a history page, paid again per "load more".
+// sourcedJournal is a read-only view of one journal's cached ops paired with
+// its storage key and the device derived from that key. Callers borrow Ops in
+// place and must never mutate or append to it.
+type sourcedJournal struct {
+	Key  string
+	From string
+	Ops  []journal.Op
+}
+
+// opRef addresses an operation inside a slice of journals without copying
+// the 272-byte journal.Op value.
+type opRef struct {
+	j int32
+	i int32
+}
+
+func journalDevice(key string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(key, "journal/"), ".jsonl")
+}
+
+// loadSourcedJournals fetches and caches every journal on the remote as
+// read-only views without copying ops into a combined slice.
 //
 // Journals only ever GROW: a device appends only to its own (the one-writer
 // invariant) and the hub's appendOp rewrites its key with strictly more bytes.
@@ -1274,12 +1285,12 @@ type sourcedOp struct {
 // round trip every request still pays.
 //
 // Concurrent cache misses share one fetch and parse for each journal key.
-func (r *RemoteSource) loadSourcedOps(ctx context.Context) ([]sourcedOp, error) {
+func (r *RemoteSource) loadSourcedJournals(ctx context.Context) ([]sourcedJournal, error) {
 	keep, err := r.listJournals(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return r.sourcedOpsOf(ctx, keep)
+	return r.sourcedJournalsOf(ctx, keep)
 }
 
 // listJournals is the one storage round trip every read of the project pays.
@@ -1297,28 +1308,22 @@ func (r *RemoteSource) listJournals(ctx context.Context) ([]remote.Object, error
 	return keep, nil
 }
 
-// sourcedOpsOf returns the ops of the listed journals, each with the device
-// whose journal it was read from.
-func (r *RemoteSource) sourcedOpsOf(ctx context.Context, keep []remote.Object) ([]sourcedOp, error) {
+// sourcedJournalsOf returns read-only views of the listed journals, each with
+// the device whose journal it was read from.
+func (r *RemoteSource) sourcedJournalsOf(ctx context.Context, keep []remote.Object) ([]sourcedJournal, error) {
 	parsed, err := r.parsedJournals(ctx, keep)
 	if err != nil {
 		return nil, err
 	}
-	// A fresh outer slice on every call: handleHistory and Files both sort what
-	// they are handed, and the cached ops must never be the thing they reorder.
-	// journal.Op is all value fields, so appending one copies it.
-	n := 0
-	for _, ops := range parsed {
-		n += len(ops)
-	}
-	all := make([]sourcedOp, 0, n+512)
+	out := make([]sourcedJournal, len(keep))
 	for i, o := range keep {
-		from := strings.TrimSuffix(strings.TrimPrefix(o.Key, "journal/"), ".jsonl")
-		for _, op := range parsed[i] {
-			all = append(all, sourcedOp{Op: op, From: from})
+		out[i] = sourcedJournal{
+			Key:  o.Key,
+			From: journalDevice(o.Key),
+			Ops:  parsed[i],
 		}
 	}
-	return all, nil
+	return out, nil
 }
 
 // parsedJournals returns each listed journal's ops, fetching only the ones
@@ -1433,6 +1438,7 @@ func (r *RemoteSource) fetchJournal(ctx context.Context, o remote.Object) (cache
 		// viewer, and the empty parse is cached until the object changes.
 		c.ops, _ = journal.Parse(raw)
 	}
+	c.ops = c.ops[:len(c.ops):len(c.ops)]
 	// A push between List and Get makes the listing's identity unsuitable as
 	// a cache key. Serve the fetched ops, but let the next listing cache them.
 	if int64(len(raw)) != o.Size {
@@ -1478,6 +1484,10 @@ func (r *RemoteSource) filesMovesCoverage(ctx context.Context) (map[string]FileI
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	return r.filesMovesCoverageFor(ctx, keep)
+}
+
+func (r *RemoteSource) filesMovesCoverageFor(ctx context.Context, keep []remote.Object) (map[string]FileInfo, moveIndex, *seqCoverage, error) {
 	fp := journalFingerprint(keep)
 	if files, moves, cov, ok := r.cachedFold(fp); ok {
 		return files, moves, cov, nil
@@ -1496,6 +1506,9 @@ func (r *RemoteSource) filesMovesCoverage(ctx context.Context) (map[string]FileI
 		return fold{files: files, tombs: tombs, moves: moves, cov: lazyCoverage(files, tombs)}
 	}
 	res, err, _ := r.flight.Do("fold\x00"+fp, func() (any, error) {
+		if files, moves, cov, ok := r.cachedFold(fp); ok {
+			return fold{files: files, moves: moves, cov: cov}, nil
+		}
 		r.foldMu.Lock()
 		hasFold := r.foldFiles != nil
 		r.foldMu.Unlock()
@@ -1512,9 +1525,7 @@ func (r *RemoteSource) filesMovesCoverage(ctx context.Context) (map[string]FileI
 		if err != nil {
 			return nil, err
 		}
-		all := byPathOrder(parsed...)
-		files, tombs := foldFilesAndTombstones(all)
-		moves := buildMoveIndex(all)
+		files, tombs, moves := foldParsedJournals(parsed)
 		cov := exactCoverage(keep, parsed)
 		jmeta, ok := r.journalMetaFromCache(keep)
 		if !ok {
@@ -1561,63 +1572,110 @@ func journalFingerprint(objs []remote.Object) string {
 	return b.String()
 }
 
-// byPathOrder returns every op of the given journals in one slice, grouped by
-// path, each path's ops in journal.Less order.
-//
-// Everything the fold derives depends only on the order of one path's own
-// ops: the last writer of a path, and the move pairing, which tracks what
-// each path held and only counts candidates across paths. So this gives the
-// fold exactly what a global journal.Sort would, for many small sorts instead
-// of one over every op in the project. Stable within a path, like
-// journal.Sort, so ops that tie under Less keep their journal order.
-//
-// The journals are read, never reordered: they may be the parse cache's own.
-func byPathOrder(journals ...[]journal.Op) []journal.Op {
-	type ref struct{ j, i int32 }
-	at := func(x ref) *journal.Op { return &journals[x.j][x.i] }
+// foldParsedJournals replays parsed journals into the live file map, delete
+// tombstones, and move index without copying the project's ops into a merged
+// slice. Within each path, ops are reversed back to forward (journal, index)
+// order and stably sorted by journal.Less so tie-breaking matches a global
+// journal.Sort identically.
+func foldParsedJournals(parsed [][]journal.Op) (map[string]FileInfo, map[string]winOp, moveIndex) {
+	type pathLink struct {
+		j, i, prev int32
+	}
 	n := 0
-	for _, ops := range journals {
+	for _, ops := range parsed {
 		n += len(ops)
 	}
-	groups := make(map[string][]ref, n/4)
+	if n == 0 {
+		return map[string]FileInfo{}, map[string]winOp{}, moveIndex{}
+	}
+	links := make([]pathLink, 0, n)
+	last := make(map[string]int32, n/4)
 	paths := make([]string, 0, n/4)
-	for j, ops := range journals {
+	for j, ops := range parsed {
 		for i := range ops {
 			p := ops[i].Path
-			g, ok := groups[p]
+			prev, ok := last[p]
 			if !ok {
+				prev = -1
 				paths = append(paths, p)
 			}
-			groups[p] = append(g, ref{int32(j), int32(i)})
+			last[p] = int32(len(links))
+			links = append(links, pathLink{j: int32(j), i: int32(i), prev: prev})
 		}
 	}
-	out := make([]journal.Op, 0, n)
+	files := make(map[string]FileInfo, len(paths))
+	tombs := make(map[string]winOp, len(paths)/8)
+	var creates, deletes []moveHalf
+	var buf []opRef
 	for _, p := range paths {
-		g := groups[p]
-		if len(g) > 1 {
-			slices.SortStableFunc(g, func(a, b ref) int {
+		buf = buf[:0]
+		for idx := last[p]; idx >= 0; idx = links[idx].prev {
+			l := links[idx]
+			buf = append(buf, opRef{j: l.j, i: l.i})
+		}
+		if len(buf) > 1 {
+			slices.Reverse(buf)
+			slices.SortStableFunc(buf, func(a, b opRef) int {
+				oa, ob := &parsed[a.j][a.i], &parsed[b.j][b.i]
 				switch {
-				case journal.Less(*at(a), *at(b)):
+				case journal.Less(*oa, *ob):
 					return -1
-				case journal.Less(*at(b), *at(a)):
+				case journal.Less(*ob, *oa):
 					return 1
 				}
 				return 0
 			})
 		}
-		for _, x := range g {
-			out = append(out, *at(x))
+		var (
+			fi       FileInfo
+			hasFile  bool
+			tomb     winOp
+			hasTomb  bool
+			liveBlob string
+			hasLive  bool
+			ever     bool
+		)
+		for _, ref := range buf {
+			op := &parsed[ref.j][ref.i]
+			switch op.Kind {
+			case journal.KindPut:
+				if op.Link != "" || isBlobSHA(op.Blob) {
+					if !hasTomb || tomb.less(*op) {
+						fi = fileInfoFromOp(*op)
+						hasFile = true
+					}
+				}
+				if isBlobSHA(op.Blob) {
+					if !ever {
+						ever = true
+						creates = append(creates, moveHalf{path: op.Path, blob: op.Blob, dev: op.Device, at: op.Time})
+					}
+					liveBlob = op.Blob
+					hasLive = true
+				}
+			case journal.KindDelete:
+				w := winOpOf(*op)
+				if !hasTomb || tomb.less(*op) {
+					tomb = w
+					hasTomb = true
+				}
+				if hasFile && journal.Less(fi.winOp(p), *op) {
+					hasFile = false
+				}
+				if hasLive {
+					hasLive = false
+					deletes = append(deletes, moveHalf{path: op.Path, blob: liveBlob, dev: op.Device, at: op.Time})
+				}
+			}
+		}
+		if hasFile {
+			files[p] = fi
+		}
+		if hasTomb {
+			tombs[p] = tomb
 		}
 	}
-	return out
-}
-
-// filesWithMoves replays ops (sorted in place) into the tree and its move
-// index — the one set of replay rules every view of "the files" shares.
-// Callers that go on to walk the ops in order rely on the in-place sort.
-func filesWithMoves(all []journal.Op) (map[string]FileInfo, moveIndex) {
-	journal.Sort(all)
-	return foldFiles(all), buildMoveIndex(all)
+	return files, tombs, pairMoves(creates, deletes)
 }
 
 // foldFiles replays ops (in journal.Less order within each path) into the

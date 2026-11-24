@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -191,15 +192,10 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		return
 	}
 	// Shared by every request until a journal grows: read, never write.
-	all, kinds, prevs := idx.all, idx.kinds, idx.prevs
-	type timed struct {
-		i  int // index into all
-		op journal.Op
-	}
 	// A file that moved keeps its past — under its old path. ?path= resolves
 	// through the move chain so the feed for docs/a.md includes the versions
 	// written while it was a.md. Each hop is time-bounded (see segment), so
-	// an unrelated NEW a.md created after the move does not leak in. `all`
+	// an unrelated NEW a.md created after the move does not leak in. `order`
 	// is already sorted by journal.Less, so this costs no extra I/O.
 	var chain []segment
 	if path != "" {
@@ -217,12 +213,10 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	// Resolved once, not per op: history walks every op in the project.
 	vis := s.visibility(r)
-	matched := make([]timed, 0, min(n+1, 256))
+	matched := make([]int32, 0, min(n+1, 256))
 	for _, rawIndex := range idx.byTime {
-		i := int(rawIndex)
-		sop := all[i]
-		op := sop.Op
-		if haveCur && !histLess(cur, op) {
+		op, from := idx.opAt(int(rawIndex))
+		if haveCur && !histLess(cur, *op) {
 			continue
 		}
 		switch {
@@ -235,10 +229,10 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			continue
 		case path == "" && prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/"):
 			continue
-		case !f.keep(sop):
+		case !f.keepOp(op, from):
 			continue
 		}
-		matched = append(matched, timed{i, op})
+		matched = append(matched, rawIndex)
 		if len(matched) > n {
 			break
 		}
@@ -247,7 +241,8 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	// "there is more" is a length check and the last page simply omits the key.
 	var next string
 	if len(matched) > n {
-		next = encodeCursor(matched[n-1].op)
+		lastOp, _ := idx.opAt(int(matched[n-1]))
+		next = encodeCursor(*lastOp)
 		matched = matched[:n]
 	}
 	// Only the page is attributed. The registry join re-checks its store and
@@ -261,9 +256,10 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	devs := map[string]resolved{}
 	entries := make([]HistoryEntry, len(matched))
-	for k, m := range matched {
-		sop, op := all[m.i], m.op
-		res, ok := devs[sop.From]
+	for k, rawIdx := range matched {
+		i := int(rawIdx)
+		op, from := idx.opAt(i)
+		res, ok := devs[from]
 		if !ok {
 			// Attribution comes from the journal the op was READ from, never
 			// from its own Device field: that field is arbitrary JSON any
@@ -271,19 +267,19 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			// trusting it printed another org's machine name into this feed
 			// and answered "does this device id exist on the hub?" for anyone
 			// who asked. The registry join is scoped the same way heat's is.
-			res = resolved{dev: historyDevice{ID: sop.From}}
-			if info, ok := s.Devices.LookupIn(sop.From, visible); ok && info.ID != "" {
+			res = resolved{dev: historyDevice{ID: from}}
+			if info, ok := s.Devices.LookupIn(from, visible); ok && info.ID != "" {
 				res = resolved{historyDevice{ID: info.ID, Name: info.Name, OS: info.OS}, true}
 			}
-			devs[sop.From] = res
+			devs[from] = res
 		}
 		dev := res.dev
-		if !res.registered && op.Device == sop.From {
+		if !res.registered && op.Device == from {
 			dev.Name = op.DeviceName // the journal's owner describing itself
 		}
 		entries[k] = HistoryEntry{
-			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: kinds[m.i],
-			Path: op.Path, Size: op.Size, Blob: op.Blob, Prev: prevs[m.i],
+			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: idx.kindAt(i),
+			Path: op.Path, Size: op.Size, Blob: op.Blob, Prev: idx.prevs[i],
 			User: op.User, UserName: op.UserName, Author: op.Author,
 			Device: dev, Note: op.Note, Session: op.Session, Seq: op.Seq,
 		}
@@ -338,7 +334,10 @@ func parseHistFilter(q url.Values) (histFilter, error) {
 }
 
 func (f histFilter) keep(sop sourcedOp) bool {
-	op := sop.Op
+	return f.keepOp(&sop.Op, sop.From)
+}
+
+func (f histFilter) keepOp(op *journal.Op, from string) bool {
 	switch {
 	case f.needle != "" && !strings.Contains(strings.ToLower(op.Path), f.needle):
 		return false
@@ -346,7 +345,7 @@ func (f histFilter) keep(sop sourcedOp) bool {
 		return false
 	case f.actor == "agent" && op.Session == "", f.actor == "human" && op.Session != "":
 		return false
-	case f.device != "" && sop.From != f.device:
+	case f.device != "" && from != f.device:
 		return false
 	case !f.since.IsZero() && op.Time.Before(f.since):
 		return false
@@ -434,38 +433,43 @@ func (s *Server) handleHistorySummary(v *volume, w http.ResponseWriter, r *http.
 		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
-	all := idx.all
 	vis := s.visibility(r)
 	devices := map[string]bool{}
 	// ?all=1 totals every op the filters keep, while the bars still cover
 	// the chart window: "All time" in the feed must not be summarised as the
 	// last week.
 	allTime := q.Get("all") == "1"
-	for _, sop := range all {
-		op := sop.Op
-		if !vis.canRead(op.Path) || !f.keep(sop) || (!allTime && op.Time.Before(start)) {
+	for j := range idx.sources {
+		sj := &idx.sources[j]
+		if f.device != "" && sj.From != f.device {
 			continue
 		}
-		if prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/") {
-			continue
-		}
-		i, ok := index[op.Time.In(loc).Format("2006-01-02")]
-		if !ok && (!allTime || !op.Time.Before(start)) {
-			continue // in the future by this reader's clock
-		}
-		out.Total++
-		devices[sop.From] = true
-		agent := op.Session != ""
-		if agent {
-			out.Agent++
-		} else {
-			out.Human++
-		}
-		if ok {
+		for i := range sj.Ops {
+			op := &sj.Ops[i]
+			if !vis.canRead(op.Path) || !f.keepOp(op, sj.From) || (!allTime && op.Time.Before(start)) {
+				continue
+			}
+			if prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/") {
+				continue
+			}
+			dayIdx, ok := index[op.Time.In(loc).Format("2006-01-02")]
+			if !ok && (!allTime || !op.Time.Before(start)) {
+				continue // in the future by this reader's clock
+			}
+			out.Total++
+			devices[sj.From] = true
+			agent := op.Session != ""
 			if agent {
-				out.Days[i].Agent++
+				out.Agent++
 			} else {
-				out.Days[i].Human++
+				out.Human++
+			}
+			if ok {
+				if agent {
+					out.Days[dayIdx].Agent++
+				} else {
+					out.Days[dayIdx].Human++
+				}
 			}
 		}
 	}
@@ -555,17 +559,18 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 	if rs == nil {
 		return
 	}
-	// One journal load serves both the tree replay and the history check.
-	sourced, err := rs.loadSourcedOps(r.Context())
+	// Reuse the fold and move index on one consistent listing, and parse
+	// journals only when 0-byte visible candidates exist.
+	keep, err := rs.listJournals(r.Context())
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
-	all := make([]journal.Op, len(sourced))
-	for i, sop := range sourced {
-		all[i] = sop.Op
+	files, moves, _, err := rs.filesMovesCoverageFor(r.Context(), keep)
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
+		return
 	}
-	files, moves := filesWithMoves(all)
 	vis := s.visibility(r)
 	var candidates []string
 	for p, fi := range files {
@@ -573,11 +578,16 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 			candidates = append(candidates, p)
 		}
 	}
-	// One pass over the journal: each candidate's chain is indexed by the
-	// paths it covers, so an op is checked only against the candidates whose
-	// history runs through its path — not every candidate against every op.
+	// One sorted pass over candidate-relevant ops: each candidate's chain is
+	// indexed by the paths it covers, so unrelated project ops are never
+	// collected or sorted.
 	paths := []string{}
 	if len(candidates) > 0 {
+		parsed, err := rs.parsedJournals(r.Context(), keep)
+		if err != nil {
+			storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
+			return
+		}
 		type hit struct {
 			file string
 			seg  segment
@@ -589,23 +599,50 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 				byPath[seg.Path] = append(byPath[seg.Path], hit{p, seg})
 			}
 		}
-		had := map[string]bool{}
 		isCandidate := make(map[string]bool, len(candidates))
 		for _, p := range candidates {
 			isCandidate[p] = true
 		}
-		for _, op := range all {
+		var relevant []opRef
+		for j := range parsed {
+			s := parsed[j]
+			for i := range s {
+				op := &s[i]
+				if op.Kind == journal.KindDelete {
+					if isCandidate[op.Path] {
+						relevant = append(relevant, opRef{j: int32(j), i: int32(i)})
+					}
+					continue
+				}
+				// A version under a path this reader cannot see does not count:
+				// "it had content" would disclose that the hidden path did.
+				if op.Kind != journal.KindPut || op.Link != "" || op.Size <= 0 ||
+					!isBlobSHA(op.Blob) || len(byPath[op.Path]) == 0 || !vis.canRead(op.Path) {
+					continue
+				}
+				relevant = append(relevant, opRef{j: int32(j), i: int32(i)})
+			}
+		}
+		if len(relevant) > 1 {
+			slices.SortStableFunc(relevant, func(a, b opRef) int {
+				oa, ob := &parsed[a.j][a.i], &parsed[b.j][b.i]
+				switch {
+				case journal.Less(*oa, *ob):
+					return -1
+				case journal.Less(*ob, *oa):
+					return 1
+				}
+				return 0
+			})
+		}
+		had := map[string]bool{}
+		for _, ref := range relevant {
+			op := &parsed[ref.j][ref.i]
 			// A delete of the candidate's own path ends whatever came before:
 			// a file recreated empty after it is a new file, the way the tree
 			// replays it, and inherits nothing from the one that was deleted.
-			if op.Kind == journal.KindDelete && isCandidate[op.Path] {
+			if op.Kind == journal.KindDelete {
 				had[op.Path] = false
-				continue
-			}
-			// A version under a path this reader cannot see does not count:
-			// "it had content" would disclose that the hidden path did.
-			if op.Kind == journal.KindDelete || op.Link != "" || op.Size <= 0 ||
-				!blobRe.MatchString(op.Blob) || !vis.canRead(op.Path) {
 				continue
 			}
 			for _, h := range byPath[op.Path] {

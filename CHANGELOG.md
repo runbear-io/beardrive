@@ -5,6 +5,8 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
+- **Eliminate per-request full-project journal op copies on the hub.** Hub tree folds, upload/restore/undo-run checks, history indexing and emptied checks, folder-visibility lookups, and data-index delete scans now read borrowed cached journal slices by index instead of copying every `journal.Op` per request, fixing container OOM kills on large projects; storage, journal, and checkpoint formats are unchanged.
+
 ## v0.18.10 — 2026-11-11
 
 **Update your devices and self-hosted hubs** for the co-editing and merge

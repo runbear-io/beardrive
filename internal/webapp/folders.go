@@ -14,7 +14,6 @@ import (
 	"path"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -353,13 +352,65 @@ type pathFilter struct {
 	on      bool   // false: nothing to filter, every test is a constant true
 }
 
-type visibleSHACacheKey struct {
-	source *RemoteSource
-	fp     string
-	tag    string
+type vshaEntry struct {
+	shas map[string]struct{}
+	seq  uint64
 }
 
-var visibleSHACache sync.Map // map[visibleSHACacheKey]map[string]struct{}
+const (
+	maxVisibleSHAScopes  = 64
+	maxVisibleSHAEntries = 262144
+)
+
+func (r *RemoteSource) getVisibleSHAs(fp, tag string) (map[string]struct{}, bool) {
+	r.vshaMu.Lock()
+	defer r.vshaMu.Unlock()
+	if r.vshaFP != fp || r.vshaCache == nil {
+		return nil, false
+	}
+	e, ok := r.vshaCache[tag]
+	if !ok {
+		return nil, false
+	}
+	r.vshaSeq++
+	e.seq = r.vshaSeq
+	r.vshaCache[tag] = e
+	return e.shas, true
+}
+
+func (r *RemoteSource) putVisibleSHAs(fp, tag string, shas map[string]struct{}) {
+	r.vshaMu.Lock()
+	defer r.vshaMu.Unlock()
+	if r.vshaFP != fp || r.vshaCache == nil {
+		r.vshaFP = fp
+		r.vshaCache = make(map[string]vshaEntry)
+		r.vshaEntries = 0
+	}
+	if prev, ok := r.vshaCache[tag]; ok {
+		r.vshaEntries -= len(prev.shas)
+		delete(r.vshaCache, tag)
+	}
+	r.vshaSeq++
+	r.vshaCache[tag] = vshaEntry{shas: shas, seq: r.vshaSeq}
+	r.vshaEntries += len(shas)
+	for len(r.vshaCache) > maxVisibleSHAScopes || (r.vshaEntries > maxVisibleSHAEntries && len(r.vshaCache) > 1) {
+		var oldestTag string
+		var oldestSeq uint64
+		for t, e := range r.vshaCache {
+			if t == tag {
+				continue
+			}
+			if oldestTag == "" || e.seq < oldestSeq {
+				oldestTag, oldestSeq = t, e.seq
+			}
+		}
+		if oldestTag == "" {
+			break
+		}
+		r.vshaEntries -= len(r.vshaCache[oldestTag].shas)
+		delete(r.vshaCache, oldestTag)
+	}
+}
 
 // visibility resolves the caller's read visibility for the project the proj()
 // resolver already resolved. Off — allowing everything — in single-volume mode
@@ -452,22 +503,42 @@ func (f pathFilter) visibleSHASet(ctx context.Context, rs *RemoteSource) (map[st
 	if err != nil {
 		return nil, err
 	}
-	key := visibleSHACacheKey{source: rs, fp: journalFingerprint(keep), tag: f.tag}
-	if cached, ok := visibleSHACache.Load(key); ok {
-		return cached.(map[string]struct{}), nil
+	fp := journalFingerprint(keep)
+	if cached, ok := rs.getVisibleSHAs(fp, f.tag); ok {
+		return cached, nil
 	}
-	ops, err := rs.sourcedOpsOf(ctx, keep)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]struct{}, len(ops))
-	for _, so := range ops {
-		if f.canRead(so.Op.Path) {
-			out[so.Op.Blob] = struct{}{}
+	ch := rs.flight.DoChan("vsha\x00"+f.tag+"\x00"+fp, func() (any, error) {
+		if cached, ok := rs.getVisibleSHAs(fp, f.tag); ok {
+			return cached, nil
 		}
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		parsed, err := rs.parsedJournals(fctx, keep)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]struct{})
+		for j := range parsed {
+			s := parsed[j]
+			for i := range s {
+				op := &s[i]
+				if op.Blob != "" && f.canRead(op.Path) {
+					out[op.Blob] = struct{}{}
+				}
+			}
+		}
+		rs.putVisibleSHAs(fp, f.tag, out)
+		return out, nil
+	})
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.(map[string]struct{}), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	visibleSHACache.Store(key, out)
-	return out, nil
 }
 
 func (f pathFilter) visibleSHA(ctx context.Context, rs *RemoteSource, sha string) bool {
@@ -485,27 +556,12 @@ func (f pathFilter) visibleSHA(ctx context.Context, rs *RemoteSource, sha string
 	return ok
 }
 
-// visibleSHAs is the set of content addresses this account may fetch: every
-// blob named by an op it may read. Built once, for the doors that answer about
-// many shas (the store listing) rather than one.
-func (f pathFilter) visibleSHAs(ctx context.Context, rs *RemoteSource) (map[string]bool, error) {
-	shas, err := f.visibleSHASet(ctx, rs)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]bool, len(shas))
-	for sha := range shas {
-		out[sha] = true
-	}
-	return out, nil
-}
-
 // visibleChunks is every chunk named by a manifest this account may read.
 //
 // Chunks cannot be judged directly — a chunk's key is its own hash, never an
 // Op.Blob — so the only complete-and-leak-free answer is to expand the
 // manifests of the shas that ARE visible. Deliberately not folded into
-// visibleSHAs, which runs on every blob request: this fetches one object per
+// visibleSHASet, which runs on every blob request: this fetches one object per
 // visible large file, and only the store LISTING (i.e. `bdrive export`) ever
 // needs it.
 //
@@ -513,7 +569,7 @@ func (f pathFilter) visibleSHAs(ctx context.Context, rs *RemoteSource) (map[stri
 // failing the listing: its file is already unreadable by other means, and an
 // export that omits one file beats an export that errors.
 func (f pathFilter) visibleChunks(ctx context.Context, rs *RemoteSource) (map[string]bool, error) {
-	shas, err := f.visibleSHAs(ctx, rs)
+	shas, err := f.visibleSHASet(ctx, rs)
 	if err != nil {
 		return nil, err
 	}

@@ -340,18 +340,21 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 			want[path] = true
 		}
 		if len(want) > 0 {
-			ops, err := rs.loadSourcedOps(ctx)
+			journals, err := rs.loadSourcedJournals(ctx)
 			if err != nil {
 				return err
 			}
 			last := map[string]journal.Op{}
-			for _, so := range ops {
-				op := so.Op
-				if op.Kind != journal.KindDelete || !want[op.Path] {
-					continue
-				}
-				if prev, ok := last[op.Path]; !ok || journal.Less(prev, op) {
-					last[op.Path] = op
+			for j := range journals {
+				s := journals[j].Ops
+				for i := range s {
+					op := &s[i]
+					if op.Kind != journal.KindDelete || !want[op.Path] {
+						continue
+					}
+					if prev, ok := last[op.Path]; !ok || journal.Less(prev, *op) {
+						last[op.Path] = *op
+					}
 				}
 			}
 			for path := range want {

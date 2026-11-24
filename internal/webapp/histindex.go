@@ -2,19 +2,27 @@ package webapp
 
 import (
 	"context"
+	"encoding/hex"
+	"slices"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 )
 
+const (
+	histKindAdd uint8 = iota
+	histKindEdit
+	histKindDelete
+)
+
 type histIndex struct {
-	all      []sourcedOp
-	kinds    []string
+	sources  []sourcedJournal // borrows jcache slices (+ any incremental tails)
+	order    []opRef          // sorted by journal.Less
+	kinds    []uint8
 	prevs    []string
-	byTime   []int32
+	byTime   []int32 // indices into order, sorted by histLess
 	journals map[string]ckptJournalMeta
 	exists   map[string]bool
 	last     map[string]string
@@ -23,25 +31,66 @@ type histIndex struct {
 	moves     moveIndex
 }
 
+func (x *histIndex) len() int { return len(x.order) }
+
+func (x *histIndex) opAt(i int) (*journal.Op, string) {
+	ref := x.order[i]
+	sj := &x.sources[ref.j]
+	return &sj.Ops[ref.i], sj.From
+}
+
+func (x *histIndex) kindAt(i int) string {
+	switch x.kinds[i] {
+	case histKindAdd:
+		return "add"
+	case histKindEdit:
+		return "edit"
+	case histKindDelete:
+		return "delete"
+	default:
+		return ""
+	}
+}
+
 func (x *histIndex) moveIndex() moveIndex {
 	x.movesOnce.Do(func() {
-		ops := make([]journal.Op, len(x.all))
-		for i, sop := range x.all {
-			ops[i] = sop.Op
-		}
-		x.moves = buildMoveIndex(ops)
+		x.moves = buildMoveIndexFrom(len(x.order), func(i int) *journal.Op {
+			ref := x.order[i]
+			return &x.sources[ref.j].Ops[ref.i]
+		})
 	})
 	return x.moves
 }
 
-func buildHistIndex(all []sourcedOp) *histIndex {
-	sort.SliceStable(all, func(i, j int) bool { return journal.Less(all[i].Op, all[j].Op) })
-	kinds := make([]string, len(all), len(all)+512)
-	prevs := make([]string, len(all), len(all)+512)
-	exists := make(map[string]bool, min(len(all), 65536))
-	last := make(map[string]string, min(len(all), 65536))
-	for i, so := range all {
-		op := so.Op
+func buildHistIndex(sources []sourcedJournal) *histIndex {
+	n := 0
+	for j := range sources {
+		n += len(sources[j].Ops)
+	}
+	order := make([]opRef, 0, n)
+	for j := range sources {
+		ops := sources[j].Ops
+		for i := range ops {
+			order = append(order, opRef{j: int32(j), i: int32(i)})
+		}
+	}
+	slices.SortStableFunc(order, func(a, b opRef) int {
+		oa, ob := &sources[a.j].Ops[a.i], &sources[b.j].Ops[b.i]
+		switch {
+		case journal.Less(*oa, *ob):
+			return -1
+		case journal.Less(*ob, *oa):
+			return 1
+		}
+		return 0
+	})
+
+	kinds := make([]uint8, len(order))
+	prevs := make([]string, len(order))
+	exists := make(map[string]bool, min(len(order), 65536))
+	last := make(map[string]string, min(len(order), 65536))
+	for i, ref := range order {
+		op := &sources[ref.j].Ops[ref.i]
 		if op.Kind != journal.KindDelete || exists[op.Path] {
 			prevs[i] = last[op.Path]
 		}
@@ -50,23 +99,31 @@ func buildHistIndex(all []sourcedOp) *histIndex {
 		}
 		switch {
 		case op.Kind == journal.KindDelete:
-			kinds[i] = "delete"
+			kinds[i] = histKindDelete
 			exists[op.Path] = false
 		case exists[op.Path]:
-			kinds[i] = "edit"
+			kinds[i] = histKindEdit
 		default:
-			kinds[i] = "add"
+			kinds[i] = histKindAdd
 			exists[op.Path] = true
 		}
 	}
-	byTime := make([]int32, len(all))
+	byTime := make([]int32, len(order))
 	for i := range byTime {
 		byTime[i] = int32(i)
 	}
 	sort.Slice(byTime, func(i, j int) bool {
-		return histLess(all[byTime[i]].Op, all[byTime[j]].Op)
+		ra, rb := order[byTime[i]], order[byTime[j]]
+		return histLess(sources[ra.j].Ops[ra.i], sources[rb.j].Ops[rb.i])
 	})
-	return &histIndex{all: all, kinds: kinds, prevs: prevs, byTime: byTime, exists: exists, last: last}
+	return &histIndex{sources: sources, order: order, kinds: kinds, prevs: prevs, byTime: byTime, exists: exists, last: last}
+}
+
+func cMatchesMeta(c cachedJournal, m ckptJournalMeta) bool {
+	if m.PrefixSHA256 == "" || c.size != m.Size || !c.mod.Equal(m.ModTime) || len(c.ops) != m.Ops {
+		return false
+	}
+	return hex.EncodeToString(c.rawPrefixHash[:]) == m.PrefixSHA256
 }
 
 func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remote.Object) (*histIndex, bool) {
@@ -78,73 +135,115 @@ func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remot
 	if !ok || !grew {
 		return nil, false
 	}
-	var tailAll []sourcedOp
+	baseSources := len(prev.sources)
+	var tailSources []sourcedJournal
+	var tailRefs []opRef
 	for i, o := range keep {
 		if len(tails[i]) == 0 {
 			continue
 		}
-		from := strings.TrimSuffix(strings.TrimPrefix(o.Key, "journal/"), ".jsonl")
-		for _, op := range tails[i] {
-			tailAll = append(tailAll, sourcedOp{Op: op, From: from})
+		jIdx := int32(baseSources + len(tailSources))
+		tailOps := tails[i][:len(tails[i]):len(tails[i])]
+		tailSources = append(tailSources, sourcedJournal{
+			From: journalDevice(o.Key),
+			Ops:  tailOps,
+		})
+		for k := range tailOps {
+			tailRefs = append(tailRefs, opRef{j: jIdx, i: int32(k)})
 		}
 	}
-	if len(tailAll) == 0 {
+	if len(tailRefs) == 0 {
 		return nil, false
 	}
-	sort.SliceStable(tailAll, func(i, j int) bool { return journal.Less(tailAll[i].Op, tailAll[j].Op) })
-	if len(prev.all) > 0 && !journal.Less(prev.all[len(prev.all)-1].Op, tailAll[0].Op) {
-		return nil, false
+	slices.SortStableFunc(tailRefs, func(a, b opRef) int {
+		oa := &tailSources[int(a.j)-baseSources].Ops[a.i]
+		ob := &tailSources[int(b.j)-baseSources].Ops[b.i]
+		switch {
+		case journal.Less(*oa, *ob):
+			return -1
+		case journal.Less(*ob, *oa):
+			return 1
+		}
+		return 0
+	})
+	baseLen := len(prev.order)
+	if baseLen > 0 {
+		lastPrev, _ := prev.opAt(baseLen - 1)
+		firstTail := &tailSources[int(tailRefs[0].j)-baseSources].Ops[tailRefs[0].i]
+		if !journal.Less(*lastPrev, *firstTail) {
+			return nil, false
+		}
 	}
 
-	// Take exclusive ownership of prev.exists and prev.last so no map clone is needed
+	// Take exclusive ownership of prev.exists and prev.last only after all
+	// fallible guards succeed so a fallback keeps prev reusable.
 	exists, last := prev.exists, prev.last
 	prev.exists, prev.last = nil, nil
 
-	baseLen := len(prev.all)
-	totalLen := baseLen + len(tailAll)
-	// Three-index slice on prev.all/kinds/prevs so appending allocates Only if cap is exceeded,
-	// or if spare capacity exists, writes only into [baseLen:totalLen] beyond prev's length.
-	all := make([]sourcedOp, totalLen)
-	copy(all, prev.all[:baseLen])
-	copy(all[baseLen:], tailAll)
-	kinds := make([]string, len(tailAll))
-	prevs := make([]string, len(tailAll))
-	tailIdx := make([]int32, len(tailAll))
-	for j, so := range tailAll {
-		op := so.Op
+	sources := make([]sourcedJournal, baseSources+len(tailSources))
+	copy(sources, prev.sources)
+	copy(sources[baseSources:], tailSources)
+	// Re-anchor base journal slices onto jcache's latest slice when prefixes
+	// match so an incremental append does not pin old grown arrays in heap.
+	r.jmu.Lock()
+	for j := range baseSources {
+		key := sources[j].Key
+		if key == "" {
+			continue
+		}
+		oldLen := len(sources[j].Ops)
+		c, has := r.jcache[key]
+		if !has || len(c.ops) < oldLen {
+			continue
+		}
+		if cMatchesMeta(c, updatedMeta[key]) || cMatchesMeta(c, prev.journals[key]) {
+			sources[j].Ops = c.ops[:oldLen:oldLen]
+		}
+	}
+	r.jmu.Unlock()
+
+	totalLen := baseLen + len(tailRefs)
+	order := make([]opRef, totalLen)
+	copy(order, prev.order)
+	copy(order[baseLen:], tailRefs)
+
+	kinds := make([]uint8, totalLen)
+	copy(kinds, prev.kinds)
+	prevs := make([]string, totalLen)
+	copy(prevs, prev.prevs)
+	tailIdx := make([]int32, len(tailRefs))
+	for j, ref := range tailRefs {
+		op := &sources[ref.j].Ops[ref.i]
+		idx := baseLen + j
 		if op.Kind != journal.KindDelete || exists[op.Path] {
-			prevs[j] = last[op.Path]
+			prevs[idx] = last[op.Path]
 		}
 		if op.Kind != journal.KindDelete {
 			last[op.Path] = op.Blob
 		}
 		switch {
 		case op.Kind == journal.KindDelete:
-			kinds[j] = "delete"
+			kinds[idx] = histKindDelete
 			exists[op.Path] = false
 		case exists[op.Path]:
-			kinds[j] = "edit"
+			kinds[idx] = histKindEdit
 		default:
-			kinds[j] = "add"
+			kinds[idx] = histKindAdd
 			exists[op.Path] = true
 		}
-		tailIdx[j] = int32(baseLen + j)
+		tailIdx[j] = int32(idx)
 	}
-	fullKinds := make([]string, totalLen)
-	copy(fullKinds, prev.kinds[:baseLen])
-	copy(fullKinds[baseLen:], kinds)
-	fullPrevs := make([]string, totalLen)
-	copy(fullPrevs, prev.prevs[:baseLen])
-	copy(fullPrevs[baseLen:], prevs)
 
 	sort.Slice(tailIdx, func(i, j int) bool {
-		return histLess(all[tailIdx[i]].Op, all[tailIdx[j]].Op)
+		ra, rb := order[tailIdx[i]], order[tailIdx[j]]
+		return histLess(sources[ra.j].Ops[ra.i], sources[rb.j].Ops[rb.i])
 	})
-	// Merge sorted tailIdx (length K) and sorted prev.byTime (length baseLen) in O(N + K)
+	// Merge sorted tailIdx (length K) and sorted prev.byTime (length baseLen) in O(N + K).
 	byTime := make([]int32, 0, totalLen)
 	ti, pi := 0, 0
 	for ti < len(tailIdx) && pi < len(prev.byTime) {
-		if histLess(all[tailIdx[ti]].Op, all[prev.byTime[pi]].Op) {
+		ra, rb := order[tailIdx[ti]], order[prev.byTime[pi]]
+		if histLess(sources[ra.j].Ops[ra.i], sources[rb.j].Ops[rb.i]) {
 			byTime = append(byTime, tailIdx[ti])
 			ti++
 		} else {
@@ -156,7 +255,7 @@ func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remot
 	byTime = append(byTime, prev.byTime[pi:]...)
 
 	return &histIndex{
-		all: all, kinds: fullKinds, prevs: fullPrevs, byTime: byTime,
+		sources: sources, order: order, kinds: kinds, prevs: prevs, byTime: byTime,
 		journals: updatedMeta, exists: exists, last: last,
 	}, true
 }
@@ -184,21 +283,15 @@ func (r *RemoteSource) historyIndex(ctx context.Context) (*histIndex, error) {
 				histCache.put(r, fp, inc)
 				return histFlightResult{fp: fp, x: inc}, nil
 			}
-			all, err := r.sourcedOpsOf(context.WithoutCancel(ctx), keep)
+			sources, err := r.sourcedJournalsOf(context.WithoutCancel(ctx), keep)
 			if err != nil {
 				return nil, err
 			}
 			jmeta, _ := r.journalMetaFromCache(keep)
-			if int64(len(all))*histOpBytes+hubCaches.heldJournals(r) > hubCaches.limitBytes() {
-				r.jmu.Lock()
-				jgen := r.jgen
-				r.jmu.Unlock()
-				r.dropJournals(jgen)
-			}
 			// Drop the previous histIndex before allocating the new one so two full
 			// indexes for the same project never coexist in memory.
 			histCache.clearSource(r)
-			x := buildHistIndex(all)
+			x := buildHistIndex(sources)
 			x.journals = jmeta
 			histCache.put(r, fp, x)
 			return histFlightResult{fp: fp, x: x}, nil
@@ -216,7 +309,7 @@ func (r *RemoteSource) historyIndex(ctx context.Context) (*histIndex, error) {
 	}
 }
 
-const histOpBytes = 400
+const histOpBytes = 64
 
 type histEntry struct {
 	fp  string
@@ -238,7 +331,7 @@ func (c *histLRU) get(src *RemoteSource, fp string) *histIndex {
 	if !ok || e.fp != fp {
 		return nil
 	}
-	hubCaches.touch(src, historyCache)
+	hubCaches.touch(src, historyCache, journalCache)
 	return e.x
 }
 
@@ -259,7 +352,7 @@ func (c *histLRU) clearSource(src *RemoteSource) {
 
 func (c *histLRU) put(src *RemoteSource, fp string, x *histIndex) {
 	c.mu.Lock()
-	gen, evict := hubCaches.charge(src, historyCache, int64(len(x.all))*histOpBytes)
+	gen, evict := hubCaches.charge(src, historyCache, int64(len(x.order))*histOpBytes)
 	c.entries[src] = &histEntry{fp: fp, x: x, gen: gen}
 	c.mu.Unlock()
 	dropEvicted(evict)

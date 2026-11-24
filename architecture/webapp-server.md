@@ -158,56 +158,68 @@ classDiagram
         -sealed sync.Map sha→proved immutable
         -jcache map key→cachedJournal
         -jbytes int64 raw bytes cached
-        -loadSourcedOps(ctx) []sourcedOp
+        -vshaCache map tag→vshaEntry bounded visible-SHA cache
+        -loadSourcedJournals(ctx) []sourcedJournal
+        -sourcedJournalsOf(ctx, keep) []sourcedJournal
         -listJournals(ctx) []remote.Object
         -parsedJournals(ctx, keep) [][]journal.Op
         -cacheJournals(keep, misses, parsed, sizes)
         -foldFP/foldFiles/foldMoves last fold
         -foldCov *seqCoverage, installed with foldFiles
-        -flight / jflight singleflight.Group fold, history, and per-journal parse
+        -flight / jflight singleflight.Group fold, history, visibleSHASet, and per-journal parse
         -jgen hubCaches generation of jcache
         -dropJournals(gen) when hubCaches evicts that generation
         +FilesWithMoves(ctx) files, moves
         -filesMovesCoverage(ctx) files, moves, coverage from one fold
+        -filesMovesCoverageFor(ctx, keep) fold from a pre-listed journal set
         -appendOp(ctx, op)
         -appendOps(ctx, ops) ONE read-modify-write
         -appendOpsIf(ctx, ops, base) held to a commitBase
     }
     class commitBase {
         path, sha read, blob written
-        +holds(all ops) staleWriteError
+        +holdsJournals(journals, extra) staleWriteError
     }
-    note for commitBase "The version of one path a write was built on: the If-Match the upload door was sent, by the browser editor and by MCP write (given a sha) and edit (always, the version it read). appendOpsIf checks it against the fold of the journals the op is about to land on, inside the compare-and-swap loop and again on every retry — the handler's own check reads this process's snapshot, which a write from another hub process can postdate. A path that no longer resolves holds, as at the handler; finding the written blob already there is no conflict. A stale base is a 409 carrying the sha that replaced it"
-    class sourcedOp {
-        +Op journal.Op
+    note for commitBase "The version of one path a write was built on: the If-Match the upload door was sent, by the browser editor and by MCP write (given a sha) and edit (always, the version it read). appendOpsIf checks only the target path(s) across borrowed journal slices and unseen local existing ops inside the compare-and-swap loop and again on every retry — the handler's own check reads this process's snapshot, which a write from another hub process can postdate. A path that no longer resolves holds, as at the handler; finding the written blob already there is no conflict. A stale base is a 409 carrying the sha that replaced it"
+    class sourcedJournal {
+        +Key journal object key
         +From journal key's device
+        +Ops []journal.Op borrowed read-only
+    }
+    class opRef {
+        +j int32
+        +i int32
     }
     class cachedJournal {
         +size int64
         +mod time.Time
         +bytes int64
-        +ops []journal.Op
+        +ops []journal.Op cap == len
     }
-    note for cachedJournal "Journals only GROW — a device appends only to its own, and appendOp rewrites its key with strictly more bytes — so the (Size, Modified) List already reports proves a parse is still current. That is why the cache needs no expiry and no new Backend method: loadSourcedOps still Lists on every request, and fetches only the keys whose size or mtime moved (concurrently, limit 8). History used to re-download and re-parse EVERY journal per page, which is what made it 8-10s and made paging cost more rather than less. Bounded by a per-project raw-byte cap with all-or-nothing eviction"
-    note for RemoteSource "FilesWithMoves reuses the last fold when the journal listing (key, size, modified) is unchanged — journals only grow and replay is deterministic, so an idle project's refresh is one List. Otherwise byPathOrder groups ops by path and sorts each group by journal.Less instead of sorting the whole project: the last writer per path and the move pairing depend only on one path's own order, so the answer is the global sort's"
+    note for cachedJournal "Journals only GROW — a device appends only to its own, and appendOp rewrites its key with strictly more bytes — so the (Size, Modified) List already reports proves a parse is still current. That is why the cache needs no expiry and no new Backend method: loadSourcedJournals still Lists on every request, and fetches only the keys whose size or mtime moved (concurrently, limit 8), returning read-only views over the cached slices without copying ops per request"
+    note for RemoteSource "FilesWithMoves reuses the last fold when the journal listing (key, size, modified) is unchanged — journals only grow and replay is deterministic, so an idle project's refresh is one List. Otherwise foldParsedJournals links opRefs per path, reverses to forward journal order, and stably sorts each path's slice by journal.Less instead of copying or sorting the whole project: the last writer per path and the move pairing depend only on one path's own order, so the answer is the global sort's"
     class histIndex {
-        +all []sourcedOp in journal.Less order
-        +kinds add/edit/delete
+        +sources []sourcedJournal borrowed slices
+        +order []opRef in journal.Less order
+        +kinds []uint8 add/edit/delete
         +prevs replaced blob
-        +moveIndex() built on first use
+        +byTime []int32
+        +moveIndex() built on first use via opRef
     }
     RemoteSource ..> histIndex : historyIndex, per journal fingerprint
+    histIndex ..> sourcedJournal : borrows jcache slices
+    histIndex ..> opRef : orders without copying Ops
     class cacheBudget {
         -limit int64 GOMEMLIMIT/4, else 256 MiB
         -entries map (source, kind)→bytes, last use
         +charge(src, kind, bytes) gen, evicted caches of other sources
-        +touch(src, kind)
+        +touch(src, kinds...)
     }
     RemoteSource ..> cacheBudget : hubCaches.charge after each journal pass
-    histLRU ..> cacheBudget : charge per index, touch per hit
-    note for cacheBudget "cachebudget.go — one memory budget for both kinds of per-project cache: parsed journals (raw journal bytes) and history indexes (histOpBytes per op), each entry keyed by (source, kind). Over budget, the least recently used caches of OTHER projects are dropped, whichever kind; a drop names the generation it evicted, so a cache rebuilt and charged again in the meantime is left alone; the project being served is never evicted to make room for itself, since its fold needs every op in memory either way"
-    note for histIndex "histindex.go — everything the history feed derives that does not depend on who asks, built once per journal state and shared read-only by every request until a journal grows. Concurrent requests for one journal state share one build (RemoteSource.flight). Each index is charged to hubCaches (histOpBytes per op), the same budget as parsed journals, and histLRU only holds what that budget keeps; the index just built is always kept, however large, and an evicted project rebuilds on its next request. Requests keep only the per-reader work: the folder filter, the path/prefix match, the page"
-    note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
+    histLRU ..> cacheBudget : charge per index, touch both caches per hit
+    note for cacheBudget "cachebudget.go — one memory budget for both kinds of per-project cache: parsed journals (raw journal bytes) and history indexes (histOpBytes per op), each entry keyed by (source, kind). Because histIndex borrows jcache's []journal.Op slices, hits refresh both kinds and eviction drops a positive-byte historyCache before journalCache on the same source (and cascades empty history entries with journalCache) so dropJournals actually frees the backing arrays; a drop names the generation it evicted, so a cache rebuilt and charged again in the meantime is left alone"
+    note for histIndex "histindex.go — everything the history feed derives that does not depend on who asks, built once per journal state without copying journal.Op structs and shared read-only by every request until a journal grows. Incremental tails append a tail sourcedJournal, extend opRef/kinds/prevs/byTime without mutating prev, and re-anchor base slices onto jcache when prefixes match. Concurrent requests for one journal state share one build (RemoteSource.flight). Each index is charged to hubCaches (histOpBytes per op), the same budget as parsed journals, and histLRU only holds what that budget keeps. Requests keep only the per-reader work: the folder filter, the path/prefix match, the page"
+    note for sourcedJournal "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
     note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
     note for RemoteSource "reassemble is delta sync's whole backward-compatibility story: when blobs/sha is absent (or fails verify), the manifest under manifests/sha names content-defined chunks that concatenate to the blob — spool, hash-verify against the sha requested, BACKFILL blobs/sha (best-effort; a failed write never fails the read), serve. Old clients ask for whole blobs and never learn anything changed; a hostile whole blob that fails verify is HEALED by the backfill when an honest manifest exists. Bounded by maxReassembleBytes (256 MiB) on the manifest's DECLARED sum, with each chunk's copy capped at its declared size — a member-written manifest is the one non-content-addressed object in the key space, so an amplified or oversized one is refused before it can spool"
     class MoveSource {
@@ -217,6 +229,7 @@ classDiagram
     class moveIndex {
         <<map path→[]pathEvent>>
         +buildMoveIndex(sorted ops)
+        +buildMoveIndexFrom(n, at) zero-copy index walk
         +resolveForward(idx, files, p) viewer
         +resolveShare(idx, files, p, since) /s/
         +chainSegments(idx, p) []segment
@@ -237,13 +250,13 @@ classDiagram
         +needle user actor device
         +since until
         +parseHistFilter(query) histFilter
-        +keep(sourcedOp) bool
+        +keepOp(op, from) bool
     }
     class histDay {
         +Date YYYY-MM-DD in the reader's zone
         +Agent, Human counts
     }
-    note for histFilter "The reader filters shared by GET history and GET history/summary. actor=agent means op.Session != &quot;&quot; — only the agent hook sets a session, while a note is anyone's to write. device= matches sourcedOp.From (the journal the op was read from), never op.Device. history/summary answers the Activity header in one pass over the ops the feed already loads: totals plus one histDay per calendar day in the reader's tz (IANA ?tz=, else ?offset= minutes): the last days=1..31, or the days since=/until= touch (latest 31 kept), with the bounds applied to the counts as in the feed (all=1 totals the whole history while the bars keep their window, for an All time feed); each history entry also carries prev, the path's content before it, replayed over the whole journal so an off-page predecessor is still named (a delete of an already-absent path names none: it removed nothing), and seq, which with device.id names one op uniquely where the whole-second time cannot. GET history resolves device attribution only for the returned page, once per journal: the registry join re-checks its store on every lookup, so per-op attribution cost a database-backed hub a minute on a long feed. The browser never pages a week of history to draw seven bars"
+    note for histFilter "The reader filters shared by GET history and GET history/summary. actor=agent means op.Session != &quot;&quot; — only the agent hook sets a session, while a note is anyone's to write. device= matches sourcedJournal.From (the journal the op was read from), never op.Device. history/summary answers the Activity header in one pass over the ops the feed already loads: totals plus one histDay per calendar day in the reader's tz (IANA ?tz=, else ?offset= minutes): the last days=1..31, or the days since=/until= touch (latest 31 kept), with the bounds applied to the counts as in the feed (all=1 totals the whole history while the bars keep their window, for an All time feed); each history entry also carries prev, the path's content before it, replayed over the whole journal so an off-page predecessor is still named (a delete of an already-absent path names none: it removed nothing), and seq, which with device.id names one op uniquely where the whole-second time cannot. GET history resolves device attribution only for the returned page, once per journal: the registry join re-checks its store on every lookup, so per-op attribution cost a database-backed hub a minute on a long feed. The browser never pages a week of history to draw seven bars"
     histFilter ..> histDay : summary buckets
 
     class Uploader {
@@ -262,12 +275,12 @@ classDiagram
 
     class undoRunDoor {
         <<Server, POST /api/p/id/undo-run>>
-        planUndo(sourced, undoSel) undoPlan
+        planUndoJournals(journals, undoSel) undoPlan, files
         undoSel Device From-journal, Session xor Note
         undoPlan Ops, Actions, Skipped, After, Refused
         preview plan only, no write, no quota
     }
-    note for undoRunDoor "The run-wide form of restore+remove: for every path the run touched, the op that puts it back — a put at the pre-run blob, or a delete for a file the run created. Selection is by sourcedOp.From (the journal, which /store gates), NEVER op.Device, and the note form additionally requires Session == &quot;&quot; because runs.ts can never file a session-carrying op under a note-keyed card. Append-only: the run's own ops are never touched. Same PermWrite + CheckWrite(org,0) gates as its two siblings; the undo's ops carry a note naming the run, so the undo is itself a run card you can undo."
+    note for undoRunDoor "The run-wide form of restore+remove: for every path the run touched, the op that puts it back — a put at the pre-run blob, or a delete for a file the run created. Selection is by sourcedJournal.From (the journal, which /store gates), NEVER op.Device, and the note form additionally requires Session == &quot;&quot; because runs.ts can never file a session-carrying op under a note-keyed card. Append-only: the run's own ops are never touched. Same PermWrite + CheckWrite(org,0) gates as its two siblings; the undo's ops carry a note naming the run, so the undo is itself a run card you can undo."
 
     class journalDoor {
         <<Server, /api/p/id/store/*>>
@@ -573,7 +586,7 @@ classDiagram
         <<per-request read visibility>>
         resolved once, not per path
         +canRead(path)
-        +visibleSHA / visibleSHAs
+        +visibleSHA / visibleSHASet
         +tag scopeTag for cache keys
     }
     note for folderLevel "A rule may narrow OR widen a subtree of a project you can see — a read-only project with one writable drop-box is a real shape — but base none returns none unconditionally, so it can never open a project you cannot see. That arm is unreachable over HTTP today because proj() answers first; it exists because the filtered fold and the blob gate are NOT behind that gate."
@@ -967,8 +980,8 @@ classDiagram
     markdownRender ..> FrontmatterPair
     DeviceRegistry ..> DeviceInfo
     DeviceRegistry *-- devKey : (account, id)
-    RemoteSource ..> sourcedOp : attribution comes from the journal key
-    undoRunDoor ..> sourcedOp : selects a run by the journal it was read from
+    RemoteSource ..> sourcedJournal : attribution comes from the journal key
+    undoRunDoor ..> sourcedJournal : selects a run by the journal it was read from
     undoRunDoor ..> RemoteSource : appendOps — the whole run in one Put
     RemoteSource *-- cachedJournal : parsed ops, keyed on size+mtime
     ReadLedger ..> ReadStat
