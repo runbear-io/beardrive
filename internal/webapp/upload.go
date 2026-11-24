@@ -1588,11 +1588,11 @@ func (r *RemoteSource) appendConditionalExisting(ctx context.Context, cp remote.
 			key, prevMeta, prevSize, prevSHA, prevNL,
 			totalLen, fullSHA, endsWithNL, fullCRC, prevSize > 0,
 		)
-		var body io.Reader
+		var body io.ReadSeeker
 		if needNL {
-			body = io.MultiReader(bytes.NewReader(existing), bytes.NewReader([]byte{'\n'}), bytes.NewReader(line))
+			body = newBytesSlicesReader(existing, []byte{'\n'}, line)
 		} else {
-			body = io.MultiReader(bytes.NewReader(existing), bytes.NewReader(line))
+			body = newBytesSlicesReader(existing, line)
 		}
 		newMeta, err := putIfWithMeta(ctx, r.Backend, cp, key, body, totalLen, prevMeta.Version, putMeta)
 		if err == nil {
@@ -1652,11 +1652,11 @@ func (r *RemoteSource) appendLastWriterWins(ctx context.Context, key string, lin
 	if needNL {
 		totalLen++
 	}
-	var body io.Reader
+	var body io.ReadSeeker
 	if needNL {
-		body = io.MultiReader(bytes.NewReader(existing), bytes.NewReader([]byte{'\n'}), bytes.NewReader(line))
+		body = newBytesSlicesReader(existing, []byte{'\n'}, line)
 	} else {
-		body = io.MultiReader(bytes.NewReader(existing), bytes.NewReader(line))
+		body = newBytesSlicesReader(existing, line)
 	}
 	return r.Backend.Put(ctx, key, body, totalLen)
 }

@@ -1259,6 +1259,263 @@ func TestQA17_ConcurrentTailReadsAndAppendsRace(t *testing.T) {
 	}
 }
 
+func TestQA18_LegacyLargeOpOver16MiBPreservedAndProtected(t *testing.T) {
+	ctx := context.Background()
+	be := newTailTestMetaBackend(true)
+	db, err := OpenProjectDB(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _, err := db.GetOrCreate("qa18", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("legacy large note blob")
+	blob := qaHexSHA(content)
+	if err := be.Put(ctx, p.ID+"/blobs/"+blob, bytes.NewReader(content), int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	legacyLarge := journal.Op{
+		Seq: 1, Lamport: 1, Time: t0, Device: "dev1", User: "alice@example.com",
+		Kind: journal.KindPut, Path: "notes/legacy-large.md", Blob: blob,
+		Size: int64(len(content)), Mode: 0o644,
+		Note: strings.Repeat("n", (16<<20)+2048),
+	}
+	legacySmall := journal.Op{
+		Seq: 2, Lamport: 2, Time: t0.Add(time.Second), Device: "dev1", User: "alice@example.com",
+		Kind: journal.KindPut, Path: "notes/normal.md", Blob: blob,
+		Size: int64(len(content)), Mode: 0o644,
+	}
+	raw, err := journal.Marshal([]journal.Op{legacyLarge, legacySmall})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := putIfWithMeta(ctx, be, be, p.ID+"/journal/dev1.jsonl", bytes.NewReader(raw), int64(len(raw)), remote.VersionAbsent, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{Root: be, Projects: db, Upload: UploadConfig{Enabled: true}}
+	h := srv.Handler()
+	api := "/api/p/" + p.ID + "/"
+	_, v, err := srv.projectVolume(p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := v.source.(*RemoteSource)
+
+	// Upgrade read paths (Files + filteredJournal) must preserve >16 MiB valid legacy op.
+	files, err := rs.Files(ctx)
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	if _, ok := files["notes/legacy-large.md"]; !ok {
+		t.Fatalf("legacy >16MiB op disappeared on Files read (files=%d)", len(files))
+	}
+	filter := pathFilter{
+		project: Project{Folders: []FolderRule{{Prefix: "secret/", Default: PermNone}}},
+		email:   "bob@example.com",
+		base:    PermRead,
+		tag:     "bob",
+		on:      true,
+	}
+	if objs, err := rs.listJournals(ctx); err != nil || len(objs) != 1 {
+		t.Fatalf("listJournals: %d err=%v", len(objs), err)
+	} else if fdata, err := srv.filteredJournal(ctx, rs, objs[0], filter); err != nil || !bytes.Contains(fdata, []byte("notes/legacy-large.md")) {
+		t.Fatalf("filteredJournal dropped legacy >16MiB op: err=%v len=%d", err, len(fdata))
+	}
+
+	// PUT omitting legacy seq=1 op MUST be rejected 409 (journalKeepsOps cannot be bypassed).
+	droppingPut, _ := journal.Marshal([]journal.Op{legacySmall})
+	if rec := tailQARequest(t, h, http.MethodPut, api+"store/object?key=journal/dev1.jsonl", droppingPut, http.Header{"X-Bdrive-Device": {"dev1"}}); rec.Code != http.StatusConflict {
+		t.Fatalf("PUT dropping >16MiB legacy op got %d, want 409 Conflict: %s", rec.Code, rec.Body)
+	}
+
+	// Subsequent /store/append succeeds and preserves both the legacy >16 MiB op and new op.
+	tail, _ := journal.Marshal([]journal.Op{{
+		Seq: 3, Lamport: 3, Time: t0.Add(2 * time.Second), Device: "dev1", User: "alice@example.com",
+		Kind: journal.KindPut, Path: "notes/after-legacy.md", Blob: blob, Size: int64(len(content)), Mode: 0o644,
+	}})
+	u := fmt.Sprintf("%sstore/append?key=journal/dev1.jsonl&prev_size=%d&prev_sha256=%s", api, len(raw), qaHexSHA(raw))
+	if rec := tailQARequest(t, h, http.MethodPost, u, tail, http.Header{"X-Bdrive-Device": {"dev1"}}); rec.Code != http.StatusOK {
+		t.Fatalf("append after legacy >16MiB op: %d %s", rec.Code, rec.Body)
+	}
+	files2, err := rs.Files(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := files2["notes/legacy-large.md"]; !ok {
+		t.Fatal("legacy >16MiB op lost after subsequent append")
+	}
+	if _, ok := files2["notes/after-legacy.md"]; !ok {
+		t.Fatal("new appended op missing after legacy >16MiB op")
+	}
+}
+
+type webappS3StubObj struct {
+	data []byte
+	etag string
+	meta map[string]string
+}
+
+func TestQA19_S3HTTPAppendConditionalExistingAndBytesSlicesReader(t *testing.T) {
+	// 1. Unit tests for bytesSlicesReader io.ReadSeeker semantics.
+	r := newBytesSlicesReader(nil, []byte("hello"), []byte{}, []byte(" "), []byte("world"))
+	if n, err := r.Seek(0, io.SeekEnd); err != nil || n != 11 {
+		t.Fatalf("SeekEnd = (%d, %v), want (11, nil)", n, err)
+	}
+	if _, err := r.Seek(-1, io.SeekStart); err == nil {
+		t.Fatal("expected error for negative Seek")
+	}
+	if _, err := r.Seek(0, 99); err == nil {
+		t.Fatal("expected error for invalid whence")
+	}
+	if n, err := r.Seek(0, io.SeekStart); err != nil || n != 0 {
+		t.Fatalf("SeekStart = (%d, %v)", n, err)
+	}
+	firstRead, err := io.ReadAll(r)
+	if err != nil || string(firstRead) != "hello world" {
+		t.Fatalf("first read = (%q, %v)", firstRead, err)
+	}
+	if _, err := r.Seek(6, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	rewound, err := io.ReadAll(r)
+	if err != nil || string(rewound) != "world" {
+		t.Fatalf("rewound read = (%q, %v)", rewound, err)
+	}
+
+	// 2. End-to-end appendConditionalExisting and appendLastWriterWins over HTTP S3 stub.
+	var mu sync.Mutex
+	objs := map[string]webappS3StubObj{}
+	putFailuresLeft := 1 // force one HTTP 500 to test AWS SDK retry + body Seek rewind
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		key := strings.TrimPrefix(req.URL.Path, "/")
+		if i := strings.IndexByte(key, '/'); i >= 0 {
+			key = key[i+1:]
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch req.Method {
+		case http.MethodHead:
+			o, ok := objs[key]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("ETag", o.etag)
+			for k, v := range o.meta {
+				w.Header().Set("x-amz-meta-"+k, v)
+			}
+			w.Header().Set("Content-Length", strconv.Itoa(len(o.data)))
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			o, ok := objs[key]
+			if !ok {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `<Error><Code>NoSuchKey</Code><Message>missing</Message></Error>`)
+				return
+			}
+			w.Header().Set("ETag", o.etag)
+			for k, v := range o.meta {
+				w.Header().Set("x-amz-meta-"+k, v)
+			}
+			w.Header().Set("Content-Length", strconv.Itoa(len(o.data)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(o.data)
+		case http.MethodPut:
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if putFailuresLeft > 0 {
+				putFailuresLeft--
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `<Error><Code>InternalError</Code><Message>retry rewind</Message></Error>`)
+				return
+			}
+			cur, exists := objs[key]
+			if req.Header.Get("If-None-Match") == "*" && exists {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = io.WriteString(w, `<Error><Code>PreconditionFailed</Code><Message>exists</Message></Error>`)
+				return
+			}
+			if im := req.Header.Get("If-Match"); im != "" && (!exists || cur.etag != im) {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = io.WriteString(w, `<Error><Code>PreconditionFailed</Code><Message>mismatch</Message></Error>`)
+				return
+			}
+			meta := map[string]string{}
+			for k, vs := range req.Header {
+				if mk, ok := strings.CutPrefix(strings.ToLower(k), "x-amz-meta-"); ok && len(vs) > 0 {
+					meta[mk] = vs[0]
+				}
+			}
+			etag := fmt.Sprintf(`"%s"`, qaHexSHA(body)[:32])
+			objs[key] = webappS3StubObj{data: body, etag: etag, meta: meta}
+			w.Header().Set("ETag", etag)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "unsupported", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer ts.Close()
+
+	t.Setenv("AWS_ACCESS_KEY_ID", "testak")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "testsk")
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ENDPOINT_URL_S3", ts.URL)
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+	ctx := context.Background()
+	be, err := remote.Open(ctx, "s3://b/proj")
+	if err != nil {
+		t.Fatalf("remote.Open s3: %v", err)
+	}
+	defer be.Close()
+	cp, ok := be.(remote.ConditionalPutter)
+	if !ok {
+		t.Fatal("s3 backend does not implement ConditionalPutter")
+	}
+	rs := &RemoteSource{Backend: be}
+	line1 := []byte(`{"seq":1,"kind":"put","path":"a.md"}` + "\n")
+	line2 := []byte(`{"seq":2,"kind":"put","path":"b.md"}` + "\n")
+
+	if err := rs.appendConditionalExisting(ctx, cp, "journal/hub.jsonl", func(_ []byte) ([]byte, error) {
+		return line1, nil
+	}); err != nil {
+		t.Fatalf("HTTP S3 appendConditionalExisting initial: %v", err)
+	}
+	if err := rs.appendConditionalExisting(ctx, cp, "journal/hub.jsonl", func(_ []byte) ([]byte, error) {
+		return line2, nil
+	}); err != nil {
+		t.Fatalf("HTTP S3 appendConditionalExisting second: %v", err)
+	}
+	if err := rs.appendLastWriterWins(ctx, "journal/lww.jsonl", line1); err != nil {
+		t.Fatalf("HTTP S3 appendLastWriterWins initial: %v", err)
+	}
+	if err := rs.appendLastWriterWins(ctx, "journal/lww.jsonl", line2); err != nil {
+		t.Fatalf("HTTP S3 appendLastWriterWins second: %v", err)
+	}
+
+	mu.Lock()
+	hubData := objs["proj/journal/hub.jsonl"]
+	lwwData := objs["proj/journal/lww.jsonl"]
+	mu.Unlock()
+	wantCombined := append(append([]byte(nil), line1...), line2...)
+	if !bytes.Equal(hubData.data, wantCombined) || hubData.meta[journalAppendChainMetaKey] == "" {
+		t.Fatalf("HTTP S3 hub journal mismatch: len=%d want=%d meta=%+v", len(hubData.data), len(wantCombined), hubData.meta)
+	}
+	if !bytes.Equal(lwwData.data, wantCombined) {
+		t.Fatalf("HTTP S3 lww journal mismatch: len=%d want=%d", len(lwwData.data), len(wantCombined))
+	}
+}
+
 func BenchmarkJournalTailAppend(b *testing.B) {
 	ctx := context.Background()
 	be := newTailTestMetaBackend(true)

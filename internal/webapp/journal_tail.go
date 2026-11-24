@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"hash/crc32"
@@ -968,17 +969,16 @@ func (r *RemoteSource) readVerifiedJournalTailRaw(
 }
 
 // filterJournalReader streams raw journal bytes from r line-by-line without
-// buffering the whole journal, dropping lines > journal.MaxLineBytes or paths
-// hidden by f, while counting raw bytes and tracking the final raw byte.
+// buffering the whole journal in heap, dropping paths hidden by f while
+// counting raw bytes and tracking the final raw byte.
 func filterJournalReader(r io.Reader, f pathFilter) ([]byte, int64, bool, error) {
 	br := bufio.NewReaderSize(r, 64<<10)
 	var (
-		out       []byte
-		rawSize   int64
-		lastByte  byte
-		lineBuf   []byte
-		accum     bool
-		oversized bool
+		out      []byte
+		rawSize  int64
+		lastByte byte
+		lineBuf  []byte
+		accum    bool
 	)
 	hides := f.hides()
 	emitLine := func(lineWithNL []byte) {
@@ -1005,46 +1005,30 @@ func filterJournalReader(r io.Reader, f pathFilter) ([]byte, int64, bool, error)
 		}
 		switch err {
 		case nil:
-			if oversized {
-				oversized = false
-				accum = false
-				lineBuf = lineBuf[:0]
-				continue
-			}
 			if accum {
-				if len(lineBuf)+len(frag)-1 <= journal.MaxLineBytes {
-					lineBuf = append(lineBuf, frag...)
-					emitLine(lineBuf)
-				}
+				lineBuf = append(lineBuf, frag...)
+				emitLine(lineBuf)
 				accum = false
-				lineBuf = lineBuf[:0]
-			} else if len(frag)-1 <= journal.MaxLineBytes {
+				if cap(lineBuf) > 1<<20 {
+					lineBuf = nil
+				} else {
+					lineBuf = lineBuf[:0]
+				}
+			} else {
 				emitLine(frag)
 			}
 		case bufio.ErrBufferFull:
-			if oversized {
-				continue
-			}
 			if !accum {
 				accum = true
 				lineBuf = lineBuf[:0]
 			}
-			if len(lineBuf)+len(frag) > journal.MaxLineBytes {
-				oversized = true
-				lineBuf = nil
-				continue
-			}
 			lineBuf = append(lineBuf, frag...)
 		case io.EOF:
-			if !oversized {
-				if accum {
-					if len(lineBuf)+len(frag) <= journal.MaxLineBytes {
-						lineBuf = append(lineBuf, frag...)
-						emitLine(lineBuf)
-					}
-				} else if len(frag) > 0 && len(frag) <= journal.MaxLineBytes {
-					emitLine(frag)
-				}
+			if accum {
+				lineBuf = append(lineBuf, frag...)
+				emitLine(lineBuf)
+			} else if len(frag) > 0 {
+				emitLine(frag)
 			}
 			if out == nil {
 				out = []byte{}
@@ -1054,6 +1038,67 @@ func filterJournalReader(r io.Reader, f pathFilter) ([]byte, int64, bool, error)
 			return nil, 0, false, err
 		}
 	}
+}
+
+// bytesSlicesReader streams non-empty byte slices as a single io.ReadSeeker
+// without copying or concatenating them, allowing HTTP S3 payload hashing and
+// SDK retries to rewind cleanly.
+type bytesSlicesReader struct {
+	slices [][]byte
+	total  int64
+	pos    int64
+}
+
+func newBytesSlicesReader(parts ...[]byte) *bytesSlicesReader {
+	var kept [][]byte
+	var total int64
+	for _, p := range parts {
+		if len(p) > 0 {
+			kept = append(kept, p)
+			total += int64(len(p))
+		}
+	}
+	return &bytesSlicesReader{slices: kept, total: total}
+}
+
+func (r *bytesSlicesReader) Read(p []byte) (int, error) {
+	if r.pos >= r.total {
+		return 0, io.EOF
+	}
+	off := r.pos
+	idx := 0
+	for idx < len(r.slices) && off >= int64(len(r.slices[idx])) {
+		off -= int64(len(r.slices[idx]))
+		idx++
+	}
+	copied := 0
+	for copied < len(p) && idx < len(r.slices) {
+		n := copy(p[copied:], r.slices[idx][off:])
+		copied += n
+		r.pos += int64(n)
+		idx++
+		off = 0
+	}
+	return copied, nil
+}
+
+func (r *bytesSlicesReader) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = r.pos + offset
+	case io.SeekEnd:
+		abs = r.total + offset
+	default:
+		return 0, errors.New("bytesSlicesReader.Seek: invalid whence")
+	}
+	if abs < 0 {
+		return 0, errors.New("bytesSlicesReader.Seek: negative position")
+	}
+	r.pos = abs
+	return abs, nil
 }
 
 func readVersionedWithMeta(ctx context.Context, be remote.Backend, cp remote.ConditionalPutter, key string) (io.ReadCloser, remote.ObjectMeta, error) {

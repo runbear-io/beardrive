@@ -19,7 +19,9 @@ func TestParseReaderParityCapAndFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oversizedValid, err := Marshal([]Op{secpkgOp(99, "huge/"+strings.Repeat("x", MaxLineBytes+1024)+".md")})
+	largeNote := secpkgOp(99, "notes/large-note.md")
+	largeNote.Note = strings.Repeat("x", (16<<20)+1024)
+	largeLine, err := Marshal([]Op{largeNote})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,12 +38,11 @@ func TestParseReaderParityCapAndFailClosed(t *testing.T) {
 		"blank-lines":    []byte("\n   \n\t\n"),
 		"normal+raw":     append(append([]byte(nil), good1...), good2...),
 		"corrupt-middle": bytes.Join([][]byte{good1, []byte("{corrupt\n"), good2}, nil),
-		"oversized-skip": bytes.Join([][]byte{good1, oversizedValid, good2}, nil),
+		"large-note>16m": bytes.Join([][]byte{good1, largeLine, good2}, nil),
 		"forged-pathraw": bytes.Join([][]byte{good1, []byte(forgedPathRaw), good2}, nil),
 		"unknown-kind":   bytes.Join([][]byte{good1, []byte(unknownKind), good2}, nil),
 		"unterminated":   append(append([]byte(nil), good1...), unterminated...),
-		"unterm-oversized": append(append([]byte(nil), good1...),
-			bytes.TrimSuffix(oversizedValid, []byte("\n"))...),
+		"unterm-large":   append(append([]byte(nil), good1...), bytes.TrimSuffix(largeLine, []byte("\n"))...),
 	}
 
 	for name, data := range cases {
@@ -58,19 +59,19 @@ func TestParseReaderParityCapAndFailClosed(t *testing.T) {
 				return
 			}
 			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("ParseReader mismatch vs Parse:\ngot:  %+v\nwant: %+v", got, want)
+				t.Fatalf("ParseReader mismatch vs Parse:\ngot:  %d ops\nwant: %d ops", len(got), len(want))
 			}
 		})
 	}
 
-	t.Run("oversized-valid-op-is-skipped-by-both", func(t *testing.T) {
-		ops1, _ := Parse(oversizedValid)
-		ops2, err := ParseReader(bytes.NewReader(oversizedValid))
+	t.Run("large-op-over-16MiB-preserved", func(t *testing.T) {
+		ops1, _ := Parse(largeLine)
+		ops2, err := ParseReader(bytes.NewReader(largeLine))
 		if err != nil {
-			t.Fatalf("ParseReader oversized error: %v", err)
+			t.Fatalf("ParseReader error: %v", err)
 		}
-		if len(ops1) != 0 || len(ops2) != 0 {
-			t.Fatalf("expected oversized valid op (> %d) to be skipped by both: Parse=%d ParseReader=%d", MaxLineBytes, len(ops1), len(ops2))
+		if len(ops1) != 1 || len(ops2) != 1 || ops1[0].Note != largeNote.Note || ops2[0].Note != largeNote.Note {
+			t.Fatalf("large >16MiB op not preserved: Parse=%d ParseReader=%d", len(ops1), len(ops2))
 		}
 	})
 
@@ -85,31 +86,21 @@ func TestParseReaderParityCapAndFailClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("multi-buffer-and-exact-MaxLineBytes-boundary", func(t *testing.T) {
+	t.Run("multi-buffer-line", func(t *testing.T) {
 		multiBuf, err := Marshal([]Op{secpkgOp(10, "notes/"+strings.Repeat("a", 128<<10)+".md")})
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Exact MaxLineBytes line (without trailing '\n').
-		prefix := `{"seq":11,"kind":"put","path":"notes/`
-		suffix := `"}`
-		padLen := MaxLineBytes - len(prefix) - len(suffix)
-		exactBoundary := []byte(prefix + strings.Repeat("b", padLen) + suffix)
-		if len(exactBoundary) != MaxLineBytes {
-			t.Fatalf("exactBoundary len=%d want=%d", len(exactBoundary), MaxLineBytes)
+		want, err := Parse(multiBuf)
+		if err != nil || len(want) != 1 {
+			t.Fatalf("Parse multiBuf: len=%d err=%v", len(want), err)
 		}
-		data := append(append([]byte(nil), multiBuf...), exactBoundary...)
-		data = append(data, '\n')
-		want, err := Parse(data)
-		if err != nil || len(want) != 2 {
-			t.Fatalf("Parse boundary: len=%d err=%v", len(want), err)
-		}
-		got, err := ParseReader(bytes.NewReader(data))
+		got, err := ParseReader(bytes.NewReader(multiBuf))
 		if err != nil {
-			t.Fatalf("ParseReader boundary: %v", err)
+			t.Fatalf("ParseReader multiBuf: %v", err)
 		}
 		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("ParseReader boundary mismatch: got=%+v want=%+v", got, want)
+			t.Fatalf("ParseReader multiBuf mismatch: got=%+v want=%+v", got, want)
 		}
 	})
 }

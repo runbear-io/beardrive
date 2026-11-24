@@ -356,6 +356,17 @@ func TestS3BackendRangeVersionedAndMetadata(t *testing.T) {
 	stub.forceOversizedRange = false
 	stub.mu.Unlock()
 
+	// HTTP S3 Put/PutIfWithMeta require io.Seeker for AWS SDK payload signing rewind:
+	// an unseekable reader fails, whereas a custom io.ReadSeeker succeeds.
+	unseekable := io.MultiReader(strings.NewReader("prefix\n"), strings.NewReader("tail\n"))
+	if _, err := be.PutIfWithMeta(ctx, "journal/unseek.jsonl", unseekable, 12, VersionAbsent, nil); err == nil {
+		t.Fatal("expected unseekable io.MultiReader to fail on HTTP S3 PutIfWithMeta")
+	}
+	seekable := strings.NewReader("prefix\ntail\n")
+	if om2, err := be.PutIfWithMeta(ctx, "journal/seek.jsonl", seekable, 12, VersionAbsent, nil); err != nil || om2.Version == "" {
+		t.Fatalf("seekable PutIfWithMeta failed on HTTP S3: %+v err=%v", om2, err)
+	}
+
 	// Missing key maps to remote.IsNotExist.
 	if _, _, err := be.GetVersionedRangeWithMeta(ctx, "journal/missing.jsonl", 0, -1); !IsNotExist(err) {
 		t.Fatalf("missing S3 key = %v, want IsNotExist", err)

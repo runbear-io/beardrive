@@ -28,11 +28,6 @@ import (
 
 const MaxValidLamport = int64(1) << 62
 
-// MaxLineBytes bounds a single JSONL journal line accepted by Parse and
-// ParseReader. Keeping one limit across both prevents parser-differential
-// bypasses between streaming ingest checks and full-buffer reads.
-const MaxLineBytes = 16 << 20
-
 const (
 	KindPut    = "put"
 	KindDelete = "delete"
@@ -391,9 +386,6 @@ func internStr(m map[string]string, s string) string {
 }
 
 func parseOpLine(raw []byte, intern map[string]string) (Op, bool) {
-	if len(raw) > MaxLineBytes {
-		return Op{}, false
-	}
 	line := bytes.TrimSpace(raw)
 	if len(line) == 0 {
 		return Op{}, false
@@ -559,8 +551,8 @@ func Parse(data []byte) ([]Op, error) {
 }
 
 // ParseReader streams a JSONL journal from r without buffering the whole
-// input in memory. Invalid, incomplete, or >MaxLineBytes lines are skipped to
-// match Parse, while any non-EOF read error fails closed.
+// input in memory. Invalid and incomplete lines are skipped to match Parse,
+// while any non-EOF read error fails closed.
 func ParseReader(r io.Reader) ([]Op, error) {
 	return ParseReaderSized(r, 0)
 }
@@ -581,67 +573,46 @@ func ParseReaderSized(r io.Reader, sizeHint int64) ([]Op, error) {
 	intern := make(map[string]string, 1024)
 	br := bufio.NewReaderSize(r, 64<<10)
 	var (
-		lineBuf   []byte
-		accum     bool
-		oversized bool
+		lineBuf []byte
+		accum   bool
 	)
 	for {
 		frag, err := br.ReadSlice('\n')
 		switch err {
 		case nil:
-			if oversized {
-				oversized = false
-				accum = false
-				lineBuf = lineBuf[:0]
-				continue
-			}
 			var raw []byte
 			if accum {
-				if len(lineBuf)+len(frag)-1 <= MaxLineBytes {
-					lineBuf = append(lineBuf, frag[:len(frag)-1]...)
-					raw = lineBuf
-				}
+				lineBuf = append(lineBuf, frag[:len(frag)-1]...)
+				raw = lineBuf
 				accum = false
 			} else {
 				raw = frag[:len(frag)-1]
 			}
-			if raw != nil {
-				if op, ok := parseOpLine(raw, intern); ok {
-					ops = append(ops, op)
-				}
+			if op, ok := parseOpLine(raw, intern); ok {
+				ops = append(ops, op)
 			}
-			if lineBuf != nil {
+			if cap(lineBuf) > 1<<20 {
+				lineBuf = nil
+			} else if lineBuf != nil {
 				lineBuf = lineBuf[:0]
 			}
 		case bufio.ErrBufferFull:
-			if oversized {
-				continue
-			}
 			if !accum {
 				accum = true
 				lineBuf = lineBuf[:0]
 			}
-			if len(lineBuf)+len(frag) > MaxLineBytes {
-				oversized = true
-				lineBuf = nil
-				continue
-			}
 			lineBuf = append(lineBuf, frag...)
 		case io.EOF:
-			if !oversized {
-				var raw []byte
-				if accum {
-					if len(lineBuf)+len(frag) <= MaxLineBytes {
-						lineBuf = append(lineBuf, frag...)
-						raw = lineBuf
-					}
-				} else {
-					raw = frag
-				}
-				if len(raw) > 0 {
-					if op, ok := parseOpLine(raw, intern); ok {
-						ops = append(ops, op)
-					}
+			var raw []byte
+			if accum {
+				lineBuf = append(lineBuf, frag...)
+				raw = lineBuf
+			} else {
+				raw = frag
+			}
+			if len(raw) > 0 {
+				if op, ok := parseOpLine(raw, intern); ok {
+					ops = append(ops, op)
 				}
 			}
 			return ops, nil
