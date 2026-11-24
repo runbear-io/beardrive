@@ -285,7 +285,22 @@ func (s *Store) PruneLocalBlobs(extraKeep map[string]bool, minAge time.Duration)
 
 // PruneLocalBlobsForDevice removes unreferenced old blobs, retaining the
 // current fold and journal history that may still be needed by this device.
+//
+// What it removes is only ever a local copy of a version the hub already
+// holds: a peer's op reached this device from the hub, and an own op past the
+// push cursor was pushed blobs-first. Restore re-fetches a removed version on
+// demand (syncer.fetchBlob).
 func (s *Store) PruneLocalBlobsForDevice(ownDevice string, extraKeep map[string]bool, minAge time.Duration) (removed int, freedBytes int64, err error) {
+	return s.pruneLocalBlobs(ownDevice, extraKeep, minAge, false)
+}
+
+// PlanPruneLocalBlobsForDevice is PruneLocalBlobsForDevice without the
+// removal: it reports what a prune would remove and free, deleting nothing.
+func (s *Store) PlanPruneLocalBlobsForDevice(ownDevice string, extraKeep map[string]bool, minAge time.Duration) (removed int, freedBytes int64, err error) {
+	return s.pruneLocalBlobs(ownDevice, extraKeep, minAge, true)
+}
+
+func (s *Store) pruneLocalBlobs(ownDevice string, extraKeep map[string]bool, minAge time.Duration, dryRun bool) (removed int, freedBytes int64, err error) {
 	keep := make(map[string]bool, len(extraKeep))
 	for blob := range extraKeep {
 		keep[blob] = true
@@ -399,6 +414,11 @@ func (s *Store) PruneLocalBlobsForDevice(ownDevice string, extraKeep map[string]
 			return nil
 		}
 		if keep[entry.Name()] {
+			return nil
+		}
+		if dryRun {
+			removed++
+			freedBytes += info.Size()
 			return nil
 		}
 		if removeErr := os.Remove(path); removeErr != nil {

@@ -1845,11 +1845,20 @@ func pruneVolumeBlobsSafely(volDir string) {
 		return
 	}
 	defer unlock()
+	_, _, _ = PruneVolumeBlobs(st, localBlobGCMinAge, false)
+}
 
+// PruneVolumeBlobs removes (or, with dryRun, only counts) the local copies of
+// old versions in one volume store that the hub already holds. It keeps every
+// blob a mount of the volume has on disk, the current merged tree, and
+// everything behind this device's push cursor; blobs younger than minAge stay
+// too, covering content spooled by a cycle that has not journaled it yet.
+// The caller must hold the volume flock.
+func PruneVolumeBlobs(st *store.Store, minAge time.Duration, dryRun bool) (removed int, freed int64, err error) {
 	extraKeep := make(map[string]bool)
 	mounts, err := config.LoadMounts()
 	if err == nil {
-		volID := filepath.Base(volDir)
+		volID := filepath.Base(st.Dir())
 		for mountID, m := range mounts {
 			if m.VolumeID != volID && mountID != volID {
 				continue
@@ -1869,7 +1878,10 @@ func pruneVolumeBlobsSafely(volDir string) {
 	if dev, err := config.LoadDevice(); err == nil {
 		ownDevice = dev.ID
 	}
-	_, _, _ = st.PruneLocalBlobsForDevice(ownDevice, extraKeep, localBlobGCMinAge)
+	if dryRun {
+		return st.PlanPruneLocalBlobsForDevice(ownDevice, extraKeep, minAge)
+	}
+	return st.PruneLocalBlobsForDevice(ownDevice, extraKeep, minAge)
 }
 
 // passPulled reports whether a tick just pulled every mount of the volume from

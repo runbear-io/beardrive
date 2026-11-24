@@ -173,7 +173,7 @@ classDiagram
     class Store {
         -dir volume dir
         +PutBlob / PutBlobFileVerified / MaterializeBlobToTemp / OpenBlob / HasBlob
-        +PruneLocalBlobs / PruneLocalBlobsForDevice
+        +PruneLocalBlobs / PruneLocalBlobsForDevice / PlanPruneLocalBlobsForDevice
         +AppendOps / DeviceOps / AllOps / JournalPrefixAt
         +ReplayFold() FoldResult
         +OwnOpCount / OwnOpsFrom
@@ -256,8 +256,10 @@ classDiagram
         +GlobalRunning / WakeSupervisor
         +GlobalLockPath / GlobalPidPath / GlobalLogPath
         +EnsureRunningBestEffort / EnsureRunningAsync
+        +PruneVolumeBlobs(st, minAge, dryRun)
         -map~string, volumeWorker~ workers
     }
+    note for daemon "PruneVolumeBlobs is the one local-blob GC: the worker runs it every 10 min under TryLock, bdrive gc runs it (dry run by default) under LockWithin. It keeps mount caches, the current fold, and everything past the push cursor, so it only ever drops a local copy of a version the hub holds; restore re-fetches it"
     note for daemon "One detached bdrive daemon run supervisor per machine/user session. Holds BDRIVE_HOME/daemon.lock, with daemon.pid and daemon.log beside it. Reconciles valid, unpaused mounts into one worker per volume; exits cleanly when no active volumes remain"
     note for daemon "init, resume, sync, status &lt;folder&gt; and agent sync hooks start or wake the supervisor for unpaused projects. A binary fingerprint change replaces the old supervisor. Hook self-heal is asynchronous"
 
