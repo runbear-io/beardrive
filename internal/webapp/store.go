@@ -329,7 +329,8 @@ func (s *Server) visibleObjects(r *http.Request, rs *RemoteSource, objs []remote
 	if !f.hides() {
 		return objs, nil
 	}
-	var shas, chunks map[string]bool
+	var shas map[string]struct{}
+	var chunks map[string]bool
 	out := make([]remote.Object, 0, len(objs))
 	for _, o := range objs {
 		switch {
@@ -372,12 +373,14 @@ func (s *Server) visibleObjects(r *http.Request, rs *RemoteSource, objs []remote
 		case strings.HasPrefix(o.Key, "blobs/"), strings.HasPrefix(o.Key, "manifests/"):
 			if shas == nil {
 				var err error
-				if shas, err = f.visibleSHAs(r.Context(), rs); err != nil {
+				if shas, err = f.visibleSHASet(r.Context(), rs); err != nil {
 					return nil, err
 				}
 			}
-			if sha, keyed := fileShaKey(o.Key); keyed && shas[sha] {
-				out = append(out, o)
+			if sha, keyed := fileShaKey(o.Key); keyed {
+				if _, ok := shas[sha]; ok {
+					out = append(out, o)
+				}
 			}
 		default:
 			out = append(out, o)

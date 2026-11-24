@@ -14,7 +14,7 @@ import (
 
 // ---- the planner ----
 
-// sop is a sourcedOp built the way loadSourcedOps builds one: the journal it
+// sop is a sourcedOp built the way loadSourcedJournals feeds one: the journal it
 // was read FROM is the attribution, and everything inside the op is just what
 // the pusher wrote there.
 func sop(from string, op journal.Op) sourcedOp {
@@ -443,12 +443,16 @@ func TestAppendOpsOneWrite(t *testing.T) {
 	if got := cb.putsTo(key); got != 1 {
 		t.Fatalf("5 ops made %d Puts, want 1", got)
 	}
-	all, err := rs.loadOps(t.Context())
+	journals, err := rs.loadSourcedJournals(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 5 {
-		t.Fatalf("journal holds %d ops, want 5", len(all))
+	var total int
+	for _, sj := range journals {
+		total += len(sj.Ops)
+	}
+	if total != 5 {
+		t.Fatalf("journal holds %d ops, want 5", total)
 	}
 
 	// An empty batch never rewrites the key: a Put of identical bytes still

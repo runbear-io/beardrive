@@ -434,9 +434,7 @@ func TestQA15_ApplyTailSlicesMoveCounterexamplesAndFuzzOracle(t *testing.T) {
 				}
 			}
 
-			preAll := byPathOrder(preSlices...)
-			preFiles, preTombs := foldFilesAndTombstones(preAll)
-			preMoves := buildMoveIndex(preAll)
+			preFiles, preTombs, preMoves := foldParsedJournals(preSlices)
 
 			gotFiles := cloneFiles(preFiles)
 			gotTombs := cloneTombstones(preTombs)
@@ -445,9 +443,7 @@ func TestQA15_ApplyTailSlicesMoveCounterexamplesAndFuzzOracle(t *testing.T) {
 			}
 			accepted++
 
-			fullAll := byPathOrder(fullSlices...)
-			wantFiles, wantTombs := foldFilesAndTombstones(fullAll)
-			wantMoves := buildMoveIndex(fullAll)
+			wantFiles, wantTombs, wantMoves := foldParsedJournals(fullSlices)
 
 			if !reflect.DeepEqual(gotFiles, wantFiles) {
 				t.Fatalf("seed %d: files mismatch\ngot=%+v\nwant=%+v", seed, gotFiles, wantFiles)

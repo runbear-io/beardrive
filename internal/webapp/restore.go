@@ -51,7 +51,17 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, "sha must be 64 lowercase hex chars", http.StatusBadRequest)
 		return
 	}
-	all, err := rs.loadOps(r.Context())
+	keep, err := rs.listJournals(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	files, moves, _, err := rs.filesMovesCoverageFor(r.Context(), keep)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	parsed, err := rs.parsedJournals(r.Context(), keep)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -61,15 +71,19 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 	// paths it lived at before it moved — otherwise a moved file can never
 	// be restored to anything older than its move. Ancestors only: the put
 	// is written at the current path, so a descendant's versions are not
-	// reachable from here anyway. buildMoveIndex needs journal order.
-	journal.Sort(all)
-	chain := chainSegments(buildMoveIndex(all), p)
+	// reachable from here anyway. Strict journal.Less selects the earliest
+	// matching op on ties, matching a global sort + first-hit scan.
+	chain := chainSegments(moves, p)
 	var found *journal.Op
-	for i := range all {
-		op := &all[i]
-		if op.Kind == journal.KindPut && op.Blob == req.SHA && inSegments(chain, op.Path, op.Time) {
-			found = op
-			break
+	for j := range parsed {
+		s := parsed[j]
+		for i := range s {
+			op := &s[i]
+			if op.Kind == journal.KindPut && op.Blob == req.SHA && inSegments(chain, op.Path, op.Time) {
+				if found == nil || journal.Less(*op, *found) {
+					found = op
+				}
+			}
 		}
 	}
 	if found == nil {
@@ -90,7 +104,6 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, "no such version of that file", http.StatusNotFound)
 		return
 	}
-	files := journal.Replay(all)
 	if cur, ok := files[p]; ok && cur.Blob == req.SHA && cur.Link == "" {
 		http.Error(w, "that version is already the current content of "+p, http.StatusConflict)
 		return

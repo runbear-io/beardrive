@@ -294,7 +294,7 @@ func TestIncrementalHistIndexAppendsWithoutReReadingUnchangedJournals(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	n1 := len(x1.all)
+	n1 := x1.len()
 	g1, g3 := cb.getsFor("dev1"), cb.getsFor("dev3")
 
 	f.putAs("dev2", "bob@x.io", "Bob", "notes/other.md", "bob v2")
@@ -302,14 +302,15 @@ func TestIncrementalHistIndexAppendsWithoutReReadingUnchangedJournals(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(x2.all) != n1+1 {
-		t.Fatalf("len(x2.all) = %d, want %d", len(x2.all), n1+1)
+	if x2.len() != n1+1 {
+		t.Fatalf("x2.len() = %d, want %d", x2.len(), n1+1)
 	}
 	if cb.getsFor("dev1") != g1 || cb.getsFor("dev3") != g3 {
 		t.Fatalf("incremental history index re-read unchanged journals: dev1=%d (was %d), dev3=%d (was %d)", cb.getsFor("dev1"), g1, cb.getsFor("dev3"), g3)
 	}
-	newestIdx := x2.byTime[0]
-	if x2.all[newestIdx].Op.Path != "notes/other.md" || x2.kinds[newestIdx] != "edit" {
-		t.Fatalf("newest entry = (%q, %q), want (notes/other.md, edit)", x2.all[newestIdx].Op.Path, x2.kinds[newestIdx])
+	newestIdx := int(x2.byTime[0])
+	newestOp, _ := x2.opAt(newestIdx)
+	if newestOp.Path != "notes/other.md" || x2.kindAt(newestIdx) != "edit" {
+		t.Fatalf("newest entry = (%q, %q), want (notes/other.md, edit)", newestOp.Path, x2.kindAt(newestIdx))
 	}
 }

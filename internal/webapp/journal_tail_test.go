@@ -1141,11 +1141,20 @@ func TestQA16_TryIncrementalHistIndexReadsTailOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cold historyIndex: %v", err)
 	}
-	if !reflect.DeepEqual(gotIdx.all, wantIdx.all) ||
-		!reflect.DeepEqual(gotIdx.kinds, wantIdx.kinds) ||
+	if gotIdx.len() != wantIdx.len() {
+		t.Fatalf("incremental histIndex diverged from cold rebuild: got=%d want=%d", gotIdx.len(), wantIdx.len())
+	}
+	for i := range gotIdx.len() {
+		gotOp, gotFrom := gotIdx.opAt(i)
+		wantOp, wantFrom := wantIdx.opAt(i)
+		if gotFrom != wantFrom || !reflect.DeepEqual(*gotOp, *wantOp) {
+			t.Fatalf("incremental histIndex op[%d] diverged: got=(%s,%+v) want=(%s,%+v)", i, gotFrom, *gotOp, wantFrom, *wantOp)
+		}
+	}
+	if !reflect.DeepEqual(gotIdx.kinds, wantIdx.kinds) ||
 		!reflect.DeepEqual(gotIdx.prevs, wantIdx.prevs) ||
 		!reflect.DeepEqual(gotIdx.byTime, wantIdx.byTime) {
-		t.Fatalf("incremental histIndex diverged from cold rebuild: got=%d want=%d", len(gotIdx.all), len(wantIdx.all))
+		t.Fatalf("incremental histIndex metadata diverged from cold rebuild: got=%d want=%d", gotIdx.len(), wantIdx.len())
 	}
 }
 

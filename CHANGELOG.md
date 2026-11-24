@@ -5,6 +5,7 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
+- **Eliminate per-request full-project journal op copies on the hub.** Hub tree folds, upload/restore/undo-run checks, history indexing and emptied checks, folder-visibility lookups, and data-index delete scans now read borrowed cached journal slices by index instead of copying every `journal.Op` per request, fixing container OOM kills on large projects; storage, journal, and checkpoint formats are unchanged. (#366)
 - **Hub reads only appended journal tails instead of re-downloading whole journals.** `gcsBackend` and `s3Backend` now implement `VersionedMetaBackend` (forwarded through `remote.Prefixed`) and `localBackend` implements `VersionedRangeGetter`, storing bounded `bdrive-append-chain` prefix-proof metadata atomically on `PutIfWithMeta` and serving generation- or ETag-pinned range GETs on reads. Warm `fetchJournal` and `filteredJournal` verify the prior prefix and fetch only the appended tail while advancing cached SHA-256 midstate, and incremental fold checkpoints and `historyIndex` verify grown or new journals via `bdrive-append-chain`/`jverCache` and the `prevSize-1` newline proof byte, falling back to streaming `journal.ParseReader` / `filterJournalReader` when unverified. (#367)
 
 ## v0.18.10 — 2026-11-11

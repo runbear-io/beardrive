@@ -107,13 +107,26 @@ func (b *cacheBudget) heldJournals(src *RemoteSource) int64 {
 	return 0
 }
 
-// touch marks one of src's caches most recently used.
-func (b *cacheBudget) touch(src *RemoteSource, kind cacheKind) {
+// touch marks one or more of src's caches most recently used.
+func (b *cacheBudget) touch(src *RemoteSource, kinds ...cacheKind) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if e := b.entries[budgetKey{src, kind}]; e != nil {
-		b.tick++
-		e.used = b.tick
+	b.tick++
+	for _, kind := range kinds {
+		if e := b.entries[budgetKey{src, kind}]; e != nil {
+			e.used = b.tick
+		}
+	}
+}
+
+// uncharge removes a single cache entry from b and subtracts its byte count.
+func (b *cacheBudget) uncharge(src *RemoteSource, kind cacheKind) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	key := budgetKey{src, kind}
+	if e := b.entries[key]; e != nil {
+		b.total -= e.bytes
+		delete(b.entries, key)
 	}
 }
 
@@ -127,6 +140,24 @@ func (b *cacheBudget) touch(src *RemoteSource, kind cacheKind) {
 func (b *cacheBudget) charge(src *RemoteSource, kind cacheKind, bytes int64) (uint64, []evicted) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.chargeLocked(src, kind, bytes)
+}
+
+// chargeHistoryIfJournal registers a historyCache entry only when src's
+// journalCache is still present at expectedJGen, preventing an evicted or
+// replaced build from pinning orphaned []journal.Op slices in histCache.
+func (b *cacheBudget) chargeHistoryIfJournal(src *RemoteSource, bytes int64, expectedJGen uint64) (uint64, []evicted, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	je := b.entries[budgetKey{src, journalCache}]
+	if je == nil || expectedJGen == 0 || je.gen != expectedJGen {
+		return 0, nil, false
+	}
+	gen, drop := b.chargeLocked(src, historyCache, bytes)
+	return gen, drop, true
+}
+
+func (b *cacheBudget) chargeLocked(src *RemoteSource, kind cacheKind, bytes int64) (uint64, []evicted) {
 	key := budgetKey{src, kind}
 	e := b.entries[key]
 	if e == nil {
@@ -136,6 +167,13 @@ func (b *cacheBudget) charge(src *RemoteSource, kind cacheKind, bytes int64) (ui
 	b.total += bytes - e.bytes
 	b.tick++
 	e.bytes, e.used, e.gen = bytes, b.tick, b.tick
+	// Keep the backing journalCache entry at the same MRU tick as a newly built
+	// or incremented historyCache that borrows its []journal.Op slices.
+	if kind == historyCache {
+		if j := b.entries[budgetKey{src, journalCache}]; j != nil {
+			j.used = b.tick
+		}
+	}
 	var drop []evicted
 	for b.total > b.limit {
 		// Keep one most-recently-used journal cache warm. A tiny request from
@@ -156,6 +194,16 @@ func (b *cacheBudget) charge(src *RemoteSource, kind cacheKind, bytes int64) (ui
 				if k.src == src || x.bytes <= 0 {
 					continue
 				}
+				// histIndex shares []journal.Op slices with jcache: evict any
+				// positive-byte historyCache before journalCache on the same
+				// source so dropJournals actually frees the backing arrays.
+				// Zero-byte historyCache entries do not block eviction and are
+				// cascaded below when journalCache is chosen.
+				if k.kind == journalCache {
+					if h := b.entries[budgetKey{k.src, historyCache}]; h != nil && h.bytes > 0 {
+						continue
+					}
+				}
 				if pass == 0 && k == protected {
 					continue
 				}
@@ -170,6 +218,14 @@ func (b *cacheBudget) charge(src *RemoteSource, kind cacheKind, bytes int64) (ui
 		b.total -= oldest.bytes
 		delete(b.entries, victim)
 		drop = append(drop, evicted{victim, oldest.gen})
+		if victim.kind == journalCache {
+			hk := budgetKey{victim.src, historyCache}
+			if h := b.entries[hk]; h != nil {
+				b.total -= h.bytes
+				delete(b.entries, hk)
+				drop = append(drop, evicted{hk, h.gen})
+			}
+		}
 	}
 	return e.gen, drop
 }

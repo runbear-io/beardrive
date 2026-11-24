@@ -560,9 +560,8 @@ func TestHistoryBadDateRange(t *testing.T) {
 	}
 }
 
-// BenchmarkHistoryPage measures what a deep page costs: every request
-// re-lists and re-parses every journal (loadOps), so page 20 should cost
-// about what page 1 costs — the ceiling is gone, the per-page work is not.
+// BenchmarkHistoryPage measures what a deep page costs: page 20 should cost
+// about what page 1 costs once the history index is built.
 func BenchmarkHistoryPage(b *testing.B) {
 	srv, p, root := newHub(b, false, nil)
 	dir := filepath.Join(root, p.ID)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 
 	"github.com/runbear-io/beardrive/internal/journal"
@@ -56,40 +57,99 @@ type undoPlan struct {
 // planUndo works out, for every path the selected run touched, the op that
 // puts it back where it was. sourced may be in any order; it is sorted here.
 func planUndo(sourced []sourcedOp, sel undoSel) undoPlan {
-	ops := make([]journal.Op, len(sourced))
-	inRun := make([]bool, len(sourced))
-	for i, so := range sourced {
-		ops[i] = so.Op
-		inRun[i] = matchesRun(so, sel)
+	var journals []sourcedJournal
+	for i := 0; i < len(sourced); {
+		from := sourced[i].From
+		end := i + 1
+		for end < len(sourced) && sourced[end].From == from {
+			end++
+		}
+		ops := make([]journal.Op, end-i)
+		for k := i; k < end; k++ {
+			ops[k-i] = sourced[k].Op
+		}
+		journals = append(journals, sourcedJournal{From: from, Ops: ops})
+		i = end
 	}
-	// One sort of an index permutation, so ops and inRun stay aligned.
-	order := make([]int, len(ops))
-	for i := range order {
-		order[i] = i
+	plan, _ := planUndoJournals(journals, sel)
+	return plan
+}
+
+// planUndoJournals builds an undo plan and the current file state of every
+// path touched by sel directly from borrowed journal slices without copying
+// unrelated project ops. Deleted paths are omitted from current so callers
+// checking presence distinguish missing/deleted paths from live ones.
+func planUndoJournals(journals []sourcedJournal, sel undoSel) (undoPlan, map[string]journal.FileState) {
+	runPaths := map[string]bool{}
+	for j := range journals {
+		sj := &journals[j]
+		if sj.From != sel.Device {
+			continue
+		}
+		for i := range sj.Ops {
+			if matchesRunOp(&sj.Ops[i], sj.From, sel) {
+				runPaths[sj.Ops[i].Path] = true
+			}
+		}
 	}
-	sort.SliceStable(order, func(a, b int) bool { return journal.Less(ops[order[a]], ops[order[b]]) })
+	if len(runPaths) == 0 {
+		return undoPlan{}, nil
+	}
+
+	type undoRef struct {
+		j, i  int32
+		inRun bool
+	}
+	var refs []undoRef
+	for j := range journals {
+		sj := &journals[j]
+		isDev := sj.From == sel.Device
+		for i := range sj.Ops {
+			op := &sj.Ops[i]
+			if !runPaths[op.Path] {
+				continue
+			}
+			refs = append(refs, undoRef{
+				j:     int32(j),
+				i:     int32(i),
+				inRun: isDev && matchesRunOp(op, sj.From, sel),
+			})
+		}
+	}
+	slices.SortStableFunc(refs, func(a, b undoRef) int {
+		oa, ob := &journals[a.j].Ops[a.i], &journals[b.j].Ops[b.i]
+		switch {
+		case journal.Less(*oa, *ob):
+			return -1
+		case journal.Less(*ob, *oa):
+			return 1
+		}
+		return 0
+	})
 
 	// first/last positions (in sorted order) of the run's ops per path, and
-	// the ops that precede and follow them.
+	// current replayed state over all touched paths.
 	type span struct{ first, last int }
-	spans := map[string]span{}
-	for pos, i := range order {
-		if !inRun[i] {
-			continue
+	spans := make(map[string]span, len(runPaths))
+	current := make(map[string]journal.FileState, len(runPaths))
+	for pos, r := range refs {
+		op := &journals[r.j].Ops[r.i]
+		p := op.Path
+		if r.inRun {
+			if s, ok := spans[p]; ok {
+				s.last = pos
+				spans[p] = s
+			} else {
+				spans[p] = span{first: pos, last: pos}
+			}
 		}
-		p := ops[i].Path
-		if s, ok := spans[p]; ok {
-			s.last = pos
-			spans[p] = s
-			continue
+		switch op.Kind {
+		case journal.KindPut:
+			current[p] = journal.FileState{Blob: op.Blob, Size: op.Size, Mode: op.Mode, Link: op.Link}
+		case journal.KindDelete:
+			delete(current, p)
 		}
-		spans[p] = span{first: pos, last: pos}
 	}
-
-	// Current state, replayed over everything — the same fold the tree and
-	// the viewer serve, so "already at the pre-run content" means what a
-	// reader sees.
-	current := journal.Replay(ops)
 
 	plan := undoPlan{}
 	paths := make([]string, 0, len(spans))
@@ -110,8 +170,8 @@ func planUndo(sourced []sourcedOp, sel undoSel) undoPlan {
 		// is about to overwrite — usually a teammate's. It is still undone
 		// (last-writer-wins is the model, and per-row restore already behaves
 		// this way), but the confirm has to say so out loud.
-		for _, i := range order[s.last+1:] {
-			if ops[i].Path == p {
+		for _, r := range refs[s.last+1:] {
+			if journals[r.j].Ops[r.i].Path == p {
 				plan.After = append(plan.After, p)
 				break
 			}
@@ -120,7 +180,7 @@ func planUndo(sourced []sourcedOp, sel undoSel) undoPlan {
 		// before the run's FIRST op there.
 		var before *journal.Op
 		for k := s.first - 1; k >= 0; k-- {
-			if op := &ops[order[k]]; op.Path == p {
+			if op := &journals[refs[k].j].Ops[refs[k].i]; op.Path == p {
 				before = op
 				break
 			}
@@ -151,22 +211,22 @@ func planUndo(sourced []sourcedOp, sel undoSel) undoPlan {
 			plan.Actions = append(plan.Actions, undoAction{Path: p, Action: "restore"})
 		}
 	}
-	return plan
+	return plan, current
 }
 
-// matchesRun is the selection rule, and it is groupRuns' key in Go. The
+// matchesRunOp is the selection rule, and it is groupRuns' key in Go. The
 // empty-Session clause on the note form is load-bearing: runs.ts keys a
 // session-carrying op as "s\0…" and can never file it under a note-keyed
 // group, so a note-keyed undo that ignored it would revert ops the card
 // never showed.
-func matchesRun(so sourcedOp, sel undoSel) bool {
-	if so.From != sel.Device {
+func matchesRunOp(op *journal.Op, from string, sel undoSel) bool {
+	if from != sel.Device {
 		return false
 	}
 	if sel.Session != "" {
-		return so.Op.Session == sel.Session
+		return op.Session == sel.Session
 	}
-	return so.Op.Note == sel.Note && so.Op.Session == ""
+	return op.Note == sel.Note && op.Session == ""
 }
 
 // undoNote is the note the undo's own ops carry. Built from the MATCHED ops,
@@ -222,12 +282,12 @@ func (s *Server) handleUndoRun(v *volume, w http.ResponseWriter, r *http.Request
 		}
 	}
 	sel := undoSel{Device: req.Device, Session: req.Session, Note: req.Note}
-	sourced, err := rs.loadSourcedOps(r.Context())
+	journals, err := rs.loadSourcedJournals(r.Context())
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
-	plan := planUndo(sourced, sel)
+	plan, files := planUndoJournals(journals, sel)
 	if len(plan.Ops) == 0 && len(plan.Skipped) == 0 && len(plan.Refused) == 0 {
 		http.Error(w, "no such run", http.StatusNotFound)
 		return
@@ -273,11 +333,6 @@ func (s *Server) handleUndoRun(v *volume, w http.ResponseWriter, r *http.Request
 	for i := range plan.Ops {
 		plan.Ops[i].User, plan.Ops[i].UserName, plan.Ops[i].Note = who.Email, who.Name, note
 	}
-	allOps := make([]journal.Op, len(sourced))
-	for i, so := range sourced {
-		allOps[i] = so.Op
-	}
-	files := journal.Replay(allOps)
 	base := &commitBase{}
 	first := true
 	for _, op := range plan.Ops {

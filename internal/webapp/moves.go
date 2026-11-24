@@ -68,11 +68,17 @@ func (e pathEvent) hop() time.Time {
 // REPLACED its own.
 type moveIndex map[string][]pathEvent
 
+// moveHalf is one side (a first-ever put or a delete) of a candidate move.
+type moveHalf struct {
+	path, blob, dev string
+	at              time.Time
+}
+
 // buildMoveIndex pairs deletes with creates. Each path's ops must be in
 // journal.Less order; the order ACROSS paths does not matter, since the walk
-// below tracks state per path and the pairing only counts candidates. The
-// replay hands it ops grouped by path (byPathOrder), the history feed a global
-// sort — both qualify, and the index costs no extra pass over storage.
+// below tracks state per path and the pairing only counts candidates. Both
+// foldParsedJournals and the history feed qualify, and the index costs no
+// extra pass over storage.
 //
 // A delete of A pairs with the first-ever put of B when all hold: same
 // Op.Device (one device's scan produces both halves), |Δt| ≤ moveWindow,
@@ -82,14 +88,17 @@ type moveIndex map[string][]pathEvent
 // empty files — stays unpaired and becomes a plain deletion. Silence beats
 // a wrong destination.
 func buildMoveIndex(ops []journal.Op) moveIndex {
-	type half struct {
-		path, blob, dev string
-		at              time.Time
-	}
-	var creates, deletes []half
+	return buildMoveIndexFrom(len(ops), func(i int) *journal.Op { return &ops[i] })
+}
+
+// buildMoveIndexFrom pairs deletes with creates without copying ops out of
+// caller-owned storage.
+func buildMoveIndexFrom(n int, at func(int) *journal.Op) moveIndex {
+	var creates, deletes []moveHalf
 	live := map[string]string{} // path -> the blob it currently holds
 	ever := map[string]bool{}   // path has ever been put
-	for _, op := range ops {
+	for i := range n {
+		op := at(i)
 		switch op.Kind {
 		case journal.KindPut:
 			// Files ignores a put whose Blob is not a bare sha256 (it is a
@@ -101,7 +110,7 @@ func buildMoveIndex(ops []journal.Op) moveIndex {
 			}
 			if !ever[op.Path] {
 				ever[op.Path] = true
-				creates = append(creates, half{op.Path, op.Blob, op.Device, op.Time})
+				creates = append(creates, moveHalf{op.Path, op.Blob, op.Device, op.Time})
 			}
 			live[op.Path] = op.Blob
 		case journal.KindDelete:
@@ -110,11 +119,14 @@ func buildMoveIndex(ops []journal.Op) moveIndex {
 				continue // deleting nothing
 			}
 			delete(live, op.Path)
-			deletes = append(deletes, half{op.Path, blob, op.Device, op.Time})
+			deletes = append(deletes, moveHalf{op.Path, blob, op.Device, op.Time})
 		}
 	}
+	return pairMoves(creates, deletes)
+}
 
-	key := func(h half) string { return h.dev + "\x00" + h.blob }
+func pairMoves(creates, deletes []moveHalf) moveIndex {
+	key := func(h moveHalf) string { return h.dev + "\x00" + h.blob }
 	byKey := map[string][]int{}
 	for i, c := range creates {
 		byKey[key(c)] = append(byKey[key(c)], i)
@@ -127,7 +139,7 @@ func buildMoveIndex(ops []journal.Op) moveIndex {
 	for i, d := range deletes {
 		byKeyDel[key(d)] = append(byKeyDel[key(d)], i)
 	}
-	pairs := func(a, b half) bool {
+	pairs := func(a, b moveHalf) bool {
 		return a.path != b.path && abs(a.at.Sub(b.at)) <= moveWindow
 	}
 	// ponytail: O(n²) inside one (device, blob) bucket. A bucket is the

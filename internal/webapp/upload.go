@@ -243,39 +243,78 @@ type staleWriteError struct{ head string }
 
 func (e *staleWriteError) Error() string { return "this file changed since you last read it" }
 
-// holds reports whether the path still resolves to the base in the fold of
-// all, through the same replay the tree uses.
-func (b *commitBase) holds(all []journal.Op) error {
-	bases := append([]commitBase{*b}, b.extra...)
-	for _, base := range bases {
+// holdsJournals reports whether every target path still resolves to its base
+// across journals and any unseen local existing ops, without copying the
+// project's unrelated ops.
+func (b *commitBase) holdsJournals(journals []sourcedJournal, extra []journal.Op) error {
+	if len(b.extra) == 0 {
 		var ops []journal.Op
-		for _, op := range all {
-			if op.Path == base.path {
-				ops = append(ops, op)
+		for j := range journals {
+			s := journals[j].Ops
+			for i := range s {
+				if s[i].Path == b.path {
+					ops = append(ops, s[i])
+				}
 			}
 		}
-		journal.Sort(ops)
-		fi, ok := foldFiles(ops)[base.path]
-		matchesTarget := (base.blob != "" || base.writeLink != "") && fi.Blob == base.blob && fi.Link == base.writeLink
-		if !ok {
-			if base.mustExist {
-				return &staleWriteError{head: ""}
+		for i := range extra {
+			if extra[i].Path == b.path {
+				ops = append(ops, extra[i])
 			}
-			continue
 		}
-		if base.mustBeAbsent {
-			if matchesTarget {
-				continue
-			}
-			head := fi.Blob
-			if head == "" {
-				head = fi.Link
-			}
-			return &staleWriteError{head: head}
+		if len(ops) > 1 {
+			journal.Sort(ops)
 		}
-		matchesBase := fi.Blob == base.sha && fi.Link == base.link
-		if matchesBase || matchesTarget {
-			continue
+		return b.holdsSortedPath(ops)
+	}
+	bases := append([]commitBase{*b}, b.extra...)
+	byPath := make(map[string][]journal.Op, len(bases))
+	for _, base := range bases {
+		if _, exists := byPath[base.path]; !exists {
+			byPath[base.path] = nil
+		}
+	}
+	for j := range journals {
+		s := journals[j].Ops
+		for i := range s {
+			p := s[i].Path
+			if ops, wanted := byPath[p]; wanted {
+				byPath[p] = append(ops, s[i])
+			}
+		}
+	}
+	for i := range extra {
+		p := extra[i].Path
+		if ops, wanted := byPath[p]; wanted {
+			byPath[p] = append(ops, extra[i])
+		}
+	}
+	for p, ops := range byPath {
+		if len(ops) > 1 {
+			journal.Sort(ops)
+			byPath[p] = ops
+		}
+	}
+	for _, base := range bases {
+		if err := base.holdsSortedPath(byPath[base.path]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *commitBase) holdsSortedPath(ops []journal.Op) error {
+	fi, ok := foldFiles(ops)[b.path]
+	matchesTarget := (b.blob != "" || b.writeLink != "") && fi.Blob == b.blob && fi.Link == b.writeLink
+	if !ok {
+		if b.mustExist {
+			return &staleWriteError{head: ""}
+		}
+		return nil
+	}
+	if b.mustBeAbsent {
+		if matchesTarget {
+			return nil
 		}
 		head := fi.Blob
 		if head == "" {
@@ -283,7 +322,15 @@ func (b *commitBase) holds(all []journal.Op) error {
 		}
 		return &staleWriteError{head: head}
 	}
-	return nil
+	matchesBase := fi.Blob == b.sha && fi.Link == b.link
+	if matchesBase || matchesTarget {
+		return nil
+	}
+	head := fi.Blob
+	if head == "" {
+		head = fi.Link
+	}
+	return &staleWriteError{head: head}
 }
 
 // nextLamport is maxLamport+1 without the wrap.
@@ -337,32 +384,26 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 			return nil, err
 		}
 		keepFP := journalFingerprint(keep)
-		sourced, err := r.sourcedOpsOf(ctx, keep)
+		journals, err := r.sourcedJournalsOf(ctx, keep)
 		if err != nil {
 			return nil, err
 		}
 		// A second hub process may have appended after jcache was populated.
 		// Include the version we are about to CAS so sequence and lamport
 		// allocation never collides with that unseen tail.
+		var existingOps []journal.Op
 		if len(existing) > 0 {
-			existingOps, err := journal.Parse(existing)
+			existingOps, err = journal.Parse(existing)
 			if err != nil {
 				return nil, fmt.Errorf("parse current journal: %w", err)
 			}
-			for _, op := range existingOps {
-				sourced = append(sourced, sourcedOp{From: r.Device.ID, Op: op})
-			}
 		}
 		if base != nil {
-			all := make([]journal.Op, len(sourced))
-			for i, so := range sourced {
-				all[i] = so.Op
-			}
-			if err := base.holds(all); err != nil {
+			if err := base.holdsJournals(journals, existingOps); err != nil {
 				return nil, err
 			}
 		}
-		if err := r.stamp(sourced, ops); err != nil {
+		if err := r.stamp(journals, existingOps, ops); err != nil {
 			return nil, err
 		}
 		if base != nil {
@@ -371,15 +412,11 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 				return nil, err
 			}
 			if journalFingerprint(keepAfter) != keepFP {
-				sourcedAfter, err := r.sourcedOpsOf(ctx, keepAfter)
+				journalsAfter, err := r.sourcedJournalsOf(ctx, keepAfter)
 				if err != nil {
 					return nil, err
 				}
-				allAfter := make([]journal.Op, len(sourcedAfter))
-				for i, so := range sourcedAfter {
-					allAfter[i] = so.Op
-				}
-				if err := base.holds(allAfter); err != nil {
+				if err := base.holdsJournals(journalsAfter, existingOps); err != nil {
 					return nil, err
 				}
 				return nil, remote.ErrVersionMismatch
@@ -414,13 +451,23 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 // A seq with no room after it is refused rather than wrapped: no request can
 // write the hub's journal (ownJournal), so one there came from outside the
 // hub, and wrapping would reuse a (device, seq) on every later op.
-func (r *RemoteSource) stamp(sourced []sourcedOp, ops []journal.Op) error {
+func (r *RemoteSource) stamp(journals []sourcedJournal, extra []journal.Op, ops []journal.Op) error {
 	var maxLamport, mySeq int64
-	for _, so := range sourced {
-		maxLamport = max(maxLamport, so.Op.Lamport)
-		if so.From == r.Device.ID {
-			mySeq = max(mySeq, so.Op.Seq)
+	for j := range journals {
+		sj := &journals[j]
+		isOwn := sj.From == r.Device.ID
+		for i := range sj.Ops {
+			op := &sj.Ops[i]
+			maxLamport = max(maxLamport, op.Lamport)
+			if isOwn {
+				mySeq = max(mySeq, op.Seq)
+			}
 		}
+	}
+	for i := range extra {
+		op := &extra[i]
+		maxLamport = max(maxLamport, op.Lamport)
+		mySeq = max(mySeq, op.Seq)
 	}
 	if mySeq > math.MaxInt64-int64(len(ops)) {
 		return fmt.Errorf("this hub's journal holds seq %d, with no room after it; it was written from outside the hub", mySeq)
@@ -1392,19 +1439,27 @@ func (r *RemoteSource) landedAfter(ctx context.Context, path, base, head, blob, 
 	if blob == base || blob == head || base == "" || head == "" {
 		return false
 	}
-	idx, err := r.historyIndex(ctx)
+	keep, err := r.listJournals(ctx)
+	if err != nil {
+		return false
+	}
+	parsed, err := r.parsedJournals(ctx, keep)
 	if err != nil {
 		return false
 	}
 	var ops []journal.Op // this path's ops, oldest first (journal.Less)
-	for _, so := range idx.all {
-		if so.Op.Path == path {
-			ops = append(ops, so.Op)
+	for j := range parsed {
+		s := parsed[j]
+		for i := range s {
+			if s[i].Path == path {
+				ops = append(ops, s[i])
+			}
 		}
 	}
 	if len(ops) == 0 {
 		return false
 	}
+	journal.Sort(ops)
 	// The winning op is the newest; it must be the head being merged onto.
 	at := len(ops) - 1
 	cur := ops[at]

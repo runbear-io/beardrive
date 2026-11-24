@@ -57,30 +57,71 @@ func randomOps(r *rand.Rand, n int) []journal.Op {
 	return ops
 }
 
-// The fold groups ops by path instead of sorting the whole project. It must
-// produce exactly what a global journal.Sort did, or the viewer, share links
-// and comment placement would disagree with what devices converge to.
-func TestByPathOrderFoldsLikeAGlobalSort(t *testing.T) {
+// The fold replays ops grouped by path instead of sorting the whole project.
+// It must produce exactly what a global journal.Sort did, or the viewer, share
+// links and comment placement would disagree with what devices converge to.
+func TestFoldParsedJournalsMatchesGlobalSort(t *testing.T) {
 	for seed := int64(1); seed <= 300; seed++ {
 		r := rand.New(rand.NewSource(seed))
 		ops := randomOps(r, 10+r.Intn(200))
 
 		global := append([]journal.Op(nil), ops...)
 		journal.Sort(global)
-		wantFiles, wantMoves := foldFiles(global), buildMoveIndex(global)
+		wantFiles, wantTombs := foldFilesAndTombstones(global)
+		wantMoves := buildMoveIndex(global)
 
 		// Split into journals the way the hub reads them: the global sort sees
 		// their concatenation, so ties must resolve to journal order there too.
 		cut1, cut2 := len(ops)/3, 2*len(ops)/3
-		grouped := byPathOrder(ops[:cut1], ops[cut1:cut2], ops[cut2:])
-		gotFiles, gotMoves := foldFiles(grouped), buildMoveIndex(grouped)
+		j0 := append([]journal.Op(nil), ops[:cut1]...)
+		j1 := append([]journal.Op(nil), ops[cut1:cut2]...)
+		j2 := append([]journal.Op(nil), ops[cut2:]...)
+		parsed := [][]journal.Op{j0, j1, j2}
+		gotFiles, gotTombs, gotMoves := foldParsedJournals(parsed)
 
 		if !reflect.DeepEqual(gotFiles, wantFiles) {
 			t.Fatalf("seed %d: files differ\n got %+v\nwant %+v", seed, gotFiles, wantFiles)
 		}
+		if !reflect.DeepEqual(gotTombs, wantTombs) {
+			t.Fatalf("seed %d: tombstones differ\n got %+v\nwant %+v", seed, gotTombs, wantTombs)
+		}
 		if !reflect.DeepEqual(gotMoves, wantMoves) {
 			t.Fatalf("seed %d: moves differ\n got %+v\nwant %+v", seed, gotMoves, wantMoves)
 		}
+		if !reflect.DeepEqual(j0, ops[:cut1]) || !reflect.DeepEqual(j1, ops[cut1:cut2]) || !reflect.DeepEqual(j2, ops[cut2:]) {
+			t.Fatalf("seed %d: foldParsedJournals mutated input journal slices", seed)
+		}
+	}
+
+	// Regression edge cases: index-0 sentinel, exact journal.Less ties, and
+	// symlink-put over a real blob before delete (must keep liveBlob for moves).
+	t0 := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	shaA := strings.Repeat("a", 64)
+	shaB := strings.Repeat("b", 64)
+	edge := [][]journal.Op{
+		{
+			{Seq: 1, Lamport: 1, Time: t0, Device: "dev-1", Kind: journal.KindPut, Path: "moved.md", Blob: shaA, Size: 5},
+			{Seq: 2, Lamport: 2, Time: t0.Add(time.Second), Device: "dev-1", Kind: journal.KindPut, Path: "moved.md", Link: "sym-target"},
+			{Seq: 3, Lamport: 3, Time: t0.Add(2 * time.Second), Device: "dev-1", Kind: journal.KindDelete, Path: "moved.md"},
+			{Seq: 4, Lamport: 4, Time: t0.Add(3 * time.Second), Device: "dev-1", Kind: journal.KindPut, Path: "dest.md", Blob: shaA, Size: 5},
+			// Exact tie under journal.Less across journals (differs only in UserName/Link).
+			{Seq: 5, Lamport: 5, Time: t0, Device: "dev-1", Kind: journal.KindPut, Path: "tie.md", Blob: shaB, Size: 3, UserName: "first"},
+		},
+		{
+			{Seq: 5, Lamport: 5, Time: t0, Device: "dev-1", Kind: journal.KindPut, Path: "tie.md", Blob: shaB, Size: 3, UserName: "second"},
+		},
+	}
+	flat := append(append([]journal.Op(nil), edge[0]...), edge[1]...)
+	journal.Sort(flat)
+	wantFiles, wantTombs := foldFilesAndTombstones(flat)
+	wantMoves := buildMoveIndex(flat)
+	gotFiles, gotTombs, gotMoves := foldParsedJournals(edge)
+	if !reflect.DeepEqual(gotFiles, wantFiles) || !reflect.DeepEqual(gotTombs, wantTombs) || !reflect.DeepEqual(gotMoves, wantMoves) {
+		t.Fatalf("edge cases mismatch:\nfiles: %+v vs %+v\ntombs: %+v vs %+v\nmoves: %+v vs %+v",
+			gotFiles, wantFiles, gotTombs, wantTombs, gotMoves, wantMoves)
+	}
+	if gotFiles["tie.md"].UserName != "second" {
+		t.Fatalf("tie-breaker picked %q, want second", gotFiles["tie.md"].UserName)
 	}
 }
 
