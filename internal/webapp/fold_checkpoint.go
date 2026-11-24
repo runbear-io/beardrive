@@ -8,6 +8,7 @@ import (
 	"encoding/gob"
 	"encoding/hex"
 	"io"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -20,11 +21,14 @@ import (
 
 const hubFoldCheckpointKey = "hub-cache/fold-v1.bin.gz"
 const minFoldCheckpointBytes int64 = 1 << 20
+const maxIncrementalNewJournalBytes int64 = 8 << 20
 
 type ckptJournalMeta struct {
 	Size         int64
 	ModTime      time.Time
 	PrefixSHA256 string
+	Version      remote.Version
+	CRC32C       uint32
 	Ops          int
 }
 
@@ -215,7 +219,7 @@ func (r *RemoteSource) tombstoneFor(path string) (winOp, bool) {
 func checkpointMeta(keep []remote.Object) map[string]ckptJournalMeta {
 	out := make(map[string]ckptJournalMeta, len(keep))
 	for _, o := range keep {
-		out[o.Key] = ckptJournalMeta{Size: o.Size, ModTime: o.Modified}
+		out[o.Key] = ckptJournalMeta{Size: o.Size, ModTime: o.Modified, Version: o.Version, CRC32C: o.CRC32C}
 	}
 	return out
 }
@@ -226,11 +230,12 @@ func (r *RemoteSource) journalMetaFromCache(keep []remote.Object) (map[string]ck
 	defer r.jmu.Unlock()
 	for _, o := range keep {
 		c, ok := r.jcache[o.Key]
-		if !ok || c.size != o.Size || !c.mod.Equal(o.Modified) {
+		if !ok || c.size != o.Size || !c.mod.Equal(o.Modified) || c.version != o.Version {
 			return nil, false
 		}
 		out[o.Key] = ckptJournalMeta{
-			Size: o.Size, ModTime: o.Modified, Ops: len(c.ops),
+			Size: o.Size, ModTime: o.Modified, Version: o.Version, CRC32C: o.CRC32C,
+			Ops:          len(c.ops),
 			PrefixSHA256: hex.EncodeToString(c.rawPrefixHash[:]),
 		}
 	}
@@ -321,60 +326,102 @@ func (r *RemoteSource) scheduleFoldCheckpointWrite(fp string, cp foldCheckpoint)
 }
 
 func compatibleCheckpointJournals(cp map[string]ckptJournalMeta, keep []remote.Object) bool {
-	if len(keep) != len(cp) {
+	if len(cp) == 0 || len(keep) < len(cp) {
 		return false
 	}
+	matched := 0
 	for _, o := range keep {
 		old, ok := cp[o.Key]
-		if !ok || o.Size < old.Size || old.PrefixSHA256 == "" {
+		if !ok {
+			if o.Size < 0 || o.Size > maxIncrementalNewJournalBytes {
+				return false
+			}
+			continue
+		}
+		matched++
+		if o.Size < old.Size || old.PrefixSHA256 == "" {
 			return false
 		}
 		if o.Size == old.Size && !o.Modified.IsZero() && !old.ModTime.IsZero() && !o.Modified.Equal(old.ModTime) {
 			return false
 		}
+		if o.Size == old.Size && o.Version != "" && old.Version != "" && o.Version != old.Version {
+			return false
+		}
+		if o.Size == old.Size && o.CRC32C != 0 && old.CRC32C != 0 && o.CRC32C != old.CRC32C {
+			return false
+		}
 	}
-	return true
+	return matched == len(cp)
+}
+
+func withinMoveWindow(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return true
+	}
+	a = a.Round(0)
+	b = b.Round(0)
+	d := a.Sub(b)
+	if d == math.MinInt64 || d == math.MaxInt64 {
+		return false
+	}
+	if d < 0 {
+		d = -d
+	}
+	return d <= moveWindow
 }
 
 // verifyAndReadTail streams o.Key to verify that the prefix [0, old.Size) hashes
 // to old.PrefixSHA256 (and ends with a newline when o.Size > old.Size), then
-// reads and parses only the appended tail [old.Size, o.Size).
-func (r *RemoteSource) verifyAndReadTail(ctx context.Context, o remote.Object, old ckptJournalMeta, alwaysVerifyPrefix bool) (tailOps []journal.Op, newFullSHA string, ok bool) {
+// reads and parses only the appended tail [old.Size, o.Size). For a newly added
+// device journal (!existed), it streams and hashes up to maxIncrementalNewJournalBytes.
+func (r *RemoteSource) verifyAndReadTail(ctx context.Context, o remote.Object, old ckptJournalMeta, existed bool, alwaysVerifyPrefix bool) (tailOps []journal.Op, newFullSHA string, ok bool) {
+	if !existed {
+		if o.Size < 0 || o.Size > maxIncrementalNewJournalBytes {
+			return nil, "", false
+		}
+		rc, err := r.Backend.Get(ctx, o.Key)
+		if err != nil {
+			return nil, "", false
+		}
+		defer rc.Close()
+		h := sha256.New()
+		meter := &byteCounterAndLast{h: h}
+		ops, perr := journal.ParseReaderSized(io.TeeReader(io.LimitReader(rc, o.Size+1), meter), o.Size)
+		if perr != nil || meter.n != o.Size {
+			return nil, "", false
+		}
+		if o.Size > 0 && len(ops) == 0 {
+			return nil, "", false
+		}
+		return ops, hex.EncodeToString(h.Sum(nil)), true
+	}
 	if old.PrefixSHA256 == "" || o.Size < old.Size {
 		return nil, "", false
 	}
-	if _, hasCAS := r.Backend.(remote.ConditionalPutter); !hasCAS {
+	_, hasCAS := r.Backend.(remote.ConditionalPutter)
+	if !hasCAS {
 		alwaysVerifyPrefix = true
 	}
 	r.jmu.Lock()
 	c, inJCache := r.jcache[o.Key]
 	r.jmu.Unlock()
-	if inJCache && c.size == old.Size && !o.Modified.IsZero() && c.mod.Equal(old.ModTime) {
+	if inJCache && c.size == old.Size && !o.Modified.IsZero() && c.mod.Equal(old.ModTime) && (o.Version == "" || c.version == o.Version) {
 		if hex.EncodeToString(c.rawPrefixHash[:]) != old.PrefixSHA256 {
 			return nil, "", false
 		}
-		if o.Size == old.Size && o.Modified.Equal(old.ModTime) {
+		if o.Size == old.Size && o.Modified.Equal(old.ModTime) && (o.Version == "" || old.Version == "" || o.Version == old.Version) {
 			return nil, old.PrefixSHA256, true
 		}
-	} else if !alwaysVerifyPrefix && o.Size == old.Size && !o.Modified.IsZero() && !old.ModTime.IsZero() && o.Modified.Equal(old.ModTime) {
+	} else if hasCAS && o.Size == old.Size && o.ImmutableVersion && old.Version != "" && o.Version == old.Version && (old.CRC32C == 0 || o.CRC32C == old.CRC32C) {
+		return nil, old.PrefixSHA256, true
+	} else if !alwaysVerifyPrefix && o.Size == old.Size && !o.Modified.IsZero() && !old.ModTime.IsZero() && o.Modified.Equal(old.ModTime) && (o.Version == "" || old.Version == "" || o.Version == old.Version) {
 		return nil, old.PrefixSHA256, true
 	}
 
 	if o.Size > old.Size {
-		if vrg, ok := r.Backend.(remote.VersionedRangeGetter); ok {
-			if trc, ver, verr := vrg.GetVersionedRange(ctx, o.Key, old.Size, o.Size-old.Size); verr == nil {
-				if fullSHA, ok := r.lookupAppendedJournalSHA(o.Key, ver, old.Size, old.PrefixSHA256, o.Size); ok {
-					tailBytes, rerr := io.ReadAll(io.LimitReader(trc, (o.Size-old.Size)+1))
-					_ = trc.Close()
-					if rerr == nil && int64(len(tailBytes)) == o.Size-old.Size {
-						if ops, perr := journal.Parse(tailBytes); perr == nil && len(ops) > 0 {
-							return ops, fullSHA, true
-						}
-					}
-				} else {
-					_ = trc.Close()
-				}
-			}
+		if res, hit := r.readVerifiedJournalTail(ctx, o, old.Size, old.PrefixSHA256, nil, nlUnknown); hit && len(res.ops) > 0 {
+			return res.ops, res.fullSHA, true
 		}
 	}
 
@@ -416,13 +463,9 @@ func (r *RemoteSource) verifyAndReadTail(ctx context.Context, o remote.Object, o
 		return nil, old.PrefixSHA256, true
 	}
 	tailLen := o.Size - old.Size
-	tailBytes, err := io.ReadAll(io.LimitReader(rc, tailLen+1))
-	if err != nil || int64(len(tailBytes)) != tailLen {
-		return nil, "", false
-	}
-	_, _ = h.Write(tailBytes)
-	ops, err := journal.Parse(tailBytes)
-	if err != nil || len(ops) == 0 {
+	tailMeter := &byteCounterAndLast{h: h}
+	ops, perr := journal.ParseReaderSized(io.TeeReader(io.LimitReader(rc, tailLen+1), tailMeter), tailLen)
+	if perr != nil || tailMeter.n != tailLen || len(ops) == 0 {
 		return nil, "", false
 	}
 	return ops, hex.EncodeToString(h.Sum(nil)), true
@@ -441,12 +484,12 @@ func (r *RemoteSource) verifyAndReadTails(ctx context.Context, keep []remote.Obj
 	g.SetLimit(journalFetchConcurrency)
 	for i, o := range keep {
 		i, o := i, o
-		old := prevMeta[o.Key]
-		if o.Size > old.Size {
+		old, existed := prevMeta[o.Key]
+		if !existed || o.Size > old.Size {
 			grew = true
 		}
 		g.Go(func() error {
-			ops, fullSHA, ok := r.verifyAndReadTail(gctx, o, old, alwaysVerifyPrefix)
+			ops, fullSHA, ok := r.verifyAndReadTail(gctx, o, old, existed, alwaysVerifyPrefix)
 			if !ok {
 				return io.ErrUnexpectedEOF
 			}
@@ -455,6 +498,8 @@ func (r *RemoteSource) verifyAndReadTails(ctx context.Context, keep []remote.Obj
 			updatedMeta[o.Key] = ckptJournalMeta{
 				Size:         o.Size,
 				ModTime:      o.Modified,
+				Version:      o.Version,
+				CRC32C:       o.CRC32C,
 				Ops:          old.Ops + len(ops),
 				PrefixSHA256: fullSHA,
 			}
@@ -468,7 +513,7 @@ func (r *RemoteSource) verifyAndReadTails(ctx context.Context, keep []remote.Obj
 	return tails, updatedMeta, grew, true
 }
 
-func applyTailSlices(files map[string]FileInfo, tombs map[string]winOp, tails [][]journal.Op) bool {
+func applyTailSlices(files map[string]FileInfo, tombs map[string]winOp, moves moveIndex, tails [][]journal.Op) bool {
 	var merged []journal.Op
 	for _, ops := range tails {
 		merged = append(merged, ops...)
@@ -476,12 +521,54 @@ func applyTailSlices(files map[string]FileInfo, tombs map[string]winOp, tails []
 	if len(merged) > 1 {
 		sort.SliceStable(merged, func(i, j int) bool { return journal.Less(merged[i], merged[j]) })
 	}
+	var newCreateTimes []time.Time
 	for _, op := range merged {
 		if op.Kind != journal.KindPut {
 			return false
 		}
-		if _, ok := files[op.Path]; !ok || !applyFoldOp(files, tombs, op) {
+		prevFI, hadPrev := files[op.Path]
+		if !applyFoldOp(files, tombs, op) {
 			return false
+		}
+		if isBlobSHA(op.Blob) && (!hadPrev || !isBlobSHA(prevFI.Blob)) {
+			if op.Time.IsZero() && len(moves) > 0 {
+				return false
+			}
+			if !op.Time.IsZero() {
+				newCreateTimes = append(newCreateTimes, op.Time.Round(0))
+			}
+		}
+	}
+	if len(newCreateTimes) == 0 || len(moves) == 0 {
+		return true
+	}
+	sort.Slice(newCreateTimes, func(i, j int) bool { return newCreateTimes[i].Before(newCreateTimes[j]) })
+	minT := newCreateTimes[0]
+	maxT := newCreateTimes[len(newCreateTimes)-1]
+	for _, evs := range moves {
+		for _, ev := range evs {
+			if ev.At.IsZero() {
+				return false
+			}
+			at := ev.At.Round(0)
+			if at.After(maxT) {
+				d := at.Sub(maxT)
+				if d == math.MaxInt64 || d > moveWindow {
+					continue
+				}
+			} else if at.Before(minT) {
+				d := minT.Sub(at)
+				if d == math.MaxInt64 || d > moveWindow {
+					continue
+				}
+			}
+			idx := sort.Search(len(newCreateTimes), func(i int) bool { return !newCreateTimes[i].Before(at) })
+			if idx < len(newCreateTimes) && withinMoveWindow(newCreateTimes[idx], at) {
+				return false
+			}
+			if idx > 0 && withinMoveWindow(newCreateTimes[idx-1], at) {
+				return false
+			}
 		}
 	}
 	return true
@@ -513,7 +600,7 @@ func (r *RemoteSource) restoreFoldCheckpoint(ctx context.Context, keep []remote.
 		return nil, nil, nil, false
 	}
 	files, tombs, moves := cloneFiles(cp.Files), cloneTombstones(cp.Tombstones), cloneMoves(cp.Moves)
-	if grew && !applyTailSlices(files, tombs, tails) {
+	if grew && !applyTailSlices(files, tombs, moves, tails) {
 		return nil, nil, nil, false
 	}
 	var baseBytes int64
@@ -555,7 +642,7 @@ func (r *RemoteSource) tryIncrementalFold(ctx context.Context, keep []remote.Obj
 		return nil, nil, nil, false
 	}
 	files, tombs := cloneFiles(prevFiles), cloneTombstones(prevTombs)
-	if !applyTailSlices(files, tombs, tails) {
+	if !applyTailSlices(files, tombs, prevMoves, tails) {
 		return nil, nil, nil, false
 	}
 	r.foldMu.Lock()

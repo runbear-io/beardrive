@@ -38,6 +38,65 @@ type Object struct {
 	// reports it (S3, GCS) and the zero time when it does not. It is how the
 	// hub decides an object can no longer change — see RemoteSource.verify.
 	Modified time.Time
+	// Version, ImmutableVersion, and CRC32C carry internal storage revision
+	// metadata from List when the backend supplies it. Tagged json:"-" so
+	// /store/list never leaks cloud generation numbers or changes wire format.
+	Version          Version `json:"-"`
+	ImmutableVersion bool    `json:"-"`
+	CRC32C           uint32  `json:"-"`
+}
+
+// RangeGetter is the optional tail-read capability offered by backends that
+// can seek without downloading the prefix first.
+type RangeGetter interface {
+	GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
+}
+
+// VersionedRangeGetter reads a byte range pinned to the object's current
+// version and returns that version alongside the reader.
+type VersionedRangeGetter interface {
+	GetVersionedRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, Version, error)
+}
+
+// ObjectMeta describes an object's current storage revision, byte length,
+// optional CRC32C checksum, and normalized lowercase user metadata.
+type ObjectMeta struct {
+	Version  Version
+	Size     int64
+	CRC32C   uint32
+	Metadata map[string]string
+}
+
+// VersionedMetaBackend is the optional capability of object stores (GCS, S3)
+// that attach custom metadata atomically to each conditional object revision.
+type VersionedMetaBackend interface {
+	ConditionalPutter
+	RangeGetter
+	VersionedRangeGetter
+	GetVersionedWithMeta(ctx context.Context, key string) (io.ReadCloser, ObjectMeta, error)
+	PutIfWithMeta(ctx context.Context, key string, r io.Reader, size int64, expect Version, meta map[string]string) (ObjectMeta, error)
+	GetVersionedRangeWithMeta(ctx context.Context, key string, offset, length int64) (io.ReadCloser, ObjectMeta, error)
+}
+
+func normalizeMeta(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[strings.ToLower(k)] = v
+	}
+	return out
+}
+
+func boundedReadCloser(rc io.ReadCloser, length int64) io.ReadCloser {
+	if length <= 0 {
+		return rc
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{io.LimitReader(rc, length), rc}
 }
 
 // SignedPut is a presigned direct-upload request: whoever holds the URL can

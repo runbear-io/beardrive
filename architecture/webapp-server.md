@@ -158,6 +158,9 @@ classDiagram
         -sealed sync.Map sha→proved immutable
         -jcache map key→cachedJournal
         -jbytes int64 raw bytes cached
+        -jverCache map key→*journalVersionRing
+        -readVerifiedJournalTail(...) range GET + SHA-256 midstate
+        -readVerifiedJournalTailRaw(...) range GET for filteredJournal
         -loadSourcedOps(ctx) []sourcedOp
         -listJournals(ctx) []remote.Object
         -parsedJournals(ctx, keep) [][]journal.Op
@@ -184,16 +187,23 @@ classDiagram
     }
     class cachedJournal {
         +size int64
+        +version remote.Version
         +mod time.Time
         +bytes int64
         +ops []journal.Op
+        +rawPrefixHash [32]byte
+        +hashState []byte
+        +endsInNewline bool
     }
-    note for cachedJournal "Journals only GROW — a device appends only to its own, and appendOp rewrites its key with strictly more bytes — so the (Size, Modified) List already reports proves a parse is still current. That is why the cache needs no expiry and no new Backend method: loadSourcedOps still Lists on every request, and fetches only the keys whose size or mtime moved (concurrently, limit 8). History used to re-download and re-parse EVERY journal per page, which is what made it 8-10s and made paging cost more rather than less. Bounded by a per-project raw-byte cap with all-or-nothing eviction"
-    note for RemoteSource "FilesWithMoves reuses the last fold when the journal listing (key, size, modified) is unchanged — journals only grow and replay is deterministic, so an idle project's refresh is one List. Otherwise byPathOrder groups ops by path and sorts each group by journal.Less instead of sorting the whole project: the last writer per path and the move pairing depend only on one path's own order, so the answer is the global sort's"
+    note for cachedJournal "Journals only GROW — a device appends only to its own, and appendOp writes with compare-and-swap — so List's (Size, Modified, Version) proves whether a parse is current. When a journal grows past a newline boundary, fetchJournal and checkpoint/histIndex tail readers verify the prefix against either the in-memory 4-version journalVersionRing or atomic bdrive-append-chain object metadata and fetch only the appended tail via VersionedMetaBackend / VersionedRangeGetter, advancing cached SHA-256 midstate in O(tail) and returning 3-index clipped op slices. Streaming reads (journal.ParseReader / filterJournalReader) parse without full-object heap copies."
+    note for RemoteSource "FilesWithMoves reuses the last fold when the journal listing (key, size, modified, version) is unchanged — journals only grow and replay is deterministic, so an idle project's refresh is one List. Incremental fold checkpoints (fold_checkpoint.go) and histIndex (histindex.go) verify grown or new journals via tail reads and skip redundant unchanged prefix downloads when ImmutableVersion and CRC32C match on CAS backends, rejecting tail splices near moves/deletes (Link→Blob transitions and time bounds) back to a full fold. Otherwise byPathOrder groups ops by path and sorts each group by journal.Less instead of sorting the whole project: the last writer per path and the move pairing depend only on one path's own order, so the answer is the global sort's"
     class histIndex {
         +all []sourcedOp in journal.Less order
         +kinds add/edit/delete
         +prevs replaced blob
+        +journals map[string]ckptJournalMeta
+        -exists map[string]bool
+        -last map[string]string
         +moveIndex() built on first use
     }
     RemoteSource ..> histIndex : historyIndex, per journal fingerprint
@@ -297,6 +307,20 @@ classDiagram
         +GetVersioned(ctx, key) body, Version
         +PutIf(ctx, key, r, size, expect) Version
     }
+    class RangeGetter {
+        <<interface>>
+        +GetRange(ctx, key, offset, length) body
+    }
+    class VersionedRangeGetter {
+        <<interface>>
+        +GetVersionedRange(ctx, key, offset, length) body, Version
+    }
+    class VersionedMetaBackend {
+        <<interface>>
+        +GetVersionedWithMeta(ctx, key) body, ObjectMeta
+        +GetVersionedRangeWithMeta(ctx, key, offset, length) body, ObjectMeta
+        +PutIfWithMeta(ctx, key, r, size, expect, meta) ObjectMeta
+    }
     class JournalAppender {
         <<interface>>
         +AppendJournal(ctx, req) error
@@ -305,7 +329,7 @@ classDiagram
         <<interface>>
         +GetJournalTail(ctx, key, offset, prefixSHA256) rc, appended, error
     }
-    note for ConditionalPutter "internal/remote — optional, same mold again: gcsBackend implements it over object generations, and localBackend under an exclusive flock on the directory with the object's content hash as its version (local_cas.go — local filesystems only; it is what lets two bdrive serve processes, or two Servers in a test, share one directory). It exists because a journal append is a READ-MODIFY-WRITE and Put is last-writer-wins: two hub processes both read one journal, both append their own ops, and whichever writes second silently erases the other's with no error anywhere, because both writes succeeded. That is the lost update the &quot;each device writes only its own journal&quot; invariant prevents BETWEEN devices, reappearing inside ONE device id as soon as the hub runs twice. The precondition has to be evaluated by the STORE because that is the only party the two processes share — nothing either of them holds can serialise the other. Version is OPAQUE (a generation, an ETag, a fingerprint share nothing but equality) and VersionAbsent means &quot;create, and fail if somebody beat me&quot;. appendOps retries a bounded five times, and every attempt reads the journals again AFTER reading the version it is conditioned on, re-checks the write's commitBase and re-stamps seq and lamport — so a retry can neither reuse a seq the other process has just taken nor land on a version it was not built on. remote.Prefixed forwards it (as it forwards PutSigner): it used to drop it, so every hub project appended last-writer-wins even on GCS. upmu is kept — it stops N goroutines in one process taking the slow path, which is a different job. S3 deliberately does NOT implement it: conditional PutObject is unevenly supported"
+    note for ConditionalPutter "internal/remote — optional capabilities exposed via exact capability-preserving combinators in remote.Prefixed: gcsBackend (object generations), s3Backend (ETag If-Match / If-None-Match:*), and localBackend (directory flock + SHA-256 content version in local_cas.go) implement ConditionalPutter, RangeGetter, and VersionedRangeGetter; gcsBackend and s3Backend also implement VersionedMetaBackend for atomic bdrive-append-chain metadata alongside conditional writes and generation/ETag-pinned range GETs. Version is OPAQUE and VersionAbsent means &quot;create, and fail if somebody beat me&quot;. appendOps retries a bounded five times, re-reading after each precondition failure and re-stamping seq/lamport."
     note for ConditionalPutter "file:// CAS opens one descriptor, tries LOCK_EX|LOCK_NB immediately and creates a reusable timer only under contention. Cancellation closes an unacquired descriptor without unlocking the external holder. A successful acquisition is checked for cancellation and released once by its owner."
     note for Watcher "internal/remote — optional, in the PutSigner mold: only httpBackend implements it (GET /api/p/id/events). The channel carries NO payload — the daemon's only question is &quot;talk to the remote now?&quot;, and the answer to a burst is one cycle, so the impl coalesces on a buffer of one and can never make the hub's writer block. A closed channel means the path is gone (hub down, proxy timeout, an older hub with no route) and the caller falls back to its interval. Accelerator only: nothing may depend on a signal arriving, because for every object-store backend none ever will. Its stream gets a client WITHOUT httpBackend's 5-minute whole-request timeout (doWith), which would otherwise sever a healthy idle stream on the dot"
     note for Backend "internal/remote — impls: localBackend (file://), s3Backend, gcsBackend, httpBackend (https:// hub), Prefixed wrapper"
@@ -923,6 +947,10 @@ classDiagram
     RemoteSource o-- Backend : Prefixed(Root, projectID)
     RemoteSource ..> commitBase : appendOpsIf, every attempt
     Backend <|-- PutSigner : optional capability
+    Backend <|-- ConditionalPutter : optional capability
+    Backend <|-- RangeGetter : optional capability
+    Backend <|-- VersionedRangeGetter : optional capability
+    Backend <|-- VersionedMetaBackend : optional atomic metadata + range
     Backend <|-- Watcher : optional capability
     Backend <|-- JournalAppender : optional capability (https:// v2 append)
     Backend <|-- JournalTailGetter : optional capability (https:// v2 tail pull)
@@ -970,7 +998,7 @@ classDiagram
     RemoteSource ..> sourcedOp : attribution comes from the journal key
     undoRunDoor ..> sourcedOp : selects a run by the journal it was read from
     undoRunDoor ..> RemoteSource : appendOps — the whole run in one Put
-    RemoteSource *-- cachedJournal : parsed ops, keyed on size+mtime
+    RemoteSource *-- cachedJournal : parsed ops, keyed on size+mtime+version
     ReadLedger ..> ReadStat
     ReadLedger ..> SessionRead
     ReadLedger ..> HeatEntry

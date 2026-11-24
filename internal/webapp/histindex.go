@@ -102,8 +102,8 @@ func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remot
 
 	baseLen := len(prev.all)
 	totalLen := baseLen + len(tailAll)
-	// Three-index slice on prev.all/kinds/prevs so appending allocates Only if cap is exceeded,
-	// or if spare capacity exists, writes only into [baseLen:totalLen] beyond prev's length.
+	// Allocate fresh slices for all/kinds/prevs so incremental extensions never alias
+	// backing arrays with concurrent readers.
 	all := make([]sourcedOp, totalLen)
 	copy(all, prev.all[:baseLen])
 	copy(all[baseLen:], tailAll)
