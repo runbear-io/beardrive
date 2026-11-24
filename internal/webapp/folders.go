@@ -585,10 +585,15 @@ func filterJournal(data []byte, f pathFilter) []byte {
 // object's identity. Unknown metadata must be resolved before a cache lookup.
 // The byte budget evicts least-recently-used entries, not every scope at once.
 type filteredJournal struct {
-	size int64
-	mod  time.Time
-	data []byte
-	seq  uint64
+	size      int64
+	version   remote.Version
+	mod       time.Time
+	data      []byte
+	rawPrefix [32]byte
+	hashState []byte
+	hasPrefix bool
+	endsNL    bool
+	seq       uint64
 }
 
 const maxFilteredJournalBytes = 32 << 20
@@ -614,20 +619,42 @@ func (r *RemoteSource) filterObject(ctx context.Context, o remote.Object) (remot
 }
 
 func (r *RemoteSource) cachedFilter(o remote.Object, tag string) ([]byte, bool) {
+	c, ok := r.cachedFilterEntry(o, tag)
+	if !ok {
+		return nil, false
+	}
+	return c.data, true
+}
+
+func (r *RemoteSource) cachedFilterEntry(o remote.Object, tag string) (filteredJournal, bool) {
 	r.fmu.Lock()
 	defer r.fmu.Unlock()
 	key := filterKey(o.Key, tag)
 	c, ok := r.fcache[key]
-	if !ok || c.size != o.Size || !c.mod.Equal(o.Modified) {
-		return nil, false
+	if !ok || c.size != o.Size || !c.mod.Equal(o.Modified) || c.version != o.Version {
+		return filteredJournal{}, false
 	}
 	r.fseq++
 	c.seq = r.fseq
 	r.fcache[key] = c
-	return c.data, true
+	return c, true
+}
+
+func (r *RemoteSource) cachedFilterPrefix(o remote.Object, tag string) (filteredJournal, bool) {
+	r.fmu.Lock()
+	defer r.fmu.Unlock()
+	c, ok := r.fcache[filterKey(o.Key, tag)]
+	if !ok || !c.hasPrefix || !c.endsNL || c.size <= 0 || o.Size <= c.size {
+		return filteredJournal{}, false
+	}
+	return c, true
 }
 
 func (r *RemoteSource) putFilter(o remote.Object, tag string, data []byte) {
+	r.putFilterEntry(o, tag, data, [32]byte{}, nil, false, false)
+}
+
+func (r *RemoteSource) putFilterEntry(o remote.Object, tag string, data []byte, rawPrefix [32]byte, hashState []byte, hasPrefix, endsNL bool) {
 	r.fmu.Lock()
 	defer r.fmu.Unlock()
 	if r.fcache == nil {
@@ -653,7 +680,17 @@ func (r *RemoteSource) putFilter(o remote.Object, tag string, data []byte) {
 		delete(r.fcache, oldest)
 	}
 	r.fseq++
-	r.fcache[key] = filteredJournal{size: o.Size, mod: o.Modified, data: data, seq: r.fseq}
+	r.fcache[key] = filteredJournal{
+		size:      o.Size,
+		version:   o.Version,
+		mod:       o.Modified,
+		data:      data,
+		rawPrefix: rawPrefix,
+		hashState: hashState,
+		hasPrefix: hasPrefix,
+		endsNL:    endsNL,
+		seq:       r.fseq,
+	}
 	r.fbytes += int64(len(data))
 }
 

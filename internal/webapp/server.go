@@ -757,7 +757,7 @@ type RemoteSource struct {
 	ckptBytes   int64
 
 	jverMu    sync.Mutex
-	jverCache map[string]journalVersionEntry
+	jverCache map[string]*journalVersionRing
 	jverOrder []string
 	// flight joins requests for the same derived state of the same journal
 	// listing (a fold, a history index) into one computation. Each copy is
@@ -773,10 +773,12 @@ type versionedBlobBackend interface {
 // proves the parse is still current. See loadSourcedOps.
 type cachedJournal struct {
 	size          int64
+	version       remote.Version
 	mod           time.Time
 	bytes         int64 // raw bytes this entry stands for, for the ceiling
 	ops           []journal.Op
 	rawPrefixHash [32]byte
+	hashState     []byte
 	endsInNewline bool // a torn final line must be reparsed when more bytes arrive
 }
 
@@ -1334,8 +1336,8 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 	live := make(map[string]bool, len(keep))
 	for i, o := range keep {
 		live[o.Key] = true
-		if c, ok := r.jcache[o.Key]; ok && c.size == o.Size && c.mod.Equal(o.Modified) {
-			parsed[i] = c.ops
+		if c, ok := r.jcache[o.Key]; ok && c.size == o.Size && c.mod.Equal(o.Modified) && c.version == o.Version {
+			parsed[i] = c.ops[:len(c.ops):len(c.ops)]
 			continue
 		}
 		misses = append(misses, i)
@@ -1370,7 +1372,7 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 						return res.Err
 					}
 					c := res.Val.(cachedJournal)
-					if c.size != o.Size || !c.mod.Equal(o.Modified) {
+					if c.size != o.Size || !c.mod.Equal(o.Modified) || c.version != o.Version {
 						// The shared fetch belonged to a different listing.
 						// Retry under this request's metadata, not its old parse.
 						if err := gctx.Err(); err != nil {
@@ -1378,7 +1380,7 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 						}
 						continue
 					}
-					parsed[i] = c.ops
+					parsed[i] = c.ops[:len(c.ops):len(c.ops)]
 					break
 				}
 				return nil
@@ -1402,44 +1404,87 @@ func (r *RemoteSource) fetchJournal(ctx context.Context, o remote.Object) (cache
 	r.jmu.Lock()
 	prev, hadPrev := r.jcache[o.Key]
 	r.jmu.Unlock()
-	if hadPrev && prev.size == o.Size && prev.mod.Equal(o.Modified) {
+	if hadPrev && prev.size == o.Size && prev.mod.Equal(o.Modified) && prev.version == o.Version {
+		prev.ops = prev.ops[:len(prev.ops):len(prev.ops)]
 		return prev, nil
+	}
+	// Warm append path: read only the verified appended tail via range GET and
+	// advance the cached SHA-256 midstate instead of re-downloading the prefix.
+	if hadPrev && prev.size > 0 && prev.bytes == prev.size && prev.endsInNewline && len(prev.hashState) > 0 && o.Size > prev.size {
+		prevHex := hex.EncodeToString(prev.rawPrefixHash[:])
+		if tailRes, hit := r.readVerifiedJournalTail(ctx, o, prev.size, prevHex, prev.hashState, nlTrue); hit {
+			r.jmu.Lock()
+			if r.jcache == nil {
+				r.jcache = make(map[string]cachedJournal)
+			}
+			cur, stillPrev := r.jcache[o.Key]
+			reuseCur := stillPrev &&
+				cur.size == prev.size &&
+				cur.mod.Equal(prev.mod) &&
+				cur.version == prev.version &&
+				cur.rawPrefixHash == prev.rawPrefixHash &&
+				len(cur.ops) == len(prev.ops) &&
+				(len(cur.ops) == 0 || (len(prev.ops) > 0 && &cur.ops[0] == &prev.ops[0]))
+			var combined []journal.Op
+			if reuseCur {
+				combined = append(cur.ops, tailRes.ops...)
+			} else {
+				combined = make([]journal.Op, len(prev.ops)+len(tailRes.ops))
+				copy(combined, prev.ops)
+				copy(combined[len(prev.ops):], tailRes.ops)
+			}
+			c := cachedJournal{
+				size:          o.Size,
+				version:       o.Version,
+				mod:           o.Modified,
+				bytes:         o.Size,
+				ops:           combined,
+				rawPrefixHash: tailRes.fullHash,
+				hashState:     tailRes.hashState,
+				endsInNewline: tailRes.endsInNewline,
+			}
+			if stillPrev {
+				r.jbytes -= cur.bytes
+			}
+			r.jcache[o.Key] = c
+			r.jbytes += c.bytes
+			r.jmu.Unlock()
+			ret := c
+			ret.ops = c.ops[:len(c.ops):len(c.ops)]
+			return ret, nil
+		}
 	}
 	rc, err := r.Backend.Get(ctx, o.Key)
 	if err != nil {
 		return cachedJournal{}, fmt.Errorf("fetch %s: %w", o.Key, err)
 	}
-	raw, err := io.ReadAll(rc)
+	h := sha256.New()
+	meter := &byteCounterAndLast{h: h}
+	ops, err := journal.ParseReaderSized(io.TeeReader(rc, meter), o.Size)
 	rc.Close()
 	if err != nil {
 		return cachedJournal{}, err
 	}
+	var sumArr [32]byte
+	copy(sumArr[:], h.Sum(nil))
 	c := cachedJournal{
-		size: o.Size, mod: o.Modified, bytes: int64(len(raw)),
-		rawPrefixHash: sha256.Sum256(raw),
-		endsInNewline: len(raw) > 0 && raw[len(raw)-1] == '\n',
-	}
-	if hadPrev && prev.size > 0 && prev.bytes == prev.size && prev.endsInNewline &&
-		o.Size > prev.size && int64(len(raw)) == o.Size &&
-		sha256.Sum256(raw[:prev.size]) == prev.rawPrefixHash {
-		tail, err := journal.Parse(raw[prev.size:])
-		if err == nil {
-			c.ops = make([]journal.Op, len(prev.ops)+len(tail))
-			copy(c.ops, prev.ops)
-			copy(c.ops[len(prev.ops):], tail)
-		}
-	} else {
-		// Keep the existing contract: corrupt input is ignored, not a broken
-		// viewer, and the empty parse is cached until the object changes.
-		c.ops, _ = journal.Parse(raw)
+		size:          o.Size,
+		version:       o.Version,
+		mod:           o.Modified,
+		bytes:         meter.n,
+		ops:           ops,
+		rawPrefixHash: sumArr,
+		hashState:     marshalSHA256State(h),
+		endsInNewline: meter.n > 0 && meter.lastByte == '\n',
 	}
 	// A push between List and Get makes the listing's identity unsuitable as
 	// a cache key. Serve the fetched ops, but let the next listing cache them.
-	if int64(len(raw)) != o.Size {
-		return c, nil
+	if meter.n != o.Size {
+		ret := c
+		ret.ops = c.ops[:len(c.ops):len(c.ops)]
+		return ret, nil
 	}
 	r.jmu.Lock()
-	defer r.jmu.Unlock()
 	if r.jcache == nil {
 		r.jcache = make(map[string]cachedJournal)
 	}
@@ -1448,7 +1493,10 @@ func (r *RemoteSource) fetchJournal(ctx context.Context, o remote.Object) (cache
 	}
 	r.jcache[o.Key] = c
 	r.jbytes += c.bytes
-	return c, nil
+	r.jmu.Unlock()
+	ret := c
+	ret.ops = c.ops[:len(c.ops):len(c.ops)]
+	return ret, nil
 }
 
 func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
@@ -1556,7 +1604,7 @@ func (r *RemoteSource) cachedFold(fp string) (map[string]FileInfo, moveIndex, *s
 func journalFingerprint(objs []remote.Object) string {
 	var b strings.Builder
 	for _, o := range objs {
-		fmt.Fprintf(&b, "%s\x00%d\x00%d\n", o.Key, o.Size, o.Modified.UnixNano())
+		fmt.Fprintf(&b, "%s\x00%d\x00%d\x00%s\n", o.Key, o.Size, o.Modified.UnixNano(), o.Version)
 	}
 	return b.String()
 }
