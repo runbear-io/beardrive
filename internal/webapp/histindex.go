@@ -19,6 +19,7 @@ const (
 
 type histIndex struct {
 	sources  []sourcedJournal // borrows jcache slices (+ any incremental tails)
+	baseOffs []int            // starting index in jcache slice for each entry in sources
 	order    []opRef          // sorted by journal.Less
 	kinds    []uint8
 	prevs    []string
@@ -126,17 +127,18 @@ func cMatchesMeta(c cachedJournal, m ckptJournalMeta) bool {
 	return hex.EncodeToString(c.rawPrefixHash[:]) == m.PrefixSHA256
 }
 
-func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remote.Object) (*histIndex, bool) {
+func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remote.Object) (*histIndex, bool, uint64) {
 	prev := histCache.peek(r)
 	if prev == nil || len(prev.journals) == 0 || prev.exists == nil || prev.last == nil {
-		return nil, false
+		return nil, false, 0
 	}
 	tails, updatedMeta, grew, ok := r.verifyAndReadTails(ctx, keep, prev.journals, false)
 	if !ok || !grew {
-		return nil, false
+		return nil, false, 0
 	}
 	baseSources := len(prev.sources)
 	var tailSources []sourcedJournal
+	var tailOffs []int
 	var tailRefs []opRef
 	for i, o := range keep {
 		if len(tails[i]) == 0 {
@@ -145,15 +147,17 @@ func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remot
 		jIdx := int32(baseSources + len(tailSources))
 		tailOps := tails[i][:len(tails[i]):len(tails[i])]
 		tailSources = append(tailSources, sourcedJournal{
+			Key:  o.Key,
 			From: journalDevice(o.Key),
 			Ops:  tailOps,
 		})
+		tailOffs = append(tailOffs, prev.journals[o.Key].Ops)
 		for k := range tailOps {
 			tailRefs = append(tailRefs, opRef{j: jIdx, i: int32(k)})
 		}
 	}
 	if len(tailRefs) == 0 {
-		return nil, false
+		return nil, false, 0
 	}
 	slices.SortStableFunc(tailRefs, func(a, b opRef) int {
 		oa := &tailSources[int(a.j)-baseSources].Ops[a.i]
@@ -171,36 +175,46 @@ func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remot
 		lastPrev, _ := prev.opAt(baseLen - 1)
 		firstTail := &tailSources[int(tailRefs[0].j)-baseSources].Ops[tailRefs[0].i]
 		if !journal.Less(*lastPrev, *firstTail) {
-			return nil, false
+			return nil, false, 0
 		}
 	}
+
+	sources := make([]sourcedJournal, baseSources+len(tailSources))
+	copy(sources, prev.sources)
+	copy(sources[baseSources:], tailSources)
+	baseOffs := make([]int, len(sources))
+	copy(baseOffs, prev.baseOffs)
+	copy(baseOffs[baseSources:], tailOffs)
+	// Require an active jcache generation before taking ownership of prev's
+	// maps, and re-anchor both prior sources and prior tails onto jcache's
+	// latest slices when prefixes match so grown arrays are not pinned.
+	r.jmu.Lock()
+	jgen, hasJ := r.jgen, len(r.jcache) > 0
+	if !hasJ || jgen == 0 {
+		r.jmu.Unlock()
+		return nil, false, 0
+	}
+	for j := range sources {
+		key := sources[j].Key
+		if key == "" {
+			continue
+		}
+		off := baseOffs[j]
+		oldLen := len(sources[j].Ops)
+		c, has := r.jcache[key]
+		if !has || off+oldLen > len(c.ops) {
+			continue
+		}
+		if cMatchesMeta(c, updatedMeta[key]) || cMatchesMeta(c, prev.journals[key]) {
+			sources[j].Ops = c.ops[off : off+oldLen : off+oldLen]
+		}
+	}
+	r.jmu.Unlock()
 
 	// Take exclusive ownership of prev.exists and prev.last only after all
 	// fallible guards succeed so a fallback keeps prev reusable.
 	exists, last := prev.exists, prev.last
 	prev.exists, prev.last = nil, nil
-
-	sources := make([]sourcedJournal, baseSources+len(tailSources))
-	copy(sources, prev.sources)
-	copy(sources[baseSources:], tailSources)
-	// Re-anchor base journal slices onto jcache's latest slice when prefixes
-	// match so an incremental append does not pin old grown arrays in heap.
-	r.jmu.Lock()
-	for j := range baseSources {
-		key := sources[j].Key
-		if key == "" {
-			continue
-		}
-		oldLen := len(sources[j].Ops)
-		c, has := r.jcache[key]
-		if !has || len(c.ops) < oldLen {
-			continue
-		}
-		if cMatchesMeta(c, updatedMeta[key]) || cMatchesMeta(c, prev.journals[key]) {
-			sources[j].Ops = c.ops[:oldLen:oldLen]
-		}
-	}
-	r.jmu.Unlock()
 
 	totalLen := baseLen + len(tailRefs)
 	order := make([]opRef, totalLen)
@@ -255,9 +269,9 @@ func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remot
 	byTime = append(byTime, prev.byTime[pi:]...)
 
 	return &histIndex{
-		sources: sources, order: order, kinds: kinds, prevs: prevs, byTime: byTime,
+		sources: sources, baseOffs: baseOffs, order: order, kinds: kinds, prevs: prevs, byTime: byTime,
 		journals: updatedMeta, exists: exists, last: last,
-	}, true
+	}, true, jgen
 }
 
 type histFlightResult struct {
@@ -279,8 +293,8 @@ func (r *RemoteSource) historyIndex(ctx context.Context) (*histIndex, error) {
 			if cur := histCache.get(r, fp); cur != nil {
 				return histFlightResult{fp: fp, x: cur}, nil
 			}
-			if inc, ok := r.tryIncrementalHistIndex(context.WithoutCancel(ctx), keep); ok {
-				histCache.put(r, fp, inc)
+			if inc, ok, jgen := r.tryIncrementalHistIndex(context.WithoutCancel(ctx), keep); ok {
+				histCache.putIfJournal(r, fp, inc, jgen, true)
 				return histFlightResult{fp: fp, x: inc}, nil
 			}
 			sources, err := r.sourcedJournalsOf(context.WithoutCancel(ctx), keep)
@@ -288,12 +302,15 @@ func (r *RemoteSource) historyIndex(ctx context.Context) (*histIndex, error) {
 				return nil, err
 			}
 			jmeta, _ := r.journalMetaFromCache(keep)
+			r.jmu.Lock()
+			jgen, hasJ := r.jgen, len(r.jcache) > 0
+			r.jmu.Unlock()
 			// Drop the previous histIndex before allocating the new one so two full
 			// indexes for the same project never coexist in memory.
 			histCache.clearSource(r)
 			x := buildHistIndex(sources)
 			x.journals = jmeta
-			histCache.put(r, fp, x)
+			histCache.putIfJournal(r, fp, x, jgen, hasJ)
 			return histFlightResult{fp: fp, x: x}, nil
 		})
 		if err != nil {
@@ -351,8 +368,31 @@ func (c *histLRU) clearSource(src *RemoteSource) {
 }
 
 func (c *histLRU) put(src *RemoteSource, fp string, x *histIndex) {
+	src.jmu.Lock()
+	jgen, hasJ := src.jgen, len(src.jcache) > 0
+	src.jmu.Unlock()
+	c.putIfJournal(src, fp, x, jgen, hasJ)
+}
+
+func (c *histLRU) putIfJournal(src *RemoteSource, fp string, x *histIndex, expectedJGen uint64, hasJournal bool) {
+	bytes := int64(len(x.order)) * histOpBytes
 	c.mu.Lock()
-	gen, evict := hubCaches.charge(src, historyCache, int64(len(x.order))*histOpBytes)
+	var gen uint64
+	var evict []evicted
+	if bytes == 0 {
+		gen, evict = hubCaches.charge(src, historyCache, 0)
+	} else {
+		if !hasJournal {
+			c.mu.Unlock()
+			return
+		}
+		var ok bool
+		gen, evict, ok = hubCaches.chargeHistoryIfJournal(src, bytes, expectedJGen)
+		if !ok {
+			c.mu.Unlock()
+			return
+		}
+	}
 	c.entries[src] = &histEntry{fp: fp, x: x, gen: gen}
 	c.mu.Unlock()
 	dropEvicted(evict)

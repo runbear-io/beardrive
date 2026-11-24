@@ -129,6 +129,24 @@ func (b *cacheBudget) touch(src *RemoteSource, kinds ...cacheKind) {
 func (b *cacheBudget) charge(src *RemoteSource, kind cacheKind, bytes int64) (uint64, []evicted) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.chargeLocked(src, kind, bytes)
+}
+
+// chargeHistoryIfJournal registers a historyCache entry only when src's
+// journalCache is still present at expectedJGen, preventing an evicted or
+// replaced build from pinning orphaned []journal.Op slices in histCache.
+func (b *cacheBudget) chargeHistoryIfJournal(src *RemoteSource, bytes int64, expectedJGen uint64) (uint64, []evicted, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	je := b.entries[budgetKey{src, journalCache}]
+	if je == nil || expectedJGen == 0 || je.gen != expectedJGen {
+		return 0, nil, false
+	}
+	gen, drop := b.chargeLocked(src, historyCache, bytes)
+	return gen, drop, true
+}
+
+func (b *cacheBudget) chargeLocked(src *RemoteSource, kind cacheKind, bytes int64) (uint64, []evicted) {
 	key := budgetKey{src, kind}
 	e := b.entries[key]
 	if e == nil {

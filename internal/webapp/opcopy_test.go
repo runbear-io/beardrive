@@ -179,6 +179,11 @@ func TestHistIndexReanchorsSharedJournalSlices(t *testing.T) {
 		t.Fatal("incremental update mutated prev histIndex slices")
 	}
 
+	s1Tail := &x1.sources[len(x1.sources)-1]
+	if s1Tail.Key != "journal/dev2.jsonl" || unsafe.SliceData(s1Tail.Ops) != unsafe.SliceData(dev2AtO1[origDev2Len:]) {
+		t.Fatal("x1 tail source did not record key/offset onto dev2AtO1")
+	}
+
 	// Now push o2 to dev2 and build history BEFORE parsedJournals refreshes jcache (prev.journals re-anchor path).
 	f.putAs("dev2", "bob@x.io", "Bob", "notes/other.md", "bob v3")
 	x2, err := rs.historyIndex(ctx)
@@ -188,6 +193,10 @@ func TestHistIndexReanchorsSharedJournalSlices(t *testing.T) {
 	s2Dev2 := findSource(x2, "journal/dev2.jsonl")
 	if s2Dev2 == nil || unsafe.SliceData(s2Dev2.Ops) != unsafe.SliceData(dev2AtO1) {
 		t.Fatal("x2 did not re-anchor onto dev2AtO1 jcache slice via prev.journals")
+	}
+	s2PriorTail := &x2.sources[len(x1.sources)-1]
+	if s2PriorTail.Key != "journal/dev2.jsonl" || unsafe.SliceData(s2PriorTail.Ops) != unsafe.SliceData(dev2AtO1[origDev2Len:]) {
+		t.Fatal("x2 did not re-anchor prior tail source onto dev2AtO1")
 	}
 
 	// And verify dev1 remains pinned onto the original dev1 jcache slice.
@@ -349,6 +358,38 @@ func TestConcurrentCacheBudgetCouplesHistAndJournalEviction(t *testing.T) {
 			}(g)
 		}
 		wg.Wait()
+	})
+
+	t.Run("evicted_journal_during_build_skips_orphaned_hist_cache", func(t *testing.T) {
+		a, _, _ := countedProject(t)
+		b, _, _ := countedProject(t)
+
+		keep, err := a.listJournals(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources, err := a.sourcedJournalsOf(ctx, keep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.jmu.Lock()
+		oldJGen := a.jgen
+		a.jmu.Unlock()
+		x := buildHistIndex(sources)
+
+		// Another project evicts A's journalCache while A is still building histIndex.
+		withCacheBudget(t, hubCaches.heldJournals(a))
+		if _, _, err := b.FilesWithMoves(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		histCache.putIfJournal(a, journalFingerprint(keep), x, oldJGen, true)
+		if histCache.peek(a) != nil {
+			t.Fatal("putIfJournal cached orphaned histIndex after journalCache was evicted")
+		}
+		if hubCaches.held(a) != 0 {
+			t.Fatalf("expected 0 budget held for A after journal eviction, got %d", hubCaches.held(a))
+		}
 	})
 }
 
