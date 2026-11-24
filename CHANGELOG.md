@@ -5,6 +5,8 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
+- **Hub reads only appended journal tails instead of re-downloading whole journals.** `gcsBackend` and `s3Backend` now implement `VersionedMetaBackend` (forwarded through `remote.Prefixed`) and `localBackend` implements `VersionedRangeGetter`, storing bounded `bdrive-append-chain` prefix-proof metadata atomically on `PutIfWithMeta` and serving generation- or ETag-pinned range GETs on reads. Warm `fetchJournal`, `filteredJournal`, incremental fold checkpoints, `historyIndex`, and `/api/p/{id}/store/object` tail GETs verify the prior prefix and fetch only the appended tail using incremental SHA-256 midstate, avoiding full-object downloads and re-parses across processes while falling back to streaming `journal.ParseReader` / `filterJournalReader` when a chain is missing or unverified. (#367)
+
 ## v0.18.10 — 2026-11-11
 
 **Update your devices and self-hosted hubs** for the co-editing and merge
