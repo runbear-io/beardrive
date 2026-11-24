@@ -189,24 +189,34 @@ func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remot
 	// maps, and re-anchor both prior sources and prior tails onto jcache's
 	// latest slices when prefixes match so grown arrays are not pinned.
 	r.jmu.Lock()
-	jgen, hasJ := r.jgen, len(r.jcache) > 0
-	if !hasJ || jgen == 0 {
+	jgen, hasAll := r.jgen, len(r.jcache) > 0
+	if hasAll {
+		for k := range prev.journals {
+			if _, ok := r.jcache[k]; !ok {
+				hasAll = false
+				break
+			}
+		}
+	}
+	if !hasAll || jgen == 0 {
 		r.jmu.Unlock()
 		return nil, false, 0
 	}
 	for j := range sources {
 		key := sources[j].Key
-		if key == "" {
-			continue
-		}
 		off := baseOffs[j]
 		oldLen := len(sources[j].Ops)
-		c, has := r.jcache[key]
-		if !has || off+oldLen > len(c.ops) {
-			continue
+		matched := false
+		if key != "" {
+			if c, has := r.jcache[key]; has && off+oldLen <= len(c.ops) &&
+				(cMatchesMeta(c, updatedMeta[key]) || cMatchesMeta(c, prev.journals[key])) {
+				sources[j].Ops = c.ops[off : off+oldLen : off+oldLen]
+				matched = true
+			}
 		}
-		if cMatchesMeta(c, updatedMeta[key]) || cMatchesMeta(c, prev.journals[key]) {
-			sources[j].Ops = c.ops[off : off+oldLen : off+oldLen]
+		if !matched && j < baseSources && oldLen > 0 {
+			r.jmu.Unlock()
+			return nil, false, 0
 		}
 	}
 	r.jmu.Unlock()
@@ -297,20 +307,20 @@ func (r *RemoteSource) historyIndex(ctx context.Context) (*histIndex, error) {
 				histCache.putIfJournal(r, fp, inc, jgen, true)
 				return histFlightResult{fp: fp, x: inc}, nil
 			}
-			sources, err := r.sourcedJournalsOf(context.WithoutCancel(ctx), keep)
+			sources, jgen, allCached, err := r.sourcedJournalsOfGen(context.WithoutCancel(ctx), keep)
 			if err != nil {
 				return nil, err
 			}
-			jmeta, _ := r.journalMetaFromCache(keep)
-			r.jmu.Lock()
-			jgen, hasJ := r.jgen, len(r.jcache) > 0
-			r.jmu.Unlock()
+			jmeta, metaOK := r.journalMetaFromCache(keep)
+			if !metaOK {
+				allCached = false
+			}
 			// Drop the previous histIndex before allocating the new one so two full
 			// indexes for the same project never coexist in memory.
 			histCache.clearSource(r)
 			x := buildHistIndex(sources)
 			x.journals = jmeta
-			histCache.putIfJournal(r, fp, x, jgen, hasJ)
+			histCache.putIfJournal(r, fp, x, jgen, allCached)
 			return histFlightResult{fp: fp, x: x}, nil
 		})
 		if err != nil {
@@ -364,6 +374,7 @@ func (c *histLRU) peek(src *RemoteSource) *histIndex {
 func (c *histLRU) clearSource(src *RemoteSource) {
 	c.mu.Lock()
 	delete(c.entries, src)
+	hubCaches.uncharge(src, historyCache)
 	c.mu.Unlock()
 }
 

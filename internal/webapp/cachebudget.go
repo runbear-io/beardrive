@@ -119,6 +119,17 @@ func (b *cacheBudget) touch(src *RemoteSource, kinds ...cacheKind) {
 	}
 }
 
+// uncharge removes a single cache entry from b and subtracts its byte count.
+func (b *cacheBudget) uncharge(src *RemoteSource, kind cacheKind) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	key := budgetKey{src, kind}
+	if e := b.entries[key]; e != nil {
+		b.total -= e.bytes
+		delete(b.entries, key)
+	}
+}
+
 // charge records that one of src's caches now holds bytes, marks it most
 // recently used, and evicts caches of OTHER sources, least recently used
 // first, until the total fits. It returns the generation the cache must record

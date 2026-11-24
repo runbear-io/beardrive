@@ -1311,9 +1311,14 @@ func (r *RemoteSource) listJournals(ctx context.Context) ([]remote.Object, error
 // sourcedJournalsOf returns read-only views of the listed journals, each with
 // the device whose journal it was read from.
 func (r *RemoteSource) sourcedJournalsOf(ctx context.Context, keep []remote.Object) ([]sourcedJournal, error) {
-	parsed, err := r.parsedJournals(ctx, keep)
+	out, _, _, err := r.sourcedJournalsOfGen(ctx, keep)
+	return out, err
+}
+
+func (r *RemoteSource) sourcedJournalsOfGen(ctx context.Context, keep []remote.Object) ([]sourcedJournal, uint64, bool, error) {
+	parsed, gen, allCached, err := r.parsedJournalsGen(ctx, keep)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 	out := make([]sourcedJournal, len(keep))
 	for i, o := range keep {
@@ -1323,13 +1328,18 @@ func (r *RemoteSource) sourcedJournalsOf(ctx context.Context, keep []remote.Obje
 			Ops:  parsed[i],
 		}
 	}
-	return out, nil
+	return out, gen, allCached, nil
 }
 
 // parsedJournals returns each listed journal's ops, fetching only the ones
 // whose cached parse is not current. The slices are the cache's own: read
 // them, never write or reorder them.
 func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object) ([][]journal.Op, error) {
+	parsed, _, _, err := r.parsedJournalsGen(ctx, keep)
+	return parsed, err
+}
+
+func (r *RemoteSource) parsedJournalsGen(ctx context.Context, keep []remote.Object) ([][]journal.Op, uint64, bool, error) {
 	parsed := make([][]journal.Op, len(keep))
 	var misses []int
 	r.jmu.Lock()
@@ -1390,15 +1400,24 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 			})
 		}
 		if err := g.Wait(); err != nil {
-			return nil, err
+			return nil, 0, false, err
 		}
 	}
 	r.jmu.Lock()
+	allCached := true
+	for i, o := range keep {
+		c, ok := r.jcache[o.Key]
+		if !ok || c.size != o.Size || !c.mod.Equal(o.Modified) ||
+			len(c.ops) != len(parsed[i]) || (len(c.ops) > 0 && &c.ops[0] != &parsed[i][0]) {
+			allCached = false
+			break
+		}
+	}
 	gen, evict := hubCaches.charge(r, journalCache, r.jbytes)
 	r.jgen = gen
 	r.jmu.Unlock()
 	dropEvicted(evict)
-	return parsed, nil
+	return parsed, gen, allCached, nil
 }
 
 // fetchJournal runs under the key's singleflight. Recheck after joining: the

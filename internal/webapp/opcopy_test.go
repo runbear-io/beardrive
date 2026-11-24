@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -391,6 +392,110 @@ func TestConcurrentCacheBudgetCouplesHistAndJournalEviction(t *testing.T) {
 			t.Fatalf("expected 0 budget held for A after journal eviction, got %d", hubCaches.held(a))
 		}
 	})
+
+	t.Run("clear_source_then_rejected_put_does_not_leak_budget", func(t *testing.T) {
+		a, _, _ := countedProject(t)
+		keep, err := a.listJournals(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources, oldJGen, hasAll, err := a.sourcedJournalsOfGen(ctx, keep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		x := buildHistIndex(sources)
+		histCache.putIfJournal(a, journalFingerprint(keep), x, oldJGen, hasAll)
+		jBytes := hubCaches.heldJournals(a)
+		if hubCaches.held(a) <= jBytes {
+			t.Fatalf("expected positive history charge over jBytes (%d), total=%d", jBytes, hubCaches.held(a))
+		}
+
+		// clearSource removes both histCache.entries[a] and hubCaches[{a, historyCache}].
+		// A rejected putIfJournal afterward must leave held == jBytes (zero leaked charge).
+		histCache.clearSource(a)
+		if got := hubCaches.held(a); got != jBytes {
+			t.Fatalf("held after clearSource = %d, want jBytes %d", got, jBytes)
+		}
+		histCache.putIfJournal(a, journalFingerprint(keep), x, oldJGen+999, hasAll)
+		if histCache.peek(a) != nil {
+			t.Fatal("rejected putIfJournal populated histCache")
+		}
+		if got := hubCaches.held(a); got != jBytes {
+			t.Fatalf("held after rejected putIfJournal = %d, want jBytes %d (leaked phantom charge)", got, jBytes)
+		}
+	})
+
+	t.Run("partial_eviction_mid_parsed_journals_skips_hist_cache", func(t *testing.T) {
+		dir := t.TempDir()
+		rawBe, err := remote.Open(ctx, "file://"+dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := newFakeRemoteAt(t, dir)
+		f.putAs("dev1", "alice@x.io", "Alice", "notes/one.md", "one")
+
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		gb := &gateGetKeyBackend{
+			Backend: rawBe,
+			key:     "journal/dev2.jsonl",
+			entered: entered,
+			release: release,
+		}
+		rs := &RemoteSource{Backend: gb}
+		if _, _, err := rs.FilesWithMoves(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		f.putAs("dev2", "bob@x.io", "Bob", "notes/two.md", "two")
+		type res struct {
+			x   *histIndex
+			err error
+		}
+		ch := make(chan res, 1)
+		go func() {
+			x, err := rs.historyIndex(ctx)
+			ch <- res{x: x, err: err}
+		}()
+
+		<-entered
+		// Drop dev1 from jcache while dev2 is still being fetched.
+		rs.jmu.Lock()
+		oldGen := rs.jgen
+		rs.jmu.Unlock()
+		rs.dropJournals(oldGen)
+		close(release)
+
+		got := <-ch
+		if got.err != nil {
+			t.Fatalf("historyIndex error: %v", got.err)
+		}
+		if got.x.len() != 2 {
+			t.Fatalf("historyIndex len = %d, want 2", got.x.len())
+		}
+		if histCache.peek(rs) != nil {
+			t.Fatal("historyIndex cached partial-eviction index pinning uncached dev1 slice")
+		}
+		if gotHeld, jHeld := hubCaches.held(rs), hubCaches.heldJournals(rs); gotHeld != jHeld {
+			t.Fatalf("budget mismatch after skipped cache: held=%d jHeld=%d", gotHeld, jHeld)
+		}
+	})
+}
+
+type gateGetKeyBackend struct {
+	remote.Backend
+	key     string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *gateGetKeyBackend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == g.key {
+		g.once.Do(func() { close(g.entered) })
+		<-g.release
+	}
+	return g.Backend.Get(ctx, key)
 }
 
 // ---- QA-04: appendOpsIf multi-path extra, existingOps, keepAfter, landedAfter (CI -race via Upload) ----
