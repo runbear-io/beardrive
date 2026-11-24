@@ -30,6 +30,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive status [folder]` | Projects, daemon state, pending changes, and any synced files that looked like they held credentials when they last changed |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the change was journaled; a file written more than a minute before it arrived (a rename, or an old document added today) also shows `written <time>` |
 | `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change. No version restores the previous one; `--list` shows the versions with their short hashes |
+| `bdrive gc [folder]` | Show how much disk old file versions take on this device; `--apply` removes them. The hub keeps every version, and `bdrive restore` fetches a removed one back. `--older-than 720h` keeps the last 30 days locally |
 | `bdrive export [folder]` | Export the whole project — all devices' history and content — to a portable `.tar.gz` (`-o` names the file) |
 | `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (`--name` overrides the archive's name) |
 | `bdrive serve [folder \| storage-root-url]` | Web server: viewer, uploads, multi-project sync hub (`bdrive web` is a deprecated alias) |
