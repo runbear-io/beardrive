@@ -1,8 +1,10 @@
 # Every OSS merge to main bumps OSS_COMMIT in runbear-io/beardrive-cloud.
 # That push triggers cloud CI: full test suite against the new pin, then the
 # prod deploy — a bad combo fails cloud CI and never deploys.
-# Needs the CLOUD_BUMP_TOKEN secret: fine-grained PAT, beardrive-cloud repo
-# only, Contents read+write.
+#
+# Authenticates without any GitHub PAT: GitHub OIDC (WIF) reads the
+# repo-scoped Ed25519 write deploy key (`beardrive-cloud-bump-deploy-key`) from
+# GCP Secret Manager (`runbear`), restricted to this workflow on `main`.
 name: bump-cloud
 on:
   push:
@@ -15,13 +17,33 @@ concurrency:
 
 jobs:
   bump:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC for Secret Manager read on main
     steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: runbear
+          workload_identity_provider: projects/795661023209/locations/global/workloadIdentityPools/github-oidc-pool/providers/github-oidc-provider
+
+      - name: Read beardrive-cloud deploy key
+        id: secrets
+        uses: google-github-actions/get-secretmanager-secrets@v3
+        with:
+          secrets: |-
+            deploy_key:runbear/beardrive-cloud-bump-deploy-key
+
       - name: Checkout beardrive-cloud
         uses: actions/checkout@v4
         with:
           repository: runbear-io/beardrive-cloud
-          token: ${{ secrets.CLOUD_BUMP_TOKEN }}
+          # Explicit ref avoids actions/checkout querying the private repo's
+          # default branch via the unprivileged GITHUB_TOKEN.
+          ref: main
+          ssh-key: ${{ steps.secrets.outputs.deploy_key }}
 
       - name: Bump OSS_COMMIT and push
         env:
@@ -43,7 +65,7 @@ jobs:
           # Two quick OSS merges can race; rebase keeps both bumps (last wins
           # on the pin, which is correct — it's the newer OSS commit).
           for i in 1 2 3; do
-            git push && exit 0
-            git pull --rebase
+            git push origin HEAD:main && exit 0
+            git pull --rebase origin main
           done
           exit 1
