@@ -201,6 +201,9 @@ classDiagram
         +all []sourcedOp in journal.Less order
         +kinds add/edit/delete
         +prevs replaced blob
+        +journals map[string]ckptJournalMeta
+        -exists map[string]bool
+        -last map[string]string
         +moveIndex() built on first use
     }
     RemoteSource ..> histIndex : historyIndex, per journal fingerprint

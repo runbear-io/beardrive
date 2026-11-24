@@ -997,6 +997,48 @@ func TestQA12_JournalVersionRingProtectsWriteFromLaggingReaders(t *testing.T) {
 	if keyCount > maxJournalVersionCacheKeys {
 		t.Fatalf("keyCount %d > maxJournalVersionCacheKeys (%d)", keyCount, maxJournalVersionCacheKeys)
 	}
+
+	// lookupVerifiedTail & lookupVerifiedPrefixForGet on older versions must not
+	// evict or demote any of 4 active write entries in journalVersionRing.
+	rsChain := &RemoteSource{}
+	for w := 1; w <= 4; w++ {
+		v := remote.Version(fmt.Sprintf("w%d", w))
+		rsChain.storeJournalWriteMeta("journal/w.jsonl", v, int64(w*100), sha, 0, int64(w*10), true, true, 0, "", false, nil)
+	}
+	chainStr := formatJournalAppendChain(50, sha, true, 0, map[int64]journalPrefixMark{25: {sha: sha, lineBoundary: true}})
+	readMeta := remote.ObjectMeta{
+		Version:  "r-old",
+		Size:     50,
+		Metadata: map[string]string{journalAppendChainMetaKey: chainStr},
+	}
+	if !rsChain.lookupVerifiedPrefixForGet("journal/w.jsonl", readMeta, 25, sha) {
+		t.Fatal("lookupVerifiedPrefixForGet failed on valid chain")
+	}
+	if _, _, ok := rsChain.lookupVerifiedTail("journal/w.jsonl", readMeta, 25, sha, true); !ok {
+		t.Fatal("lookupVerifiedTail failed on valid chain")
+	}
+	// Repeating a read lookup on an active write version w1 must preserve hasAppend & storedMax without promoting w1 past w4.
+	w1Meta := remote.ObjectMeta{
+		Version:  "w1",
+		Size:     100,
+		Metadata: map[string]string{journalAppendChainMetaKey: formatJournalAppendChain(100, sha, true, 0, map[int64]journalPrefixMark{50: {sha: sha, lineBoundary: true}})},
+	}
+	if !rsChain.lookupVerifiedPrefixForGet("journal/w.jsonl", w1Meta, 50, sha) {
+		t.Fatal("lookupVerifiedPrefixForGet failed on w1 chain")
+	}
+	for w := 1; w <= 4; w++ {
+		v := remote.Version(fmt.Sprintf("w%d", w))
+		e, ok := rsChain.loadJournalAppendMeta("journal/w.jsonl", v)
+		if !ok || e.storedMax != int64(w*10) {
+			t.Fatalf("write entry %s evicted or corrupted after read chain lookups: ok=%v entry=%+v", v, ok, e)
+		}
+	}
+	rsChain.jverMu.Lock()
+	newest := rsChain.jverCache["journal/w.jsonl"].entries[len(rsChain.jverCache["journal/w.jsonl"].entries)-1].version
+	rsChain.jverMu.Unlock()
+	if newest != "w4" {
+		t.Fatalf("newest write entry demoted after reading w1: newest=%q want w4", newest)
+	}
 }
 
 func TestQA13_ParseJournalAppendChainStrict(t *testing.T) {

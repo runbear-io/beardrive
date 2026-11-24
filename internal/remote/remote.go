@@ -89,6 +89,16 @@ func normalizeMeta(in map[string]string) map[string]string {
 	return out
 }
 
+func boundedReadCloser(rc io.ReadCloser, length int64) io.ReadCloser {
+	if length <= 0 {
+		return rc
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{io.LimitReader(rc, length), rc}
+}
+
 // SignedPut is a presigned direct-upload request: whoever holds the URL can
 // PUT that one object until Expires, without ever seeing storage credentials.
 type SignedPut struct {

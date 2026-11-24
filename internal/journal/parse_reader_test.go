@@ -84,4 +84,32 @@ func TestParseReaderParityCapAndFailClosed(t *testing.T) {
 			t.Fatalf("expected no partial ops on error, got %d", len(got))
 		}
 	})
+
+	t.Run("multi-buffer-and-exact-MaxLineBytes-boundary", func(t *testing.T) {
+		multiBuf, err := Marshal([]Op{secpkgOp(10, "notes/"+strings.Repeat("a", 128<<10)+".md")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Exact MaxLineBytes line (without trailing '\n').
+		prefix := `{"seq":11,"kind":"put","path":"notes/`
+		suffix := `"}`
+		padLen := MaxLineBytes - len(prefix) - len(suffix)
+		exactBoundary := []byte(prefix + strings.Repeat("b", padLen) + suffix)
+		if len(exactBoundary) != MaxLineBytes {
+			t.Fatalf("exactBoundary len=%d want=%d", len(exactBoundary), MaxLineBytes)
+		}
+		data := append(append([]byte(nil), multiBuf...), exactBoundary...)
+		data = append(data, '\n')
+		want, err := Parse(data)
+		if err != nil || len(want) != 2 {
+			t.Fatalf("Parse boundary: len=%d err=%v", len(want), err)
+		}
+		got, err := ParseReader(bytes.NewReader(data))
+		if err != nil {
+			t.Fatalf("ParseReader boundary: %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("ParseReader boundary mismatch: got=%+v want=%+v", got, want)
+		}
+	})
 }

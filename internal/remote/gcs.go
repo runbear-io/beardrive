@@ -121,7 +121,7 @@ func (b *gcsBackend) GetRange(ctx context.Context, key string, offset, length in
 		_ = rc.Close()
 		return nil, fmt.Errorf("unexpected range response (decompressed=%v start=%d want=%d)", rc.Attrs.Decompressed, rc.Attrs.StartOffset, offset)
 	}
-	return rc, nil
+	return boundedReadCloser(rc, length), nil
 }
 
 func (b *gcsBackend) List(ctx context.Context, prefix string) ([]Object, error) {
@@ -221,7 +221,7 @@ func (b *gcsBackend) GetVersionedRangeWithMeta(ctx context.Context, key string, 
 		_ = rc.Close()
 		return nil, ObjectMeta{}, fmt.Errorf("unexpected range response (decompressed=%v start=%d want=%d)", rc.Attrs.Decompressed, rc.Attrs.StartOffset, offset)
 	}
-	return rc, meta, nil
+	return boundedReadCloser(rc, length), meta, nil
 }
 
 func (b *gcsBackend) GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error) {

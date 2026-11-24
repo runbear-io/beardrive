@@ -29,11 +29,13 @@ type s3StubObj struct {
 }
 
 type s3Stub struct {
-	mu                     sync.Mutex
-	objs                   map[string]s3StubObj
-	headCalls              int
-	getCalls               int
-	force200NoContentRange bool
+	mu                       sync.Mutex
+	objs                     map[string]s3StubObj
+	headCalls                int
+	getCalls                 int
+	force200NoContentRange   bool
+	forceOnce416             bool
+	forceOversizedRange      bool
 }
 
 func newS3Stub() *s3Stub {
@@ -167,12 +169,23 @@ func (s *s3Stub) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 	s.getCalls++
 	obj, ok := s.objs[key]
 	force200 := s.force200NoContentRange
+	force416 := false
+	if rng != "" && s.forceOnce416 {
+		force416 = true
+		s.forceOnce416 = false
+	}
+	forceOversized := s.forceOversizedRange
 	s.mu.Unlock()
 	if !ok {
 		s.writeXMLError(w, http.StatusNotFound, "NoSuchKey", "missing")
 		return
 	}
 	s.writeObjHeaders(w, obj)
+	if force416 {
+		w.Header().Set("Content-Range", "bytes */0")
+		s.writeXMLError(w, http.StatusRequestedRangeNotSatisfiable, "InvalidRange", "stale 416")
+		return
+	}
 	if rng == "" {
 		w.Header().Set("Content-Length", strconv.Itoa(len(obj.data)))
 		w.WriteHeader(http.StatusOK)
@@ -205,7 +218,11 @@ func (s *s3Stub) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 		}
 	}
 	slice := obj.data[start : end+1]
-	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(obj.data)))
+	reportedEnd := end
+	if forceOversized {
+		reportedEnd = int64(len(obj.data)) - 1
+	}
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, reportedEnd, len(obj.data)))
 	w.Header().Set("Content-Length", strconv.Itoa(len(slice)))
 	w.WriteHeader(http.StatusPartialContent)
 	_, _ = w.Write(slice)
@@ -306,6 +323,37 @@ func TestS3BackendRangeVersionedAndMetadata(t *testing.T) {
 	}
 	stub.mu.Lock()
 	stub.force200NoContentRange = false
+	stub.mu.Unlock()
+
+	// 416 followed by HeadObject seeing concurrent growth retries once and succeeds.
+	stub.mu.Lock()
+	stub.forceOnce416 = true
+	stub.getCalls = 0
+	stub.headCalls = 0
+	stub.mu.Unlock()
+	rcRetry, mRetry, err := be.GetVersionedRangeWithMeta(ctx, "journal/dev.jsonl", 6, 3)
+	if err != nil {
+		t.Fatalf("416 retry failed: %v", err)
+	}
+	gotRetry, _ := io.ReadAll(rcRetry)
+	_ = rcRetry.Close()
+	stub.mu.Lock()
+	gcR, hcR := stub.getCalls, stub.headCalls
+	stub.mu.Unlock()
+	if string(gotRetry) != "lin" || mRetry.Size != int64(len(body)) || gcR != 2 || hcR != 1 {
+		t.Fatalf("416 retry got (%q, %+v, gets=%d, heads=%d)", gotRetry, mRetry, gcR, hcR)
+	}
+
+	// Oversized Content-Range exceeding requested length must be rejected.
+	stub.mu.Lock()
+	stub.forceOversizedRange = true
+	stub.mu.Unlock()
+	if r, _, err := be.GetVersionedRangeWithMeta(ctx, "journal/dev.jsonl", 6, 3); err == nil {
+		_ = r.Close()
+		t.Fatal("expected error on oversized Content-Range")
+	}
+	stub.mu.Lock()
+	stub.forceOversizedRange = false
 	stub.mu.Unlock()
 
 	// Missing key maps to remote.IsNotExist.

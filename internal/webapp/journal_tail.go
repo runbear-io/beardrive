@@ -406,6 +406,22 @@ func (r *RemoteSource) prepareJournalWriteMeta(
 	return merged, map[string]string{journalAppendChainMetaKey: encoded}
 }
 
+func insertReaderEntryLocked(ring *journalVersionRing, entry journalVersionEntry) {
+	if len(ring.entries) < maxJournalVersionsPerKey {
+		// Place lagging reader entries before newer write entries.
+		ring.entries = append([]journalVersionEntry{entry}, ring.entries...)
+		return
+	}
+	// Replace an existing non-write slot if available; never evict newer write entries.
+	for i := 0; i < len(ring.entries)-1; i++ {
+		if !ring.entries[i].isWrite {
+			ring.entries = append(ring.entries[:i], ring.entries[i+1:]...)
+			ring.entries = append([]journalVersionEntry{entry}, ring.entries...)
+			return
+		}
+	}
+}
+
 func (r *RemoteSource) storeJournalWriteMeta(
 	key string,
 	ver remote.Version,
@@ -415,6 +431,24 @@ func (r *RemoteSource) storeJournalWriteMeta(
 	storedMax int64,
 	endsWithNL bool,
 	hasAppend bool,
+	prevSize int64,
+	prevSHA string,
+	prevLineBoundary bool,
+	prefixes map[int64]journalPrefixMark,
+) {
+	r.storeJournalMeta(key, ver, size, sha256Hex, crc32c, storedMax, endsWithNL, hasAppend, true, prevSize, prevSHA, prevLineBoundary, prefixes)
+}
+
+func (r *RemoteSource) storeJournalMeta(
+	key string,
+	ver remote.Version,
+	size int64,
+	sha256Hex string,
+	crc32c uint32,
+	storedMax int64,
+	endsWithNL bool,
+	hasAppend bool,
+	isWrite bool,
 	prevSize int64,
 	prevSHA string,
 	prevLineBoundary bool,
@@ -451,7 +485,7 @@ func (r *RemoteSource) storeJournalWriteMeta(
 		storedMax:  storedMax,
 		endsWithNL: endsWithNL,
 		hasAppend:  hasAppend,
-		isWrite:    true,
+		isWrite:    isWrite,
 		prefixes:   copied,
 	}
 	if idx, found := ring.find(ver); found {
@@ -473,11 +507,23 @@ func (r *RemoteSource) storeJournalWriteMeta(
 			entry.hasAppend = true
 			entry.storedMax = existing.storedMax
 		}
+		if !isWrite {
+			entry.isWrite = existing.isWrite
+			if existing.crc32c != 0 && entry.crc32c == 0 {
+				entry.crc32c = existing.crc32c
+			}
+			ring.entries[idx] = entry
+			return
+		}
 		ring.entries[idx] = entry
 		if idx != len(ring.entries)-1 {
 			ring.entries = append(ring.entries[:idx], ring.entries[idx+1:]...)
 			ring.entries = append(ring.entries, entry)
 		}
+		return
+	}
+	if !isWrite {
+		insertReaderEntryLocked(ring, entry)
 		return
 	}
 	if len(ring.entries) >= maxJournalVersionsPerKey {
@@ -517,25 +563,10 @@ func (r *RemoteSource) storeJournalPrefixMark(key string, ver remote.Version, of
 		ring.entries[idx] = e
 		return
 	}
-	entry := journalVersionEntry{
+	insertReaderEntryLocked(ring, journalVersionEntry{
 		version:  ver,
 		prefixes: map[int64]journalPrefixMark{offset: {sha: prefixSHA, lineBoundary: lineBoundary}},
-	}
-	if len(ring.entries) < maxJournalVersionsPerKey {
-		// Place lagging reader entries before newer write entries.
-		ring.entries = append([]journalVersionEntry{entry}, ring.entries...)
-		return
-	}
-	// Replace an existing non-write slot if available; never evict the newest entry.
-	for i := 0; i < len(ring.entries)-1; i++ {
-		if !ring.entries[i].isWrite {
-			ring.entries = append(ring.entries[:i], ring.entries[i+1:]...)
-			ring.entries = append([]journalVersionEntry{entry}, ring.entries...)
-			return
-		}
-	}
-	// All earlier slots are writes; drop the oldest write slot only if ring has room
-	// before the newest entry, otherwise preserve the write ring untouched.
+	})
 }
 
 func (r *RemoteSource) storeJournalPrefixSHA(key string, ver remote.Version, offset int64, prefixSHA string) {
@@ -650,8 +681,9 @@ func (r *RemoteSource) lookupVerifiedTail(
 	if requireLineBoundary && !m.lineBoundary {
 		return "", false, false
 	}
-	// Cache the verified chain for this version so subsequent reads skip parsing.
-	r.storeJournalWriteMeta(key, meta.Version, chain.headSize, chain.headSHA, chain.crc32c, 0, chain.headNL, false, prevSize, prevSHA, m.lineBoundary, chain.prefixes)
+	// Cache the verified chain for this version so subsequent reads skip parsing,
+	// without evicting or promoting over newer write entries.
+	r.storeJournalMeta(key, meta.Version, chain.headSize, chain.headSHA, chain.crc32c, 0, chain.headNL, false, false, prevSize, prevSHA, m.lineBoundary, chain.prefixes)
 	return chain.headSHA, m.lineBoundary, true
 }
 
@@ -673,7 +705,7 @@ func (r *RemoteSource) lookupVerifiedPrefixForGet(key string, meta remote.Object
 	if !ok || m.sha != prefixSHA {
 		return false
 	}
-	r.storeJournalWriteMeta(key, meta.Version, chain.headSize, chain.headSHA, chain.crc32c, 0, chain.headNL, false, 0, "", false, chain.prefixes)
+	r.storeJournalMeta(key, meta.Version, chain.headSize, chain.headSHA, chain.crc32c, 0, chain.headNL, false, false, 0, "", false, chain.prefixes)
 	return true
 }
 

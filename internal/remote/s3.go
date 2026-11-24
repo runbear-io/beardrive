@@ -109,26 +109,26 @@ func isS3InvalidRange(err error) bool {
 	return errors.As(err, &re) && re.HTTPStatusCode() == http.StatusRequestedRangeNotSatisfiable
 }
 
-func parseContentRange(cr string) (start, total int64, ok bool) {
+func parseContentRange(cr string) (start, end, total int64, ok bool) {
 	rest, hasBytes := strings.CutPrefix(strings.TrimSpace(cr), "bytes ")
 	if !hasBytes {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	rangePart, totalPart, hasSlash := strings.Cut(rest, "/")
 	if !hasSlash || strings.HasPrefix(rangePart, "*") || totalPart == "*" {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	startStr, endStr, hasDash := strings.Cut(rangePart, "-")
 	if !hasDash {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	s, err1 := strconv.ParseInt(startStr, 10, 64)
 	e, err2 := strconv.ParseInt(endStr, 10, 64)
 	t, err3 := strconv.ParseInt(totalPart, 10, 64)
 	if err1 != nil || err2 != nil || err3 != nil || s < 0 || e < s || e >= t {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	return s, t, true
+	return s, e, t, true
 }
 
 func (b *s3Backend) GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error) {
@@ -234,14 +234,14 @@ func (b *s3Backend) GetVersionedRangeWithMeta(ctx context.Context, key string, o
 				_ = out.Body.Close()
 				return nil, ObjectMeta{}, fmt.Errorf("range response missing Content-Range header")
 			}
-			start, crTotal, ok := parseContentRange(aws.ToString(out.ContentRange))
-			if !ok || start != offset {
+			start, end, crTotal, ok := parseContentRange(aws.ToString(out.ContentRange))
+			if !ok || start != offset || (length > 0 && end > offset+length-1) {
 				_ = out.Body.Close()
-				return nil, ObjectMeta{}, fmt.Errorf("unexpected Content-Range %q for offset %d", aws.ToString(out.ContentRange), offset)
+				return nil, ObjectMeta{}, fmt.Errorf("unexpected Content-Range %q for offset %d length %d", aws.ToString(out.ContentRange), offset, length)
 			}
 			total = crTotal
 		}
-		return out.Body, ObjectMeta{
+		return boundedReadCloser(out.Body, length), ObjectMeta{
 			Version:  Version(aws.ToString(out.ETag)),
 			Size:     total,
 			Metadata: normalizeMeta(out.Metadata),
