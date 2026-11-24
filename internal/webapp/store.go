@@ -13,6 +13,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
+	"hash/crc32"
 	"io"
 	"log"
 	"net/http"
@@ -44,132 +45,6 @@ var (
 	chunkKeyRe    = regexp.MustCompile(`^chunks/[0-9a-f]{64}$`)
 	manifestKeyRe = regexp.MustCompile(`^manifests/[0-9a-f]{64}$`)
 )
-
-// journalVersionEntry remembers verified metadata for the latest observed
-// storage version of one journal on a RemoteSource. Keying by journal key on
-// RemoteSource and replacing the entry whenever the object's version advances
-// prevents unbounded growth across repeated appends.
-type journalVersionEntry struct {
-	version    remote.Version
-	size       int64
-	sha256     string
-	storedMax  int64
-	endsWithNL bool
-	hasAppend  bool
-	prevSize   int64
-	prevSHA    string
-	prefixes   map[int64]string
-}
-
-const (
-	maxJournalVersionCacheKeys = 1024
-	maxJournalVersionPrefixes  = 8
-)
-
-func (r *RemoteSource) loadJournalAppendMeta(key string, ver remote.Version) (journalVersionEntry, bool) {
-	if ver == remote.VersionAbsent {
-		return journalVersionEntry{}, false
-	}
-	r.jverMu.Lock()
-	defer r.jverMu.Unlock()
-	e, ok := r.jverCache[key]
-	if !ok || !e.hasAppend || e.version != ver {
-		return journalVersionEntry{}, false
-	}
-	return e, true
-}
-
-func (r *RemoteSource) ensureJournalVersionSlotLocked(key string, ver remote.Version) journalVersionEntry {
-	if r.jverCache == nil {
-		r.jverCache = make(map[string]journalVersionEntry)
-	}
-	e, exists := r.jverCache[key]
-	if !exists {
-		if len(r.jverOrder) >= maxJournalVersionCacheKeys {
-			oldest := r.jverOrder[0]
-			r.jverOrder = r.jverOrder[1:]
-			delete(r.jverCache, oldest)
-		}
-		r.jverOrder = append(r.jverOrder, key)
-		return journalVersionEntry{version: ver}
-	}
-	if e.version != ver {
-		return journalVersionEntry{version: ver}
-	}
-	return e
-}
-
-func (r *RemoteSource) storeJournalAppendMeta(key string, ver remote.Version, size int64, sha256Hex string, storedMax int64, endsWithNL bool, prevSize int64, prevSHA string) {
-	if ver == remote.VersionAbsent {
-		return
-	}
-	r.jverMu.Lock()
-	defer r.jverMu.Unlock()
-	e := r.ensureJournalVersionSlotLocked(key, ver)
-	e.size = size
-	e.sha256 = strings.ToLower(sha256Hex)
-	e.storedMax = storedMax
-	e.endsWithNL = endsWithNL
-	e.hasAppend = true
-	if prevSize > 0 && prevSHA != "" {
-		e.prevSize = prevSize
-		e.prevSHA = strings.ToLower(prevSHA)
-	}
-	if e.prefixes == nil {
-		e.prefixes = make(map[int64]string, 2)
-	}
-	if prevSize > 0 && prevSHA != "" && len(e.prefixes) < maxJournalVersionPrefixes {
-		e.prefixes[prevSize] = strings.ToLower(prevSHA)
-	}
-	if size > 0 && sha256Hex != "" && len(e.prefixes) < maxJournalVersionPrefixes {
-		e.prefixes[size] = strings.ToLower(sha256Hex)
-	}
-	r.jverCache[key] = e
-}
-
-func (r *RemoteSource) loadJournalPrefixSHA(key string, ver remote.Version, offset int64) (string, bool) {
-	if ver == remote.VersionAbsent || offset <= 0 {
-		return "", false
-	}
-	r.jverMu.Lock()
-	defer r.jverMu.Unlock()
-	e, ok := r.jverCache[key]
-	if !ok || e.version != ver || e.prefixes == nil {
-		return "", false
-	}
-	sha, ok := e.prefixes[offset]
-	return sha, ok
-}
-
-func (r *RemoteSource) storeJournalPrefixSHA(key string, ver remote.Version, offset int64, prefixSHA string) {
-	if ver == remote.VersionAbsent || offset <= 0 || prefixSHA == "" {
-		return
-	}
-	r.jverMu.Lock()
-	defer r.jverMu.Unlock()
-	e := r.ensureJournalVersionSlotLocked(key, ver)
-	if e.prefixes == nil || len(e.prefixes) >= maxJournalVersionPrefixes {
-		e.prefixes = make(map[int64]string, 2)
-	}
-	e.prefixes[offset] = strings.ToLower(prefixSHA)
-	r.jverCache[key] = e
-}
-
-func (r *RemoteSource) lookupAppendedJournalSHA(key string, ver remote.Version, prevSize int64, prevSHA string, newSize int64) (string, bool) {
-	if ver == remote.VersionAbsent || prevSHA == "" {
-		return "", false
-	}
-	r.jverMu.Lock()
-	defer r.jverMu.Unlock()
-	e, ok := r.jverCache[key]
-	if !ok || !e.hasAppend || e.version != ver {
-		return "", false
-	}
-	if e.prevSize != prevSize || e.prevSHA != strings.ToLower(prevSHA) || e.size != newSize || e.sha256 == "" {
-		return "", false
-	}
-	return e.sha256, true
-}
 
 // fileShaKey reports whether a store key is addressed by the FILE's sha256 —
 // blobs/ and manifests/ both are, and both must therefore answer the same
@@ -527,17 +402,32 @@ func (s *Server) filteredJournal(ctx context.Context, rs *RemoteSource, o remote
 	if data, ok := rs.cachedFilter(o, f.tag); ok {
 		return data, nil
 	}
+	if prev, ok := rs.cachedFilterPrefix(o, f.tag); ok && len(prev.hashState) > 0 {
+		prevHex := hex.EncodeToString(prev.rawPrefix[:])
+		if tailRaw, fullArr, newState, tailEndsNL, hit := rs.readVerifiedJournalTailRaw(ctx, o, prev.size, prevHex, prev.endsNL, prev.hashState); hit {
+			tailFiltered := filterJournal(tailRaw, f)
+			out := make([]byte, len(prev.data)+len(tailFiltered))
+			copy(out, prev.data)
+			copy(out[len(prev.data):], tailFiltered)
+			rs.putFilterEntry(o, f.tag, out, fullArr, newState, true, tailEndsNL)
+			return out, nil
+		}
+	}
 	rc, err := rs.Backend.Get(ctx, o.Key)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := io.ReadAll(rc)
+	h := sha256.New()
+	data, rawSize, endsNL, ferr := filterJournalReader(io.TeeReader(rc, h), f)
 	rc.Close()
-	if err != nil {
-		return nil, err
+	if ferr != nil {
+		return nil, ferr
 	}
-	data := filterJournal(raw, f)
-	rs.putFilter(o, f.tag, data)
+	if rawSize == o.Size {
+		var rawArr [32]byte
+		copy(rawArr[:], h.Sum(nil))
+		rs.putFilterEntry(o, f.tag, data, rawArr, marshalSHA256State(h), true, endsNL)
+	}
 	return data, nil
 }
 
@@ -597,33 +487,46 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 		if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
 			rc, err = rs.OpenBlob(r.Context(), blob)
 		} else if journalKeyRe.MatchString(key) && hasOff {
-			if vrg, ok := rs.Backend.(remote.VersionedRangeGetter); ok {
-				if tailRC, ver, verr := vrg.GetVersionedRange(r.Context(), key, offset, -1); verr == nil {
-					if cached, hit := rs.loadJournalPrefixSHA(key, ver, offset); hit && cached == prefixSHA {
+			switch be := rs.Backend.(type) {
+			case remote.VersionedMetaBackend:
+				if tailRC, meta, verr := be.GetVersionedRangeWithMeta(r.Context(), key, offset, -1); verr == nil {
+					if rs.lookupVerifiedPrefixForGet(key, meta, offset, prefixSHA) {
 						w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
 						rc = tailRC
 						hasOff = false
-					}
-					if rc == nil {
+					} else {
 						_ = tailRC.Close()
+					}
+				}
+			case remote.VersionedRangeGetter:
+				if rs.hasJournalPrefixCandidate(key, offset, prefixSHA, remote.VersionAbsent) {
+					if tailRC, ver, verr := be.GetVersionedRange(r.Context(), key, offset, -1); verr == nil {
+						if rs.lookupVerifiedPrefixForGet(key, remote.ObjectMeta{Version: ver}, offset, prefixSHA) {
+							w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
+							rc = tailRC
+							hasOff = false
+						} else {
+							_ = tailRC.Close()
+						}
 					}
 				}
 			}
 			if rc == nil {
 				if cp, ok := rs.Backend.(remote.ConditionalPutter); ok {
-					var ver remote.Version
-					rc, ver, err = cp.GetVersioned(r.Context(), key)
+					var meta remote.ObjectMeta
+					rc, meta, err = readVersionedWithMeta(r.Context(), rs.Backend, cp, key)
 					if err == nil {
 						origRC := rc
 						h := sha256.New()
-						n, rerr := io.CopyN(h, origRC, offset)
+						meter := &byteCounterAndLast{h: h}
+						n, rerr := io.CopyN(meter, origRC, offset)
 						if rerr != nil && !errors.Is(rerr, io.EOF) {
 							origRC.Close()
 							storageErr(w, http.StatusBadGateway, "could not read the journal", rerr)
 							return
 						}
 						if n == offset && hex.EncodeToString(h.Sum(nil)) == prefixSHA {
-							rs.storeJournalPrefixSHA(key, ver, offset, prefixSHA)
+							rs.storeJournalPrefixMark(key, meta.Version, offset, prefixSHA, meter.lastByte == '\n')
 							w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
 							rc = origRC
 						} else {
@@ -861,15 +764,11 @@ func journalOps(key string, tmp *os.File) ([]journal.Op, error) {
 	if !strings.HasPrefix(key, "journal/") {
 		return nil, nil
 	}
-	data, err := io.ReadAll(tmp)
+	ops, err := journal.ParseReader(tmp)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	ops, err := journal.Parse(data)
-	if err != nil {
 		return nil, err
 	}
 	for _, op := range ops {
@@ -1358,11 +1257,12 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 			storageErr(w, http.StatusBadGateway, "could not read the journal", err)
 			return
 		}
-		existing, ver, rerr := readVersioned(r.Context(), cp, key)
+		existing, prevMeta, rerr := readBytesVersionedWithMeta(r.Context(), rs.Backend, cp, key)
 		if rerr != nil {
 			storageErr(w, http.StatusBadGateway, "could not read the stored journal", rerr)
 			return
 		}
+		ver := prevMeta.Version
 		if bytes.Equal(existing, uploaded) {
 			writeJSON(w, map[string]any{"ok": true})
 			return
@@ -1390,7 +1290,26 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 			http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
 			return
 		}
-		if _, err := cp.PutIf(r.Context(), key, bytes.NewReader(uploaded), int64(len(uploaded)), ver); err != nil {
+		fullSum := sha256.Sum256(uploaded)
+		fullSHA := hex.EncodeToString(fullSum[:])
+		fullCRC := crc32cSum(uploaded)
+		newNL := len(uploaded) > 0 && uploaded[len(uploaded)-1] == '\n'
+		var prevSize int64
+		var prevSHA string
+		var prevNL, chain bool
+		if len(existing) > 0 && len(uploaded) > len(existing) && bytes.HasPrefix(uploaded, existing) {
+			prevSize = int64(len(existing))
+			esum := sha256.Sum256(existing)
+			prevSHA = hex.EncodeToString(esum[:])
+			prevNL = existing[len(existing)-1] == '\n'
+			chain = true
+		}
+		prefixes, putMeta := rs.prepareJournalWriteMeta(
+			key, prevMeta, prevSize, prevSHA, prevNL,
+			int64(len(uploaded)), fullSHA, newNL, fullCRC, chain,
+		)
+		newMeta, err := putIfWithMeta(r.Context(), rs.Backend, cp, key, bytes.NewReader(uploaded), int64(len(uploaded)), ver, putMeta)
+		if err != nil {
 			if errors.Is(err, remote.ErrVersionMismatch) {
 				http.Error(w, "concurrent journal update; please retry", http.StatusConflict)
 			} else {
@@ -1398,6 +1317,7 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 			}
 			return
 		}
+		rs.storeJournalWriteMeta(key, newMeta.Version, int64(len(uploaded)), fullSHA, fullCRC, 0, newNL, false, prevSize, prevSHA, prevNL, prefixes)
 	} else if manifestKeyRe.MatchString(key) {
 		if cp, ok := rs.Backend.(remote.ConditionalPutter); ok {
 			_, err := cp.PutIf(r.Context(), key, tmp, size, remote.VersionAbsent)
@@ -1579,12 +1499,14 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 	var storedMax int64
 	written := false
 	for range attempts {
-		rc, ver, rerr := cp.GetVersioned(r.Context(), key)
+		rc, prevMeta, rerr := readVersionedWithMeta(r.Context(), rs.Backend, cp, key)
+		ver := prevMeta.Version
 		absent := false
 		if rerr != nil {
 			if remote.IsNotExist(rerr) {
 				absent = true
 				ver = remote.VersionAbsent
+				prevMeta = remote.ObjectMeta{Version: remote.VersionAbsent}
 			} else {
 				storageErr(w, http.StatusBadGateway, "could not read the stored journal", rerr)
 				return
@@ -1602,9 +1524,11 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 			outTmp.Close()
 			os.Remove(outTmp.Name())
 		}
-		h := sha256.New()
 		fullHash := sha256.New()
+		fullCRC := crc32.New(castagnoliTable)
+		mw := io.MultiWriter(outTmp, fullHash, fullCRC)
 		var prefixRead int64
+		var prefixSum string
 		var lastByte byte = '\n'
 		var rem []byte
 		seqCollision := false
@@ -1615,7 +1539,7 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 		needNewline := false
 		if !absent {
 			if cacheHit {
-				n, cerr := io.CopyN(io.MultiWriter(outTmp, fullHash), rc, prevSize)
+				n, cerr := io.CopyN(mw, rc, prevSize)
 				if cerr != nil && !errors.Is(cerr, io.EOF) {
 					rc.Close()
 					cleanupTmp()
@@ -1623,10 +1547,13 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 					return
 				}
 				prefixRead = n
+				prefixSum = hex.EncodeToString(fullHash.Sum(nil))
 				storedMax = cached.storedMax
 				needNewline = prevSize > 0 && !cached.endsWithNL
 				if prevSize > 0 && !needNewline {
 					lastByte = '\n'
+				} else if prevSize > 0 {
+					lastByte = 0
 				}
 			} else {
 				br := bufio.NewReader(io.LimitReader(rc, prevSize))
@@ -1635,9 +1562,7 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 					if len(line) > 0 {
 						prefixRead += int64(len(line))
 						lastByte = line[len(line)-1]
-						_, _ = h.Write(line)
-						_, _ = fullHash.Write(line)
-						if _, werr := outTmp.Write(line); werr != nil {
+						if _, werr := mw.Write(line); werr != nil {
 							rc.Close()
 							cleanupTmp()
 							storageErr(w, http.StatusBadGateway, "could not store the object", werr)
@@ -1670,6 +1595,7 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 						break
 					}
 				}
+				prefixSum = hex.EncodeToString(fullHash.Sum(nil))
 				needNewline = prevSize > 0 && lastByte != '\n'
 			}
 			var remErr error
@@ -1681,18 +1607,16 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 				return
 			}
 			_, _ = fullHash.Write(rem)
-			if !cacheHit {
-				needNewline = prevSize > 0 && lastByte != '\n'
-			}
+			_, _ = fullCRC.Write(rem)
 			if !cacheHit && ver != remote.VersionAbsent && parseErr == nil && len(rem) == 0 {
-				rs.storeJournalAppendMeta(
-					key, ver, prefixRead+int64(len(rem)),
-					hex.EncodeToString(fullHash.Sum(nil)),
-					storedMax, !needNewline, 0, "",
+				rs.storeJournalWriteMeta(
+					key, ver, prefixRead,
+					prefixSum, fullCRC.Sum32(),
+					storedMax, !needNewline, true, 0, "", false, nil,
 				)
 			}
 		}
-		prefixHashOK := cacheHit || (prevSize == 0 && prevSHA == "") || hex.EncodeToString(h.Sum(nil)) == prevSHA
+		prefixHashOK := (prevSize == 0 && prevSHA == "") || prefixSum == prevSHA
 		remMatch := int64(len(rem)) == size && bytes.Equal(rem, tailBytes)
 		if needNewline {
 			remMatch = int64(len(rem)) == size+1 && len(rem) > 0 && rem[0] == '\n' && bytes.Equal(rem[1:], tailBytes)
@@ -1728,38 +1652,42 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 		}
 		totalLen := prevSize + size
 		if needNewline {
-			if _, werr := outTmp.Write([]byte{'\n'}); werr != nil {
+			if _, werr := mw.Write([]byte{'\n'}); werr != nil {
 				cleanupTmp()
 				storageErr(w, http.StatusBadGateway, "could not store the object", werr)
 				return
 			}
-			_, _ = fullHash.Write([]byte{'\n'})
 			totalLen++
 		}
-		if _, werr := outTmp.Write(tailBytes); werr != nil {
+		if _, werr := mw.Write(tailBytes); werr != nil {
 			cleanupTmp()
 			storageErr(w, http.StatusBadGateway, "could not store the object", werr)
 			return
 		}
-		_, _ = fullHash.Write(tailBytes)
 		if _, serr := outTmp.Seek(0, io.SeekStart); serr != nil {
 			cleanupTmp()
 			storageErr(w, http.StatusBadGateway, "could not store the object", serr)
 			return
 		}
-		newVer, err := cp.PutIf(r.Context(), key, outTmp, totalLen, ver)
+		endsWithNL := lastByte == '\n'
+		if len(tailBytes) > 0 {
+			endsWithNL = tailBytes[len(tailBytes)-1] == '\n'
+		} else if needNewline {
+			endsWithNL = true
+		}
+		fullSHA := hex.EncodeToString(fullHash.Sum(nil))
+		fullCRCSum := fullCRC.Sum32()
+		prevLineBoundary := prevSize > 0 && !needNewline
+		prefixes, putMeta := rs.prepareJournalWriteMeta(
+			key, prevMeta, prevSize, prevSHA, prevLineBoundary,
+			totalLen, fullSHA, endsWithNL, fullCRCSum, prevSize > 0 && isBlobSHA(prevSHA),
+		)
+		newMeta, err := putIfWithMeta(r.Context(), rs.Backend, cp, key, outTmp, totalLen, ver, putMeta)
 		if err == nil {
-			endsWithNL := lastByte == '\n'
-			if len(tailBytes) > 0 {
-				endsWithNL = tailBytes[len(tailBytes)-1] == '\n'
-			} else if needNewline {
-				endsWithNL = true
-			}
-			fullSHA := hex.EncodeToString(fullHash.Sum(nil))
-			rs.storeJournalAppendMeta(
-				key, newVer, totalLen, fullSHA,
-				tailOps[len(tailOps)-1].Seq, endsWithNL,
-				prevSize, prevSHA,
+			rs.storeJournalWriteMeta(
+				key, newMeta.Version, totalLen, fullSHA, fullCRCSum,
+				tailOps[len(tailOps)-1].Seq, endsWithNL, true,
+				prevSize, prevSHA, prevLineBoundary, prefixes,
 			)
 		}
 		cleanupTmp()

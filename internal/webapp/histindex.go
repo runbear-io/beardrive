@@ -121,7 +121,7 @@ func buildHistIndex(sources []sourcedJournal) *histIndex {
 }
 
 func cMatchesMeta(c cachedJournal, m ckptJournalMeta) bool {
-	if m.PrefixSHA256 == "" || c.size != m.Size || !c.mod.Equal(m.ModTime) || len(c.ops) != m.Ops {
+	if m.PrefixSHA256 == "" || c.size != m.Size || !c.mod.Equal(m.ModTime) || c.version != m.Version || len(c.ops) != m.Ops {
 		return false
 	}
 	return hex.EncodeToString(c.rawPrefixHash[:]) == m.PrefixSHA256

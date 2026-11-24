@@ -14,25 +14,163 @@ import (
 // storage root. Closing the returned backend does not close the underlying
 // one (it is shared across prefixes).
 //
-// The optional capabilities pass through too. A capability the namespace
-// dropped is not an error anywhere: callers type-assert for it and take the
-// slower path when it is missing. That is how every hub project lost
-// compare-and-swap — the journal append looked for ConditionalPutter on this
-// wrapper, never found it, and appended last-writer-wins on GCS as well.
+// Only optional capabilities actually implemented by be are exposed on the
+// returned wrapper, so type assertions never succeed against unsupported stores.
 func Prefixed(be Backend, prefix string) Backend {
 	prefix = strings.Trim(prefix, "/")
 	p := &prefixed{be: be, prefix: prefix}
 	signer, signs := be.(PutSigner)
-	cond, conditional := be.(ConditionalPutter)
-	switch {
-	case signs && conditional:
-		return &prefixedSignerCond{prefixedCond: &prefixedCond{prefixed: p, cond: cond}, signer: signer}
-	case signs:
-		return &prefixedSigner{prefixed: p, signer: signer}
-	case conditional:
-		return &prefixedCond{prefixed: p, cond: cond}
+	if meta, ok := be.(VersionedMetaBackend); ok {
+		pc := &pCond{p: p, cond: meta}
+		pr := &pRange{p: p, rg: meta}
+		pv := &pVRange{p: p, vrg: meta}
+		pm := &pMeta{p: p, meta: meta}
+		if signs {
+			return struct {
+				*prefixed
+				*pSigner
+				*pCond
+				*pRange
+				*pVRange
+				*pMeta
+			}{p, &pSigner{p: p, signer: signer}, pc, pr, pv, pm}
+		}
+		return struct {
+			*prefixed
+			*pCond
+			*pRange
+			*pVRange
+			*pMeta
+		}{p, pc, pr, pv, pm}
 	}
-	return p
+	cond, hasCond := be.(ConditionalPutter)
+	rg, hasRange := be.(RangeGetter)
+	vrg, hasVRange := be.(VersionedRangeGetter)
+	var ps *pSigner
+	var pc *pCond
+	var pr *pRange
+	var pv *pVRange
+	if signs {
+		ps = &pSigner{p: p, signer: signer}
+	}
+	if hasCond {
+		pc = &pCond{p: p, cond: cond}
+	}
+	if hasRange {
+		pr = &pRange{p: p, rg: rg}
+	}
+	if hasVRange {
+		pv = &pVRange{p: p, vrg: vrg}
+	}
+	mask := 0
+	if signs {
+		mask |= 8
+	}
+	if hasCond {
+		mask |= 4
+	}
+	if hasRange {
+		mask |= 2
+	}
+	if hasVRange {
+		mask |= 1
+	}
+	switch mask {
+	case 0:
+		return p
+	case 1:
+		return struct {
+			*prefixed
+			*pVRange
+		}{p, pv}
+	case 2:
+		return struct {
+			*prefixed
+			*pRange
+		}{p, pr}
+	case 3:
+		return struct {
+			*prefixed
+			*pRange
+			*pVRange
+		}{p, pr, pv}
+	case 4:
+		return struct {
+			*prefixed
+			*pCond
+		}{p, pc}
+	case 5:
+		return struct {
+			*prefixed
+			*pCond
+			*pVRange
+		}{p, pc, pv}
+	case 6:
+		return struct {
+			*prefixed
+			*pCond
+			*pRange
+		}{p, pc, pr}
+	case 7:
+		return struct {
+			*prefixed
+			*pCond
+			*pRange
+			*pVRange
+		}{p, pc, pr, pv}
+	case 8:
+		return struct {
+			*prefixed
+			*pSigner
+		}{p, ps}
+	case 9:
+		return struct {
+			*prefixed
+			*pSigner
+			*pVRange
+		}{p, ps, pv}
+	case 10:
+		return struct {
+			*prefixed
+			*pSigner
+			*pRange
+		}{p, ps, pr}
+	case 11:
+		return struct {
+			*prefixed
+			*pSigner
+			*pRange
+			*pVRange
+		}{p, ps, pr, pv}
+	case 12:
+		return struct {
+			*prefixed
+			*pSigner
+			*pCond
+		}{p, ps, pc}
+	case 13:
+		return struct {
+			*prefixed
+			*pSigner
+			*pCond
+			*pVRange
+		}{p, ps, pc, pv}
+	case 14:
+		return struct {
+			*prefixed
+			*pSigner
+			*pCond
+			*pRange
+		}{p, ps, pc, pr}
+	default: // 15
+		return struct {
+			*prefixed
+			*pSigner
+			*pCond
+			*pRange
+			*pVRange
+		}{p, ps, pc, pr, pv}
+	}
 }
 
 type prefixed struct {
@@ -119,84 +257,105 @@ func (p *prefixed) List(ctx context.Context, prefix string) ([]Object, error) {
 		if !safeKey(rel) {
 			continue
 		}
-		out = append(out, Object{Key: rel, Size: o.Size, Modified: o.Modified})
+		out = append(out, Object{
+			Key:              rel,
+			Size:             o.Size,
+			Modified:         o.Modified,
+			Version:          o.Version,
+			ImmutableVersion: o.ImmutableVersion,
+			CRC32C:           o.CRC32C,
+		})
 	}
 	return out, nil
 }
 
 func (p *prefixed) Close() error { return nil }
 
-// prefixedSigner adds presigning when the underlying backend supports it, so
-// direct uploads keep working through the namespace.
-type prefixedSigner struct {
-	*prefixed
+type pSigner struct {
+	p      *prefixed
 	signer PutSigner
 }
 
-func (p *prefixedSigner) SignPut(ctx context.Context, key string, size int64, ttl time.Duration) (*SignedPut, error) {
-	return p.signPut(ctx, p.signer, key, size, ttl)
-}
-
-func (p *prefixed) signPut(ctx context.Context, signer PutSigner, key string, size int64, ttl time.Duration) (*SignedPut, error) {
-	k, err := p.key(key)
+func (s *pSigner) SignPut(ctx context.Context, key string, size int64, ttl time.Duration) (*SignedPut, error) {
+	k, err := s.p.key(key)
 	if err != nil {
 		return nil, err
 	}
-	return signer.SignPut(ctx, k, size, ttl)
+	return s.signer.SignPut(ctx, k, size, ttl)
 }
 
-// prefixedCond adds compare-and-swap when the underlying backend supports it.
-type prefixedCond struct {
-	*prefixed
+type pCond struct {
+	p    *prefixed
 	cond ConditionalPutter
 }
 
-func (p *prefixedCond) GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error) {
-	k, err := p.key(key)
+func (c *pCond) GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error) {
+	k, err := c.p.key(key)
 	if err != nil {
 		return nil, VersionAbsent, err
 	}
-	return p.cond.GetVersioned(ctx, k)
+	return c.cond.GetVersioned(ctx, k)
 }
 
-func (p *prefixedCond) PutIf(ctx context.Context, key string, r io.Reader, size int64, expect Version) (Version, error) {
-	k, err := p.key(key)
+func (c *pCond) PutIf(ctx context.Context, key string, r io.Reader, size int64, expect Version) (Version, error) {
+	k, err := c.p.key(key)
 	if err != nil {
 		return VersionAbsent, err
 	}
-	return p.cond.PutIf(ctx, k, r, size, expect)
+	return c.cond.PutIf(ctx, k, r, size, expect)
 }
 
-func (p *prefixedCond) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
-	rg, ok := p.be.(RangeGetter)
-	if !ok {
-		return nil, fmt.Errorf("range read unsupported")
-	}
-	k, err := p.key(key)
+type pRange struct {
+	p  *prefixed
+	rg RangeGetter
+}
+
+func (r *pRange) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	k, err := r.p.key(key)
 	if err != nil {
 		return nil, err
 	}
-	return rg.GetRange(ctx, k, offset, length)
+	return r.rg.GetRange(ctx, k, offset, length)
 }
 
-func (p *prefixedCond) GetVersionedRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, Version, error) {
-	vrg, ok := p.be.(VersionedRangeGetter)
-	if !ok {
-		return nil, VersionAbsent, fmt.Errorf("versioned range read unsupported")
-	}
-	k, err := p.key(key)
+type pVRange struct {
+	p   *prefixed
+	vrg VersionedRangeGetter
+}
+
+func (v *pVRange) GetVersionedRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, Version, error) {
+	k, err := v.p.key(key)
 	if err != nil {
 		return nil, VersionAbsent, err
 	}
-	return vrg.GetVersionedRange(ctx, k, offset, length)
+	return v.vrg.GetVersionedRange(ctx, k, offset, length)
 }
 
-// prefixedSignerCond is both, which is what a GCS root is.
-type prefixedSignerCond struct {
-	*prefixedCond
-	signer PutSigner
+type pMeta struct {
+	p    *prefixed
+	meta VersionedMetaBackend
 }
 
-func (p *prefixedSignerCond) SignPut(ctx context.Context, key string, size int64, ttl time.Duration) (*SignedPut, error) {
-	return p.signPut(ctx, p.signer, key, size, ttl)
+func (m *pMeta) GetVersionedWithMeta(ctx context.Context, key string) (io.ReadCloser, ObjectMeta, error) {
+	k, err := m.p.key(key)
+	if err != nil {
+		return nil, ObjectMeta{}, err
+	}
+	return m.meta.GetVersionedWithMeta(ctx, k)
+}
+
+func (m *pMeta) PutIfWithMeta(ctx context.Context, key string, r io.Reader, size int64, expect Version, meta map[string]string) (ObjectMeta, error) {
+	k, err := m.p.key(key)
+	if err != nil {
+		return ObjectMeta{}, err
+	}
+	return m.meta.PutIfWithMeta(ctx, k, r, size, expect, meta)
+}
+
+func (m *pMeta) GetVersionedRangeWithMeta(ctx context.Context, key string, offset, length int64) (io.ReadCloser, ObjectMeta, error) {
+	k, err := m.p.key(key)
+	if err != nil {
+		return nil, ObjectMeta{}, err
+	}
+	return m.meta.GetVersionedRangeWithMeta(ctx, k, offset, length)
 }

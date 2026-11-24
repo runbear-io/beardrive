@@ -150,8 +150,11 @@ func TestHistIndexReanchorsSharedJournalSlices(t *testing.T) {
 	snapOrder := append([]opRef(nil), x0.order...)
 	snapKinds := append([]uint8(nil), x0.kinds...)
 
-	// Push o1 to dev2 and force parsedJournals to refresh jcache FIRST (updatedMeta re-anchor path).
-	f.putAs("dev2", "bob@x.io", "Bob", "notes/other.md", "bob v2")
+	// Push o1 to dev2 (exceeding dev2Cached's spare capacity) and force parsedJournals to refresh jcache FIRST (updatedMeta re-anchor path).
+	nGrow := max(1, cap(dev2Cached)-len(dev2Cached)+1)
+	for i := range nGrow {
+		f.putAs("dev2", "bob@x.io", "Bob", "notes/other.md", fmt.Sprintf("bob v2-%d", i))
+	}
 	keep, err := rs.listJournals(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1234,18 +1237,21 @@ func TestConcurrentZeroCopyReadWriteEvictionImmutability(t *testing.T) {
 	}
 	rs := v.source.(*RemoteSource)
 
-	// Warm once and verify jcache slices are structurally clamped (cap == len).
+	// Warm once and verify external borrowed slices from loadSourcedJournals are structurally clamped (cap == len).
 	if _, _, err := rs.FilesWithMoves(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	rs.jmu.Lock()
-	for k, c := range rs.jcache {
-		if cap(c.ops) != len(c.ops) {
-			rs.jmu.Unlock()
-			t.Fatalf("jcache[%s] has cap=%d != len=%d; borrowed slice append could mutate cache", k, cap(c.ops), len(c.ops))
+	sourcedViews, err := rs.loadSourcedJournals(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sj := range sourcedViews {
+		if cap(sj.Ops) != len(sj.Ops) {
+			t.Fatalf("sourced view %s has cap=%d != len=%d; borrowed slice append could mutate cache", sj.Key, cap(sj.Ops), len(sj.Ops))
 		}
 	}
-	dev1Orig := rs.jcache["journal/dev1.jsonl"].ops
+	rs.jmu.Lock()
+	dev1Orig := rs.jcache["journal/dev1.jsonl"].ops[:len(rs.jcache["journal/dev1.jsonl"].ops):len(rs.jcache["journal/dev1.jsonl"].ops)]
 	dev1Snap := append([]journal.Op(nil), dev1Orig...)
 	rs.jmu.Unlock()
 

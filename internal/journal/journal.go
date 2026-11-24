@@ -9,9 +9,11 @@
 package journal
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -383,6 +385,34 @@ func internStr(m map[string]string, s string) string {
 	return s
 }
 
+func parseOpLine(raw []byte, intern map[string]string) (Op, bool) {
+	line := bytes.TrimSpace(raw)
+	if len(line) == 0 {
+		return Op{}, false
+	}
+	var w pathRaw
+	if err := json.Unmarshal(line, &w); err != nil {
+		return Op{}, false
+	}
+	op := w.op()
+	switch op.Kind {
+	case KindPut:
+		op.Kind = KindPut
+	case KindDelete:
+		op.Kind = KindDelete
+	default:
+		return Op{}, false
+	}
+	op.Device = internStr(intern, op.Device)
+	op.DeviceName = internStr(intern, op.DeviceName)
+	op.Author = internStr(intern, op.Author)
+	op.User = internStr(intern, op.User)
+	op.UserName = internStr(intern, op.UserName)
+	op.Path = internStr(intern, op.Path)
+	op.Note = internStr(intern, op.Note)
+	return op, true
+}
+
 func parseChunkWithOffsets(data []byte, baseOffset int64) ([]Op, []int64) {
 	est := len(data) / 380
 	if est < 16 {
@@ -406,29 +436,10 @@ func parseChunkWithOffsets(data []byte, baseOffset int64) ([]Op, []int64) {
 			raw, rem = rem, nil
 			lineStart += len(raw)
 		}
-		line := bytes.TrimSpace(raw)
-		if len(line) == 0 {
+		op, ok := parseOpLine(raw, intern)
+		if !ok {
 			continue
 		}
-		var w pathRaw
-		if err := json.Unmarshal(line, &w); err != nil {
-			continue
-		}
-		op := w.op()
-		if op.Kind == KindPut {
-			op.Kind = KindPut
-		} else if op.Kind == KindDelete {
-			op.Kind = KindDelete
-		} else {
-			continue
-		}
-		op.Device = internStr(intern, op.Device)
-		op.DeviceName = internStr(intern, op.DeviceName)
-		op.Author = internStr(intern, op.Author)
-		op.User = internStr(intern, op.User)
-		op.UserName = internStr(intern, op.UserName)
-		op.Path = internStr(intern, op.Path)
-		op.Note = internStr(intern, op.Note)
 		ops = append(ops, op)
 		if baseOffset >= 0 {
 			offsets = append(offsets, baseOffset+int64(start))
@@ -537,6 +548,78 @@ func makeCheckpoints(offsets []int64, stride int) [][2]int64 {
 func Parse(data []byte) ([]Op, error) {
 	ops, _ := ParseWithCheckpoints(data, 0)
 	return ops, nil
+}
+
+// ParseReader streams a JSONL journal from r without buffering the whole
+// input in memory. Invalid and incomplete lines are skipped to match Parse,
+// while any non-EOF read error fails closed.
+func ParseReader(r io.Reader) ([]Op, error) {
+	return ParseReaderSized(r, 0)
+}
+
+// ParseReaderSized is ParseReader with an optional raw byte size hint for
+// initial slice preallocation.
+func ParseReaderSized(r io.Reader, sizeHint int64) ([]Op, error) {
+	est := 16
+	if sizeHint > 0 {
+		if n := sizeHint / 380; n > int64(est) {
+			if n > 1<<20 {
+				n = 1 << 20
+			}
+			est = int(n)
+		}
+	}
+	ops := make([]Op, 0, est)
+	intern := make(map[string]string, 1024)
+	br := bufio.NewReaderSize(r, 64<<10)
+	var (
+		lineBuf []byte
+		accum   bool
+	)
+	for {
+		frag, err := br.ReadSlice('\n')
+		switch err {
+		case nil:
+			var raw []byte
+			if accum {
+				lineBuf = append(lineBuf, frag[:len(frag)-1]...)
+				raw = lineBuf
+				accum = false
+			} else {
+				raw = frag[:len(frag)-1]
+			}
+			if op, ok := parseOpLine(raw, intern); ok {
+				ops = append(ops, op)
+			}
+			if cap(lineBuf) > 1<<20 {
+				lineBuf = nil
+			} else if lineBuf != nil {
+				lineBuf = lineBuf[:0]
+			}
+		case bufio.ErrBufferFull:
+			if !accum {
+				accum = true
+				lineBuf = lineBuf[:0]
+			}
+			lineBuf = append(lineBuf, frag...)
+		case io.EOF:
+			var raw []byte
+			if accum {
+				lineBuf = append(lineBuf, frag...)
+				raw = lineBuf
+			} else {
+				raw = frag
+			}
+			if len(raw) > 0 {
+				if op, ok := parseOpLine(raw, intern); ok {
+					ops = append(ops, op)
+				}
+			}
+			return ops, nil
+		default:
+			return nil, err
+		}
+	}
 }
 
 // ReadFile reads a journal file; a missing file is an empty journal.

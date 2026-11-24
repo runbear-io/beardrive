@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -124,7 +125,12 @@ func (b *localBackend) Exists(_ context.Context, key string) (bool, error) {
 
 func (b *localBackend) Close() error { return nil }
 
+var _ RangeGetter = (*localBackend)(nil)
+
 func (b *localBackend) GetRange(_ context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("invalid range offset %d", offset)
+	}
 	p, err := b.path(key)
 	if err != nil {
 		return nil, err
@@ -133,8 +139,21 @@ func (b *localBackend) GetRange(_ context.Context, key string, offset, length in
 	if err != nil {
 		return nil, err
 	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if offset > fi.Size() {
+		_ = f.Close()
+		return nil, fmt.Errorf("range offset %d out of bounds for size %d", offset, fi.Size())
+	}
+	if offset == fi.Size() || length == 0 {
+		_ = f.Close()
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	if length >= 0 {

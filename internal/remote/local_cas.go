@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
    stores in GCS rather than on a shared disk. */
 
 var _ ConditionalPutter = (*localBackend)(nil)
+var _ VersionedRangeGetter = (*localBackend)(nil)
 
 // Keep the retry interval private: it is an implementation detail, not a
 // configuration knob or a timing contract.
@@ -56,6 +58,68 @@ func (b *localBackend) GetVersioned(ctx context.Context, key string) (io.ReadClo
 		return nil, VersionAbsent, err
 	}
 	return io.NopCloser(bytes.NewReader(data)), versionOf(data), nil
+}
+
+// GetVersionedRange hashes the current file under the CAS lock without
+// buffering the whole file on the heap, unlocks the flock, and returns the
+// opened file descriptor positioned at offset so POSIX keeps reading the exact
+// inode that produced the version even across concurrent atomic renames.
+func (b *localBackend) GetVersionedRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, Version, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, VersionAbsent, err
+	}
+	if offset < 0 {
+		return nil, VersionAbsent, fmt.Errorf("invalid range offset %d", offset)
+	}
+	p, err := b.path(key)
+	if err != nil {
+		return nil, VersionAbsent, err
+	}
+	unlock, err := b.lock(ctx)
+	if err != nil {
+		return nil, VersionAbsent, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		unlock()
+		return nil, VersionAbsent, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		unlock()
+		return nil, VersionAbsent, err
+	}
+	if offset > fi.Size() {
+		_ = f.Close()
+		unlock()
+		return nil, VersionAbsent, fmt.Errorf("range offset %d out of bounds for size %d", offset, fi.Size())
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		_ = f.Close()
+		unlock()
+		return nil, VersionAbsent, err
+	}
+	ver := Version(hex.EncodeToString(h.Sum(nil)))
+	if offset == fi.Size() || length == 0 {
+		_ = f.Close()
+		unlock()
+		return io.NopCloser(bytes.NewReader(nil)), ver, nil
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		_ = f.Close()
+		unlock()
+		return nil, VersionAbsent, err
+	}
+	unlock()
+	if length >= 0 {
+		return struct {
+			io.Reader
+			io.Closer
+		}{io.LimitReader(f, length), f}, ver, nil
+	}
+	return f, ver, nil
 }
 
 func (b *localBackend) PutIf(ctx context.Context, key string, r io.Reader, _ int64, expect Version) (Version, error) {

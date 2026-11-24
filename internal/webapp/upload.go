@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"math"
 	"net/http"
@@ -1599,7 +1600,7 @@ func (r *RemoteSource) appendConditionalExisting(ctx context.Context, cp remote.
 	const attempts = 5
 	var lastErr error
 	for range attempts {
-		existing, version, err := readVersioned(ctx, cp, key)
+		existing, prevMeta, err := readBytesVersionedWithMeta(ctx, r.Backend, cp, key)
 		if err != nil {
 			return fmt.Errorf("fetch journal: %w", err)
 		}
@@ -1607,9 +1608,50 @@ func (r *RemoteSource) appendConditionalExisting(ctx context.Context, cp remote.
 		if err != nil {
 			return err
 		}
-		data := append(append([]byte(nil), existing...), line...)
-		_, err = cp.PutIf(ctx, key, bytes.NewReader(data), int64(len(data)), version)
+		needNL := len(existing) > 0 && existing[len(existing)-1] != '\n'
+		totalLen := int64(len(existing)) + int64(len(line))
+		if needNL {
+			totalLen++
+		}
+		h := sha256.New()
+		crc := crc32.New(castagnoliTable)
+		mw := io.MultiWriter(h, crc)
+		var prevSize int64
+		var prevSHA string
+		var prevNL bool
+		if len(existing) > 0 {
+			_, _ = mw.Write(existing)
+			prevSize = int64(len(existing))
+			prevSHA = hex.EncodeToString(h.Sum(nil))
+			prevNL = existing[len(existing)-1] == '\n'
+		}
+		if needNL {
+			_, _ = mw.Write([]byte{'\n'})
+		}
+		_, _ = mw.Write(line)
+		fullSHA := hex.EncodeToString(h.Sum(nil))
+		fullCRC := crc.Sum32()
+		var endsWithNL bool
+		if len(line) > 0 {
+			endsWithNL = line[len(line)-1] == '\n'
+		} else if needNL {
+			endsWithNL = true
+		} else if len(existing) > 0 {
+			endsWithNL = existing[len(existing)-1] == '\n'
+		}
+		prefixes, putMeta := r.prepareJournalWriteMeta(
+			key, prevMeta, prevSize, prevSHA, prevNL,
+			totalLen, fullSHA, endsWithNL, fullCRC, prevSize > 0,
+		)
+		var body io.ReadSeeker
+		if needNL {
+			body = newBytesSlicesReader(existing, []byte{'\n'}, line)
+		} else {
+			body = newBytesSlicesReader(existing, line)
+		}
+		newMeta, err := putIfWithMeta(ctx, r.Backend, cp, key, body, totalLen, prevMeta.Version, putMeta)
 		if err == nil {
+			r.storeJournalWriteMeta(key, newMeta.Version, totalLen, fullSHA, fullCRC, 0, endsWithNL, false, prevSize, prevSHA, prevNL, prefixes)
 			return nil
 		}
 		if !errors.Is(err, remote.ErrVersionMismatch) {
@@ -1660,6 +1702,16 @@ func (r *RemoteSource) appendLastWriterWins(ctx context.Context, key string, lin
 			return err
 		}
 	}
-	data := append(existing, line...)
-	return r.Backend.Put(ctx, key, bytes.NewReader(data), int64(len(data)))
+	needNL := len(existing) > 0 && existing[len(existing)-1] != '\n'
+	totalLen := int64(len(existing)) + int64(len(line))
+	if needNL {
+		totalLen++
+	}
+	var body io.ReadSeeker
+	if needNL {
+		body = newBytesSlicesReader(existing, []byte{'\n'}, line)
+	} else {
+		body = newBytesSlicesReader(existing, line)
+	}
+	return r.Backend.Put(ctx, key, body, totalLen)
 }
