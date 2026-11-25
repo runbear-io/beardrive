@@ -634,27 +634,10 @@ func (m *MCPAuth) authorize(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, u2.String(), http.StatusFound)
 }
 
-// pruneCodes drops expired pending codes and the grants they would have
-// issued. Called on every mint, so neither map grows without bound.
-//
-// The grants matter as much as the codes: authorize creates the grant in
-// memory and only issue() persists it, so a consent the user completes but the
-// client never exchanges left a grant behind that nothing could reach, nothing
-// wrote to disk, and nothing cleaned up until a restart. Callers hold mu.
-/* pruneOrphanGrants drops grants that a consent created and no exchange ever
-   claimed, and prunes the expired codes behind them.
-
-   It used to work the other way round — walk the in-memory codes, and for each
-   expired one drop its grant. That cannot survive codes moving into a store
-   this process does not hold alone, so the rule is expressed as a property of
-   the GRANT instead: a grant with no token digest was never exchanged, and one
-   older than a code could possibly still be valid for never will be.
-
-   Safer than the old form as well as simpler. A grant with an empty digest is
-   not in byToken and cannot authenticate anything, so the worst an uncollected
-   one ever did was occupy a row; and keying on the grant's own age means a
-   code that vanished for any reason — an instance that died mid-consent, a
-   store that was briefly unreachable — no longer strands its grant forever. */
+/* pruneOrphanGrants prunes expired pending codes, and drops grants with no
+   token that are older than any code could be. Consent no longer creates a
+   grant before the exchange (the grant rides in the code), so the second half
+   only cleans up rows an older binary left behind. */
 func (m *MCPAuth) pruneOrphanGrants() {
 	if err := m.pending.Prune(time.Now()); err != nil {
 		log.Printf("beardrive: could not prune expired MCP consents: %v", err)
