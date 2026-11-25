@@ -141,6 +141,14 @@ type mcpCode struct {
 	Redirect  string    `json:"redirect"`
 	Challenge string    `json:"challenge"` // PKCE S256
 	Expires   time.Time `json:"expires"`
+	// The grant itself rides in the code, not in this process's memory. The
+	// exchange usually lands on a different instance (or after a store re-read
+	// rebuilt the maps), and a grant held only in the consenting process's map
+	// was simply absent there — every such sign-in failed with "grant has been
+	// revoked". Empty on a code minted before this field existed.
+	Account    string   `json:"account,omitempty"`
+	ClientName string   `json:"client_name,omitempty"`
+	Projects   []string `json:"projects,omitempty"`
 }
 
 // pendingMCPCode is the PendingGrant kind these live under.
@@ -593,14 +601,12 @@ func (m *MCPAuth) authorize(w http.ResponseWriter, r *http.Request) {
 		ClientID: c.ID, ClientName: c.Name, Projects: projects,
 		Created: time.Now().UTC(),
 	}
-	m.mu.Lock()
-	m.grants[g.ID] = g
-	m.mu.Unlock()
 	code := "mcpa_" + randHex(24)
 	expires := time.Now().Add(mcpCodeTTL)
 	payload, err := json.Marshal(mcpCode{
 		GrantID: g.ID, ClientID: c.ID, Redirect: redirect,
 		Challenge: challenge, Expires: expires,
+		Account: g.Account, ClientName: g.ClientName, Projects: g.Projects,
 	})
 	if err == nil {
 		err = m.pending.Put(PendingGrant{
@@ -718,11 +724,24 @@ func (m *MCPAuth) tokenFromCode(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "code_verifier does not match the challenge")
 		return
 	}
-	m.issue(w, c.GrantID)
+	var fresh *MCPGrant
+	if c.Account != "" {
+		// A fresh grant with a fresh id, built from the single-use code: it
+		// shares nothing with any earlier grant for this client or account, so
+		// a revoked one can neither block it nor be revived by it.
+		fresh = &MCPGrant{
+			ID: c.GrantID, Account: c.Account, ClientID: c.ClientID,
+			ClientName: c.ClientName, Projects: c.Projects, Created: time.Now().UTC(),
+		}
+	}
+	m.issue(w, c.GrantID, fresh)
 }
 
 func (m *MCPAuth) tokenFromRefresh(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
+	// Re-read first: a grant revoked on another instance must not be found in
+	// this one's stale map, or issue() would write it straight back.
+	m.refresh()
 	id, ok := m.byFresh[hashToken(r.Form.Get("refresh_token"))]
 	var idle time.Duration
 	if ok {
@@ -749,18 +768,23 @@ func (m *MCPAuth) tokenFromRefresh(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "this connection expired after 30 days unused; reconnect")
 		return
 	}
-	m.issue(w, id)
+	m.issue(w, id, nil)
 }
 
 // issue mints a fresh access/refresh pair for a grant and forgets the old
 // one. Rotating the refresh token on every use is what makes a stolen
-// refresh token detectable-and-finite rather than permanent.
-func (m *MCPAuth) issue(w http.ResponseWriter, grantID string) {
+// refresh token detectable-and-finite rather than permanent. fresh is a grant
+// a code exchange is creating; it goes in under the same lock that mints its
+// tokens, so no concurrent re-read can drop it in between.
+func (m *MCPAuth) issue(w http.ResponseWriter, grantID string, fresh *MCPGrant) {
 	access := "mcpt_" + randHex(32)
 	refresh := "mcpr_" + randHex(32)
 
 	m.mu.Lock()
 	g, ok := m.grants[grantID]
+	if fresh != nil {
+		g, ok = *fresh, true
+	}
 	if !ok {
 		m.mu.Unlock()
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "grant has been revoked")
