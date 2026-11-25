@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -83,6 +84,37 @@ func TestPendingRepoConformance(t *testing.T) {
 			}
 			if _, ok, _ := r.Get("cli", "k1"); ok {
 				t.Fatal("a taken grant is still readable")
+			}
+
+			// And concurrently, across connections: on Postgres two
+			// transactions both SELECT the row, so only the DELETE can decide.
+			// Two winners of one MCP code would let a late exchange recreate a
+			// grant the user revoked after the first.
+			for round := 0; round < 20; round++ {
+				if err := r.Put(PendingGrant{Kind: "race", Key: "k", Expires: exp}); err != nil {
+					t.Fatal(err)
+				}
+				wins := make(chan bool, 8)
+				var wg sync.WaitGroup
+				for i := 0; i < 8; i++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						_, ok, _ := r.Take("race", "k")
+						wins <- ok
+					}()
+				}
+				wg.Wait()
+				close(wins)
+				n := 0
+				for ok := range wins {
+					if ok {
+						n++
+					}
+				}
+				if n != 1 {
+					t.Fatalf("round %d: %d concurrent Takes won one code", round, n)
+				}
 			}
 
 			// Delete is the explicit cancel (a CLI that gave up).

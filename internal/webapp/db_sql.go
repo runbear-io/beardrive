@@ -1817,8 +1817,9 @@ sqlPendingRepo is the SQL backend for PendingRepo.
 
 	Take is a TRANSACTION rather than DELETE ... RETURNING, which both engines
 	support but spell differently enough to be a dialect problem. The
-	transaction is the property that matters anyway: read and delete have to be
-	one step, or two pollers win the same code — which is the bug takeGranted
+	transaction alone is not enough: under READ COMMITTED both racers read the
+	row, so the DELETE's rows-affected is what decides who won — otherwise two
+	pollers win the same code — which is the bug takeGranted
 	was written to fix inside one process, and would come straight back here.
 */
 type sqlPendingRepo struct{ s *sqlMetaStore }
@@ -1866,8 +1867,16 @@ func (r *sqlPendingRepo) Take(kind, key string) (PendingGrant, bool, error) {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(r.s.q(`DELETE FROM pending_grants
-			WHERE kind = ? AND pend_key = ?`), kind, key); err != nil {
+		res, err := tx.Exec(r.s.q(`DELETE FROM pending_grants
+			WHERE kind = ? AND pend_key = ?`), kind, key)
+		if err != nil {
+			return err
+		}
+		// The DELETE is the claim, not the SELECT. Under Postgres READ
+		// COMMITTED two racing transactions both read the row; the second
+		// DELETE waits for the first to commit and then removes nothing. Only
+		// the one whose DELETE hit the row won the code.
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
 			return err
 		}
 		g = PendingGrant{Kind: kind, Key: key, Payload: []byte(payload), Expires: tdec(expires)}
