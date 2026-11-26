@@ -770,6 +770,15 @@ func (m *localMCP) edit(ctx context.Context, in lEdit) (string, error) {
 	case n > 1 && !in.ReplaceAll:
 		return "", fmt.Errorf("old_string occurs %d times in %s; add context or pass replace_all", n, rel)
 	}
+	// Sized before it is built: replace_all over many short matches can grow
+	// a file far past the bound, and building it first would allocate that.
+	repl := 1
+	if in.ReplaceAll {
+		repl = n
+	}
+	if grown := int64(len(text)) + int64(repl)*(int64(len(in.NewString))-int64(len(in.OldString))); grown > localReadMax {
+		return "", fmt.Errorf("%s: the edit would make it %s, more than this tool writes (%s); nothing was written", rel, humanBytes(grown), humanBytes(localReadMax))
+	}
 	if in.ReplaceAll {
 		text = strings.ReplaceAll(text, in.OldString, in.NewString)
 	} else {

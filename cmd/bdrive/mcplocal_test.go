@@ -468,3 +468,20 @@ func TestLocalMCPRefusesAnOversizeWriteUpFront(t *testing.T) {
 		t.Fatal("refused write still landed")
 	}
 }
+
+// replace_all is sized before it is built (bot review P1).
+func TestLocalMCPEditRefusesAnOversizeResultBeforeBuildingIt(t *testing.T) {
+	m := testLocalMCP(t)
+	abs := filepath.Join(m.v.root, "a.md")
+	os.WriteFile(abs, []byte(strings.Repeat("a", 1000)), 0o644)
+	old := localReadMax
+	localReadMax = 5000
+	defer func() { localReadMax = old }()
+	_, err := m.edit(context.Background(), lEdit{Path: "a.md", OldString: "a", NewString: strings.Repeat("b", 100), ReplaceAll: true})
+	if err == nil || !strings.Contains(err.Error(), "nothing was written") {
+		t.Fatalf("got %v", err)
+	}
+	if b, _ := os.ReadFile(abs); len(b) != 1000 {
+		t.Fatal("file changed")
+	}
+}
