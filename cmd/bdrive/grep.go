@@ -173,7 +173,11 @@ func runGrep(cmd *cobra.Command, pattern string, folderArg []string, ignoreCase,
 	if !truncated && proj.Lazy.Enabled {
 		if v, err := openView(cmd.Context(), folder, true); err == nil {
 			defer v.close()
-			notes, cut := lazyGrep(cmd.Context(), v, re, pattern, filesOnly, func(string) bool { return true }, emit)
+			searched := make(map[string]bool, len(paths))
+			for _, p := range paths {
+				searched[p] = true
+			}
+			notes, cut := lazyGrep(cmd.Context(), v, re, pattern, filesOnly, func(string) bool { return true }, searched, emit)
 			truncated = truncated || cut
 			for _, n := range notes {
 				fmt.Fprintln(cmd.ErrOrStderr(), "note:", n)
@@ -249,12 +253,15 @@ const hubGrepPage = 5000
 
 // lazyGrep searches the project files that are not on disk: from the blob
 // cache when this device holds the version, and through the hub's paged grep
-// otherwise. keep filters candidate paths (scope, glob). emit returns false
+// otherwise. keep filters candidate paths (scope, glob); searched names the
+// working files the local pass already searched — only those are skipped, so
+// a local-only file at a path the project also holds (excluded here, synced by
+// a teammate) still has its journaled version searched. emit returns false
 // once the caller's limit is reached, which ends the search (cut reports it).
 // notes are sentences about what could not be searched — a search is never
 // narrowed silently.
 func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr string, filesOnly bool,
-	keep func(rel string) bool, emit func(rel string, h hit) bool) (notes []string, cut bool) {
+	keep func(rel string) bool, searched map[string]bool, emit func(rel string, h hit) bool) (notes []string, cut bool) {
 	var remoteOnly []string
 	rels := make([]string, 0, len(v.ix.Files))
 	for rel := range v.ix.Files {
@@ -265,8 +272,8 @@ func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr strin
 		if !keep(rel) {
 			continue
 		}
-		if _, err := os.Lstat(filepath.Join(v.root, filepath.FromSlash(rel))); err == nil {
-			continue // on disk: the local pass searched it
+		if searched[rel] {
+			continue // the local pass searched the working file
 		}
 		fs := v.ix.Files[rel]
 		if !v.sess.Store.HasBlob(fs.Blob) {
@@ -294,7 +301,7 @@ func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr strin
 		return append(notes, fmt.Sprintf("%s kept on the hub were not searched (hub unreachable)", plural(len(remoteOnly), "file"))), false
 	}
 	var binary, unreadable, missing int
-	searched := 0
+	hubSearched := 0
 	for len(remoteOnly) > 0 {
 		page := remoteOnly[:min(len(remoteOnly), hubGrepPage)]
 		resp, err := g.Grep(ctx, remote.GrepRequest{Pattern: expr, FilesOnly: filesOnly, Paths: page, MaxMatches: 1000})
@@ -305,7 +312,7 @@ func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr strin
 			notes = append(notes, fmt.Sprintf("%s kept on the hub were not searched: %v", plural(len(remoteOnly), "file"), err))
 			break
 		}
-		searched += resp.Scanned
+		hubSearched += resp.Scanned
 		missing += len(resp.Missing)
 		binary += len(resp.Binary)
 		unreadable += len(resp.Unreadable)
@@ -330,7 +337,7 @@ func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr strin
 		}
 		remoteOnly = remoteOnly[resp.Scanned:]
 	}
-	notes = append(notes, fmt.Sprintf("searched %s on the hub (kept there by lazy mode)", plural(searched, "file")))
+	notes = append(notes, fmt.Sprintf("searched %s on the hub (kept there by lazy mode)", plural(hubSearched, "file")))
 	if binary > 0 || unreadable > 0 || missing > 0 {
 		notes = append(notes, fmt.Sprintf("skipped on the hub: %d binary, %d unreadable, %d no longer there or not visible to you", binary, unreadable, missing))
 	}

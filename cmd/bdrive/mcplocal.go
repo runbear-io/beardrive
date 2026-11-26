@@ -337,7 +337,11 @@ func (m *localMCP) grep(ctx context.Context, in lGrep) (string, error) {
 	var notes []string
 	if !truncated {
 		var cut bool
-		notes, cut = lazyGrep(ctx, m.v, re, expr, in.FilesOnly, keep, emit)
+		searched := make(map[string]bool, len(local))
+		for _, p := range local {
+			searched[p] = true
+		}
+		notes, cut = lazyGrep(ctx, m.v, re, expr, in.FilesOnly, keep, searched, emit)
 		truncated = truncated || cut
 	}
 	var out strings.Builder

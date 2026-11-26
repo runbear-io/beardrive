@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
@@ -353,5 +354,49 @@ func TestLocalMCPRestoreReportsDisplacedFallback(t *testing.T) {
 	res, err := m.restore(ctx, lRestore{Path: "notes.md", SHA: v1})
 	if err != nil || !strings.Contains(res, "kept as") {
 		t.Fatalf("restore reply lost the note: %q %v", res, err)
+	}
+}
+
+// A local-only file at a path a teammate also syncs: the local pass skips it
+// (excluded here), so its journaled version must still be searched — and the
+// local bytes never matched (bot review P2).
+func TestLocalMCPGrepSearchesJournaledVersionOfLocalOnlyPath(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	ctx := context.Background()
+	be, err := remote.Open(ctx, "file://"+t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := func(id string) *syncer.Session {
+		st, _ := store.Open(filepath.Join(t.TempDir(), "vol"))
+		return &syncer.Session{Folder: t.TempDir(), Store: st, Device: config.Device{ID: id}, Backend: be}
+	}
+	b := dev("devb")
+	os.WriteFile(filepath.Join(b.Folder, ".bdriveignore"), []byte(".env\n"), 0o644)
+	os.WriteFile(filepath.Join(b.Folder, ".env"), []byte("MY SECRET needle\n"), 0o644)
+	if _, err := b.Cycle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a := dev("deva")
+	a.Cycle(ctx)
+	os.WriteFile(filepath.Join(a.Folder, ".bdriveignore"), []byte("# widened\n"), 0o644)
+	os.WriteFile(filepath.Join(a.Folder, ".env"), []byte("team needle\n"), 0o644)
+	if _, err := a.Cycle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Cycle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	v := &projectView{root: b.Folder, sess: b}
+	if err := v.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	m := &localMCP{v: v}
+	out, err := m.grep(ctx, lGrep{Pattern: "needle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, ".env:1:team needle") || strings.Contains(out, "MY SECRET") {
+		t.Fatalf("grep:\n%s", out)
 	}
 }

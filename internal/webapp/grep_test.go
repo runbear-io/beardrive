@@ -3,6 +3,7 @@ package webapp
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/runbear-io/beardrive/internal/remote"
@@ -55,5 +56,34 @@ func TestHubGrepPagesAndHonorsFolderRules(t *testing.T) {
 	out = grep("bob", remote.GrepRequest{Pattern: "secret", Paths: paths[3+out.Scanned:], MaxMatches: 2})
 	if out.Scanned != 1 || len(out.Matches) != 2 {
 		t.Fatalf("page 2: %+v", out)
+	}
+}
+
+// One request never reads past its byte budget, even inside one file, and a
+// file it could not finish is reported, not passed off as a clean negative.
+// A page also stops reading at the match cap (bot review P1).
+func TestHubGrepBoundsEachRead(t *testing.T) {
+	h, _, c, p, _ := hiddenHub(t)
+	big := strings.Repeat("filler\n", 2000) + "needle at the end\n"
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/upload/content?path=big.txt", []byte(big), c["alice"]); rec.Code != 200 {
+		t.Fatalf("seed: %d", rec.Code)
+	}
+	old := grepPageBytes
+	grepPageBytes = 1024
+	defer func() { grepPageBytes = old }()
+	rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/grep", remote.GrepRequest{Pattern: "needle", Paths: []string{"big.txt"}}, c["bob"])
+	var out remote.GrepResponse
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.Total != 0 || len(out.Unreadable) != 1 || out.Unreadable[0] != "big.txt" {
+		t.Fatalf("a partially read file must be reported: %+v", out)
+	}
+	grepPageBytes = old
+	many := strings.Repeat("hit\n", 5000)
+	doAs(t, h, "PUT", "/api/p/"+p.ID+"/upload/content?path=many.txt", []byte(many), c["alice"])
+	rec = doAs(t, h, "POST", "/api/p/"+p.ID+"/grep", remote.GrepRequest{Pattern: "hit", Paths: []string{"many.txt"}, MaxMatches: 3}, c["bob"])
+	out = remote.GrepResponse{}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Matches) != 3 || out.Total != 4 {
+		t.Fatalf("must stop reading at the match cap (Total one past): %+v", out.Total)
 	}
 }

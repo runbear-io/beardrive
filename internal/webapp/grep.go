@@ -24,6 +24,9 @@ import (
 // maxGrepPaths bounds one request's path list.
 const maxGrepPaths = 5000
 
+// grepPageBytes is one page's read budget (a var so tests can shrink it).
+var grepPageBytes int64 = maxGrepBytes
+
 func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 	var req remote.GrepRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
@@ -58,7 +61,7 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 	for i, p := range req.Paths {
 		// Always make progress: the first path of a page is scanned whatever
 		// its size, so one huge file cannot stall a caller's paging loop.
-		if i > 0 && (i >= maxGrepFiles || bytesRead >= maxGrepBytes || len(out.Matches) >= maxMatches) {
+		if i > 0 && (i >= maxGrepFiles || bytesRead >= grepPageBytes || len(out.Matches) >= maxMatches) {
 			break
 		}
 		out.Scanned = i + 1
@@ -67,13 +70,22 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 			out.Missing = append(out.Missing, p)
 			continue
 		}
-		bytesRead += fi.Size
 		rc, err := v.source.Open(r.Context(), p, fi)
 		if err != nil {
 			out.Unreadable = append(out.Unreadable, p)
 			continue
 		}
-		found, isBin, cut := scanBlob(rc, re, 0, func(line int, text string, isMatch bool) bool {
+		// The read itself is bounded by what is left of the page's budget
+		// (the whole budget for the first file), so one huge file cannot make
+		// a request read without limit. A file cut by it is reported as not
+		// fully searched, never as a clean negative.
+		budget := max(grepPageBytes-bytesRead, 0)
+		if i == 0 {
+			budget = grepPageBytes
+		}
+		bytesRead += min(fi.Size, budget)
+		capped := false
+		found, isBin, cut := scanBlob(io.LimitReader(rc, budget), re, 0, func(line int, text string, isMatch bool) bool {
 			if !isMatch {
 				return true
 			}
@@ -81,16 +93,20 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 			if req.FilesOnly {
 				return false
 			}
-			if len(out.Matches) < maxMatches {
-				out.Matches = append(out.Matches, remote.GrepMatch{Path: p, Line: line, Text: text})
+			if len(out.Matches) >= maxMatches {
+				// Stop reading at the cap. Total is one past what was
+				// returned, which tells the caller there was more.
+				capped = true
+				return false
 			}
+			out.Matches = append(out.Matches, remote.GrepMatch{Path: p, Line: line, Text: text})
 			return true
 		})
 		rc.Close()
 		switch {
 		case isBin:
 			out.Binary = append(out.Binary, p)
-		case cut > 0:
+		case cut > 0 || (fi.Size > budget && !capped && !(req.FilesOnly && found)):
 			out.Unreadable = append(out.Unreadable, p)
 		}
 		if found {
