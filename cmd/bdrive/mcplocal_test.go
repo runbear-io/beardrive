@@ -454,3 +454,17 @@ func TestLocalMCPGrepOutputIsBounded(t *testing.T) {
 		t.Fatalf("reply of %d bytes", len(out))
 	}
 }
+
+// A write over the size bound is refused before anything touches the disk.
+func TestLocalMCPRefusesAnOversizeWriteUpFront(t *testing.T) {
+	m := testLocalMCP(t)
+	old := localReadMax
+	localReadMax = 10
+	defer func() { localReadMax = old }()
+	if _, err := m.write(context.Background(), lWrite{Path: "big.md", Content: strings.Repeat("x", 11)}); err == nil {
+		t.Fatal("oversize write must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(m.v.root, "big.md")); err == nil {
+		t.Fatal("refused write still landed")
+	}
+}

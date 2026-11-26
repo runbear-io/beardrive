@@ -73,13 +73,13 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 		// file that does not fit what is left of this page starts the next
 		// one; a file larger than a whole page, or one whose stored size
 		// cannot be established, is reported as not searched, unopened.
-		size := int64(-1)
+		size, cost := int64(-1), int64(-1)
 		if ok {
 			var probed int64
-			size, probed = trustedSize(r.Context(), v, fi)
+			size, cost, probed = trustedSize(r.Context(), v, fi)
 			bytesRead += probed // reading a manifest to size a file spends the page too
 		}
-		if ok && i > 0 && size >= 0 && size > grepPageBytes-bytesRead && size <= grepPageBytes {
+		if ok && i > 0 && size >= 0 && cost > grepPageBytes-bytesRead && cost <= grepPageBytes {
 			break
 		}
 		out.Scanned = i + 1
@@ -87,7 +87,7 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 			out.Missing = append(out.Missing, p)
 			continue
 		}
-		if size < 0 || size > grepPageBytes {
+		if size < 0 || cost > grepPageBytes {
 			out.Unreadable = append(out.Unreadable, p)
 			continue
 		}
@@ -99,7 +99,7 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 		if i == 0 {
 			budget = grepPageBytes
 		}
-		bytesRead += min(fi.Size, budget)
+		bytesRead += min(cost, budget)
 		rc, err := v.source.Open(r.Context(), p, fi)
 		if err != nil {
 			out.Unreadable = append(out.Unreadable, p)
@@ -144,17 +144,20 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 // chunks, the manifest's total — which reassembly enforces, since every chunk
 // is hash-verified against its key. -1 when neither can be established. A
 // plain-folder source's size comes from the filesystem and is used as is.
-func trustedSize(ctx context.Context, v *volume, fi FileInfo) (size, probed int64) {
+//
+// cost is what opening it spends of a page: size, plus a floor per chunk
+// fetch for chunk-only content (grepChunkFloor).
+func trustedSize(ctx context.Context, v *volume, fi FileInfo) (size, cost, probed int64) {
 	rs, ok := v.source.(*RemoteSource)
 	if !ok {
-		return fi.Size, 0
+		return fi.Size, fi.Size, 0
 	}
 	return rs.storedSize(ctx, fi.Blob)
 }
 
-func (r *RemoteSource) storedSize(ctx context.Context, sha string) (size, probed int64) {
+func (r *RemoteSource) storedSize(ctx context.Context, sha string) (size, cost, probed int64) {
 	if !blobRe.MatchString(sha) {
-		return -1, 0
+		return -1, -1, 0
 	}
 	// OpenBlob serves the whole blob when it verifies and falls back to
 	// reassembling the manifest when it does not, so the budget must cover
@@ -162,7 +165,7 @@ func (r *RemoteSource) storedSize(ctx context.Context, sha string) (size, probed
 	// reassembly. A presigned upload cannot grow an object afterwards — the
 	// signature covers Content-Length — so the listed size is the size.
 	whole := int64(-1)
-	man, probed := r.manifestSize(ctx, sha)
+	man, chunks, probed := r.manifestSize(ctx, sha)
 	if objs, err := r.Backend.List(ctx, "blobs/"+sha); err == nil {
 		for _, o := range objs {
 			if o.Key == "blobs/"+sha {
@@ -170,20 +173,21 @@ func (r *RemoteSource) storedSize(ctx context.Context, sha string) (size, probed
 			}
 		}
 	}
-	return max(whole, man), probed
+	size = max(whole, man)
+	return size, max(whole, man+chunks*grepChunkFloor), probed
 }
 
 // manifestSize is a chunk manifest's total, which reassembly enforces since
 // every chunk is hash-verified against its key; -1 with no valid manifest.
 // probed is how many manifest bytes were read; Exists is asked first, so a
 // file with no manifest (the common case) reads none.
-func (r *RemoteSource) manifestSize(ctx context.Context, sha string) (size, probed int64) {
+func (r *RemoteSource) manifestSize(ctx context.Context, sha string) (size, chunks, probed int64) {
 	if ok, err := r.Backend.Exists(ctx, "manifests/"+sha); err != nil || !ok {
-		return -1, 0
+		return -1, 0, 0
 	}
 	mrc, err := r.Backend.Get(ctx, "manifests/"+sha)
 	if err != nil {
-		return -1, 0
+		return -1, 0, 0
 	}
 	defer mrc.Close()
 	cr := &manifestCounter{r: io.LimitReader(mrc, 8<<20)}
@@ -194,20 +198,25 @@ func (r *RemoteSource) manifestSize(ctx context.Context, sha string) (size, prob
 		} `json:"chunks"`
 	}
 	if json.NewDecoder(cr).Decode(&man) != nil || man.Size < 0 || len(man.Chunks) > maxManifestChunks {
-		return -1, cr.n
+		return -1, 0, cr.n
 	}
 	var total int64
 	for _, c := range man.Chunks {
 		if c.N < 0 || c.N > maxReassembleChunkBytes {
-			return -1, cr.n
+			return -1, 0, cr.n
 		}
 		total += c.N
 	}
 	if total != man.Size {
-		return -1, cr.n
+		return -1, 0, cr.n
 	}
-	return total, cr.n
+	return total, int64(len(man.Chunks)), cr.n
 }
+
+// grepChunkFloor is the budget a single chunk fetch costs at minimum: each
+// chunk is one storage request however small, so a file of many tiny chunks
+// spends a page like its request count, not only its byte count.
+const grepChunkFloor = 64 << 10
 
 type manifestCounter struct {
 	r io.Reader

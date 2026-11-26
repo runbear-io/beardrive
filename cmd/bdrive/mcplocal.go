@@ -637,6 +637,9 @@ func fileSHA(p string) (string, error) {
 }
 
 func (m *localMCP) put(rel string, content []byte, base string) (out string, err error) {
+	if int64(len(content)) > localReadMax {
+		return "", fmt.Errorf("%s: %s is more than this tool writes (%s); nothing was written", rel, humanBytes(int64(len(content))), humanBytes(localReadMax))
+	}
 	if err := m.v.sess.Writable(rel); err != nil {
 		return "", err
 	}
@@ -713,11 +716,9 @@ func (m *localMCP) put(rel string, content []byte, base string) (out string, err
 		return "", err
 	}
 	daemon.WakeSupervisor()
-	b, sha, _, err := m.v.readAll(context.Background(), rel, localReadMax)
-	if err != nil || len(b) != len(content) {
-		return "", fmt.Errorf("wrote %s but could not read it back", rel)
-	}
-	return fmt.Sprintf("wrote %s (%d bytes, sha:%s); it syncs to the hub within seconds", rel, len(content), sha), nil
+	// The sha is of the bytes swapped in — re-reading the file could report
+	// a later writer's save as ours, or fail after the write already landed.
+	return fmt.Sprintf("wrote %s (%d bytes, sha:%s); it syncs to the hub within seconds", rel, len(content), ours), nil
 }
 
 func (m *localMCP) write(ctx context.Context, in lWrite) (string, error) {
