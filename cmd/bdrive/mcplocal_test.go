@@ -28,8 +28,10 @@ func testLocalMCP(t *testing.T) *localMCP {
 	return &localMCP{v: v}
 }
 
-// An outside write landing between the sha check and the rename is refused,
-// not overwritten (bot review P1).
+// An outside write landing after the caller's sha check — right up to the
+// moment of the swap — is refused, and the outside version stays on disk
+// (bot review P1). mcpBeforeRename runs just before the swap; there is no
+// later check to slip past, because the check runs on what the swap displaced.
 func TestLocalMCPWriteRefusesARacingWrite(t *testing.T) {
 	m := testLocalMCP(t)
 	ctx := context.Background()
@@ -74,5 +76,24 @@ func TestLocalMCPRefusesReadOnlyFolder(t *testing.T) {
 	}
 	if _, err := m.restore(ctx, lRestore{Path: "locked/a.md", SHA: strings.Repeat("a", 64)}); err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("restore: %v", err)
+	}
+}
+
+// The CAS above has no check-then-rename window on macOS and Linux: the
+// staged file is swapped in atomically and only the DISPLACED file is
+// checked. This pins that the swap is really available here, so CI would
+// notice a platform silently falling back to check-then-rename.
+func TestSwapFilesExchanges(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	os.WriteFile(a, []byte("A"), 0o644)
+	os.WriteFile(b, []byte("B"), 0o644)
+	if err := swapFiles(a, b); err != nil {
+		t.Skipf("no atomic swap on this filesystem: %v", err)
+	}
+	ga, _ := os.ReadFile(a)
+	gb, _ := os.ReadFile(b)
+	if string(ga) != "B" || string(gb) != "A" {
+		t.Fatalf("swap: a=%q b=%q", ga, gb)
 	}
 }

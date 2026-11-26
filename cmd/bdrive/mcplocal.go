@@ -392,11 +392,85 @@ func (m *localMCP) nowSHA(rel string) (string, error) {
 }
 
 // put writes content at rel, but only if rel still holds base (the sha the
-// caller checked; "" for "no such file"). The file is staged next to its
-// destination and compared again immediately before the rename, so an
-// editor's save or the daemon's pull landing after the caller's check is
-// refused rather than overwritten. What remains is the instant between that
-// last compare and rename(2) — the same window every editor's save has.
+// caller checked; "" for "no such file"). An editor's save or the daemon's
+// pull landing after the caller's check is refused, never overwritten: see
+// swapIn.
+var errNoSwap = errors.New("atomic swap not supported here")
+
+// swapIn moves the staged file tmp to abs only if abs still holds base.
+//
+// A check followed by rename(2) always leaves a window in which another
+// writer's save is overwritten. So the check comes AFTER the move: the file
+// is atomically SWAPPED in (renamex_np / renameat2), which leaves whatever
+// abs held at that instant at tmp, and that displaced file is what gets
+// checked. If it is not base, someone else wrote in between: swap back and
+// refuse. Both versions are on disk at every step, so nothing is lost even
+// if the swap back itself races. A file that is not on disk is created with
+// link(2), which fails if anything appeared at abs meanwhile.
+func (m *localMCP) swapIn(rel, abs, tmp, base string) error {
+	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
+		now, err := m.nowSHA(rel)
+		if err != nil {
+			return err
+		}
+		if now != base {
+			return changedErr(rel, now)
+		}
+		if err := os.Link(tmp, abs); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("%s appeared while you were changing it; nothing was written — read it again", rel)
+			}
+			return err
+		}
+		return nil
+	}
+	switch err := swapFiles(tmp, abs); {
+	case errors.Is(err, errNoSwap):
+		// A filesystem without an atomic exchange: check, then rename. The
+		// one case left with the window described above.
+		now, err := m.nowSHA(rel)
+		if err != nil {
+			return err
+		}
+		if now != base {
+			return changedErr(rel, now)
+		}
+		return os.Rename(tmp, abs)
+	case err != nil:
+		return err
+	}
+	prev, err := fileSHA(tmp)
+	if err == nil && prev == base {
+		return nil
+	}
+	if serr := swapFiles(tmp, abs); serr != nil {
+		kept := abs + ".bdrive-mcp-displaced"
+		_ = os.Rename(tmp, kept)
+		return fmt.Errorf("%s changed while you were changing it, and putting the other version back failed (%v); it is at %s", rel, serr, kept)
+	}
+	return changedErr(rel, prev)
+}
+
+func changedErr(rel, now string) error {
+	if now == "" {
+		return fmt.Errorf("%s was deleted while you were changing it; nothing was written", rel)
+	}
+	return fmt.Errorf("%s changed while you were changing it (now sha:%s); nothing was written — read it again and redo the change", rel, now)
+}
+
+func fileSHA(p string) (string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func (m *localMCP) put(rel string, content []byte, base string) (string, error) {
 	if err := m.v.sess.Writable(rel); err != nil {
 		return "", err
@@ -438,17 +512,7 @@ func (m *localMCP) put(rel string, content []byte, base string) (string, error) 
 	if mcpBeforeRename != nil {
 		mcpBeforeRename()
 	}
-	now, err := m.nowSHA(rel)
-	if err != nil {
-		return "", err
-	}
-	if now != base {
-		if now == "" {
-			return "", fmt.Errorf("%s was deleted while you were changing it; nothing was written", rel)
-		}
-		return "", fmt.Errorf("%s changed while you were changing it (now sha:%s); nothing was written — read it again and redo the change", rel, now)
-	}
-	if err := os.Rename(tmp.Name(), abs); err != nil {
+	if err := m.swapIn(rel, abs, tmp.Name(), base); err != nil {
 		return "", err
 	}
 	daemon.WakeSupervisor()
