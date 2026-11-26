@@ -468,9 +468,6 @@ func (m *localMCP) swapIn(rel, abs, tmp, base, ours string) error {
 	return changedErr(rel, prev)
 }
 
-// displacedTTL is how long an untouched displaced version is kept.
-const displacedTTL = 24 * time.Hour
-
 func (m *localMCP) displacedDir() string {
 	return filepath.Join(m.v.root, config.ProjectDir, "displaced")
 }
@@ -502,7 +499,7 @@ func (m *localMCP) preserveDisplaced(rel, tmp, base string) {
 
 // sweepDisplaced settles displaced versions. One that still holds exactly
 // the sha it was displaced with is the previous version, already in history,
-// and is deleted once it is older than displacedTTL. One that CHANGED was
+// and stays where it is. One that CHANGED was
 // written after the swap — an editor saving through a descriptor it opened
 // before — and is never deleted: it is moved next to its file as a visible,
 // syncing "<name>.bdrive-mcp-late-<id>" and reported. It returns those paths.
@@ -530,10 +527,10 @@ func (m *localMCP) sweepDisplaced() []string {
 			continue
 		}
 		if sha == meta.Base {
-			if ns, err := strconv.ParseInt(id, 10, 64); err == nil && time.Since(time.Unix(0, ns)) > displacedTTL {
-				os.Remove(file)
-				os.Remove(filepath.Join(dir, e.Name()))
-			}
+			// Untouched so far. Never deleted automatically: a program may
+			// still hold it open and write to it at any later moment, and an
+			// unlinked inode would take that write with it. Removing the
+			// folder is the user's call (see README, On-demand files).
 			continue
 		}
 		rel, err := cleanToolPath(meta.Path)

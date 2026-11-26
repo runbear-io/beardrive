@@ -185,8 +185,9 @@ func TestLocalMCPKeepsALateWriteThroughAnOpenDescriptor(t *testing.T) {
 	}
 }
 
-// Untouched displaced versions are pruned after the TTL; a changed one is
-// never pruned, however old (bot review P1).
+// Nothing displaced is ever deleted automatically, however old: an untouched
+// version stays (a program may still write to it), a changed one is surfaced
+// (bot review P1).
 func TestLocalMCPDisplacedTTL(t *testing.T) {
 	m := testLocalMCP(t)
 	dir := m.displacedDir()
@@ -202,8 +203,8 @@ func TestLocalMCPDisplacedTTL(t *testing.T) {
 	put(old, "prev", untouched)
 	put(old2, "changed later", untouched)
 	late := m.sweepDisplaced()
-	if _, err := os.Stat(filepath.Join(dir, old)); err == nil {
-		t.Fatal("an untouched expired version was not pruned")
+	if _, err := os.Stat(filepath.Join(dir, old)); err != nil {
+		t.Fatal("an untouched old version was deleted")
 	}
 	if len(late) != 1 {
 		t.Fatalf("a changed expired version must be surfaced, not deleted: %v", late)
