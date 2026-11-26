@@ -45,6 +45,10 @@ import (
 // tests can shrink it).
 var localReadMax int64 = 64 << 20
 
+// localReadOut bounds one read reply, whatever limit the caller asks for
+// (the hub's MCP read has the same bound).
+const localReadOut = 1 << 20
+
 const (
 	localReadLines    = 2000
 	localLineShown    = 4 << 10
@@ -244,6 +248,10 @@ func (m *localMCP) read(ctx context.Context, in lRead) (string, error) {
 		cut := ""
 		if len(line) > localLineShown {
 			line, cut = line[:localLineShown], " [line cut]"
+		}
+		if sb.Len() > localReadOut {
+			end = n - 1 // the reply is full; say where to resume
+			break
 		}
 		fmt.Fprintf(&sb, "%6d\t%s%s\n", n, line, cut)
 	}

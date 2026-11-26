@@ -116,23 +116,23 @@ func TestHubGrepSizesFromStorage(t *testing.T) {
 	}
 	rs := &RemoteSource{Backend: be}
 	v := &volume{source: rs}
-	if got := trustedSize(ctx, v, FileInfo{Blob: sha, Size: 1}); got != 5000 {
-		t.Fatalf("trustedSize = %d, want the stored 5000 (declared 1)", got)
+	if got, probed := trustedSize(ctx, v, FileInfo{Blob: sha, Size: 1}); got != 5000 || probed != 0 {
+		t.Fatalf("trustedSize = %d (probed %d), want the stored 5000 (declared 1) and no manifest read", got, probed)
 	}
 	// Chunk-only content: the manifest total, which reassembly enforces.
 	sha2 := strings.Repeat("a", 64)
 	man := `{"size":9000,"chunks":[{"h":"` + strings.Repeat("b", 64) + `","n":4000},{"h":"` + strings.Repeat("c", 64) + `","n":5000}]}`
 	be.Put(ctx, "manifests/"+sha2, strings.NewReader(man), int64(len(man)))
-	if got := trustedSize(ctx, v, FileInfo{Blob: sha2, Size: 1}); got != 9000 {
-		t.Fatalf("manifest size = %d, want 9000", got)
+	if got, probed := trustedSize(ctx, v, FileInfo{Blob: sha2, Size: 1}); got != 9000 || probed != int64(len(man)) {
+		t.Fatalf("manifest size = %d (probed %d), want 9000 and the manifest's bytes charged", got, probed)
 	}
 	// A small (wrong) whole blob beside a large manifest: OpenBlob may fall
 	// back to reassembly, so the larger size governs.
 	be.Put(ctx, "blobs/"+sha2, strings.NewReader("tiny"), 4)
-	if got := trustedSize(ctx, v, FileInfo{Blob: sha2, Size: 1}); got != 9000 {
+	if got, _ := trustedSize(ctx, v, FileInfo{Blob: sha2, Size: 1}); got != 9000 {
 		t.Fatalf("small blob + big manifest = %d, want 9000", got)
 	}
-	if got := trustedSize(ctx, v, FileInfo{Blob: strings.Repeat("d", 64), Size: 1}); got != -1 {
+	if got, _ := trustedSize(ctx, v, FileInfo{Blob: strings.Repeat("d", 64), Size: 1}); got != -1 {
 		t.Fatalf("unknown object = %d, want -1", got)
 	}
 }
