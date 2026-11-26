@@ -159,17 +159,22 @@ func TestLocalMCPKeepsALateWriteThroughAnOpenDescriptor(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer fd.Close()
-	mcpBeforeCleanup = func() { fd.WriteAt([]byte("late edit\n"), 0) }
-	defer func() { mcpBeforeCleanup = nil }()
 	if _, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha}); err != nil {
 		t.Fatal(err)
 	}
-	matches, _ := filepath.Glob(abs + ".bdrive-mcp-displaced-*")
+	// The write lands AFTER every check and after cleanup has run.
+	if _, err := fd.WriteAt([]byte("late edit\n"), 0); err != nil {
+		t.Fatal(err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(m.v.root, ".bdrive", "displaced", "*-notes.md"))
 	if len(matches) != 1 {
-		t.Fatalf("late write through an open descriptor was deleted: %v", matches)
+		t.Fatalf("displaced version not preserved: %v", matches)
 	}
 	if b, _ := os.ReadFile(matches[0]); !strings.HasPrefix(string(b), "late edit") {
-		t.Fatalf("kept = %q", b)
+		t.Fatalf("late write through an open descriptor was lost: %q", b)
+	}
+	if b, _ := os.ReadFile(abs); string(b) != "mine\n" {
+		t.Fatalf("file = %q", b)
 	}
 }
 

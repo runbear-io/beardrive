@@ -381,7 +381,12 @@ journals always are. Its content is fetched only when something reads it.
   scan deletes only files this device put on disk, and a lazy file is never
   one of them. Writing a lazy path (an editor, `bdrive mcp` write/edit) makes
   it an ordinary local file that syncs. The MCP tools fetch the hub version
-  first, so a concurrent edit on another device merges instead of forking.
+  first, so a concurrent edit on another device merges instead of forking. MCP
+  write/edit is a real compare-and-swap. The new file is swapped in
+  atomically and the version it replaced is checked. If someone else saved in
+  between, their version goes back and the write is refused. The replaced file
+  is kept for a day in `.bdrive/displaced/`, which never syncs. On a
+  filesystem with no atomic swap, MCP never overwrites an existing file.
 - **Agents.** Your agent's own Read and Grep tools cannot see a file that is
   not on disk. When lazy mode is on, the turn hook adds one line that names
   the folders that hold such files and points at `bdrive cat`, `bdrive grep`

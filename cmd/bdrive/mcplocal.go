@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -458,6 +459,36 @@ func (m *localMCP) swapIn(rel, abs, tmp, base, ours string) error {
 	return changedErr(rel, prev)
 }
 
+// displacedTTL is how long a displaced previous version is kept.
+// ponytail: age-based pruning on the next write; a size cap if MCP writes of
+// very large files become common.
+const displacedTTL = 24 * time.Hour
+
+// preserveDisplaced moves a file a swap displaced into .bdrive/displaced,
+// pruning entries older than displacedTTL. If the move fails the file stays
+// at its staging name (a .bdrive-tmp- name the scanner ignores): never lost.
+func (m *localMCP) preserveDisplaced(abs, tmp string) {
+	dir := filepath.Join(m.v.root, config.ProjectDir, "displaced")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	if entries, err := os.ReadDir(dir); err == nil {
+		// Aged by the time in the NAME (when it was displaced), not its
+		// mtime, which is the old version's own and usually long past.
+		for _, e := range entries {
+			stamp, _, ok := strings.Cut(e.Name(), "-")
+			if ns, err := strconv.ParseInt(stamp, 10, 64); ok && err == nil && time.Since(time.Unix(0, ns)) > displacedTTL {
+				os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+	name := filepath.Base(abs)
+	if len(name) > 64 {
+		name = name[:64]
+	}
+	_ = os.Rename(tmp, filepath.Join(dir, fmt.Sprintf("%d-%s", time.Now().UnixNano(), name)))
+}
+
 // keepDisplaced moves a file a swap displaced to a visible name beside abs.
 // The name is short whatever abs is called, so it cannot fail on a name
 // length limit; if the rename fails anyway the file stays where it is (a
@@ -523,19 +554,30 @@ func (m *localMCP) put(rel string, content []byte, base string) (string, error) 
 	}
 	sum := sha256.Sum256(content)
 	ours := hex.EncodeToString(sum[:])
-	// Whatever ends up at the staging path — our bytes, or a version a swap
-	// displaced — is deleted only if it is content we can name. Re-hashed at
-	// this last moment, so a write that reached the displaced file through a
-	// descriptor opened before the swap is kept, not deleted.
+	staged, err := tmp.Stat()
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", err
+	}
+	// The staging path is removed only while it still names OUR staged file.
+	// After a swap it names the file that was displaced from abs, and that
+	// inode is never unlinked: an editor holding it open may still write to
+	// it, at any later moment. It moves to .bdrive/displaced (never synced,
+	// pruned after a day) where such a write stays recoverable.
 	defer func() {
 		if mcpBeforeCleanup != nil {
 			mcpBeforeCleanup()
 		}
-		if got, err := fileSHA(tmp.Name()); err == nil && got != base && got != ours {
-			keepDisplaced(abs, tmp.Name())
+		fi, err := os.Lstat(tmp.Name())
+		if err != nil {
+			return // moved aside already
+		}
+		if os.SameFile(fi, staged) {
+			os.Remove(tmp.Name())
 			return
 		}
-		os.Remove(tmp.Name())
+		m.preserveDisplaced(abs, tmp.Name())
 	}()
 	_, werr := tmp.Write(content)
 	if cerr := tmp.Close(); werr == nil {
