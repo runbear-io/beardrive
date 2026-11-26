@@ -138,12 +138,25 @@ func (s *Session) Open(ctx context.Context, ix *Index, rel string) (io.ReadClose
 	// project (its own project's business). A project file not journaled yet
 	// is still readable — it is on its way up.
 	want, indexed := ix.Files[rel]
-	if ix.filter != nil && (ix.filter.Skip(rel) || ix.filter.underMountOnDisk(rel) || (!indexed && ix.filter.SkipUp(rel))) {
+	diskOK := true
+	if ix.filter != nil {
+		if ix.filter.Skip(rel) || ix.filter.underMountOnDisk(rel) {
+			return nil, "", fmt.Errorf("%s: not a file this project syncs", rel)
+		}
+		// The disk copy is served only if this device would upload it. A
+		// path its accepted rules exclude is local-only (a .env a teammate's
+		// widened rules also name): serve the journaled version, never the
+		// local bytes.
+		diskOK = !ix.filter.SkipUp(rel)
+	}
+	if !diskOK && !indexed {
 		return nil, "", fmt.Errorf("%s: not a file this project syncs", rel)
 	}
 	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
-	if f, _, err := store.OpenRegularUnderRoot(s.Folder, abs); err == nil {
-		return f, FromDisk, nil
+	if diskOK {
+		if f, _, err := store.OpenRegularUnderRoot(s.Folder, abs); err == nil {
+			return f, FromDisk, nil
+		}
 	}
 	ok := indexed
 	if !ok {
@@ -186,6 +199,8 @@ func (s *Session) Writable(rel string) error {
 	}
 	filter.AcceptRules(st.IgnoreAccepted)
 	switch {
+	case filter.underMountOnDisk(rel):
+		return fmt.Errorf("%s is inside another project synced here; change it from that project", rel)
 	case filter.SkipUp(rel):
 		return fmt.Errorf("%s is excluded from syncing here (see %s and this project's scope)", rel, IgnoreFile)
 	case underAny(rel, sanePrefixes(st.Denied)):

@@ -322,3 +322,41 @@ func TestLazy_OpenRefusesExcludedAndNestedFiles(t *testing.T) {
 		rc.Close()
 	}
 }
+
+// A local file this device's accepted rules exclude is never served from
+// disk, even when a teammate syncs a file at the same path; and nothing
+// inside a nested project is writable from the parent (bot review P1).
+func TestLazy_LocalOnlyFileAndNestedProjectAreProtected(t *testing.T) {
+	be := sharedRemote(t)
+	b := newDevice(t, "devb", be)
+	write(t, b.Folder, IgnoreFile, ".env\n")
+	write(t, b.Folder, ".env", "MY SECRET")
+	cycle(t, b) // b accepts rules that exclude .env
+	a := newDevice(t, "deva", be)
+	cycle(t, a)
+	write(t, a.Folder, IgnoreFile, "# widened\n")
+	write(t, a.Folder, ".env", "team value")
+	cycle(t, a)
+	cycle(t, b)
+	ix, err := b.LoadIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, src, err := b.Open(context.Background(), ix, ".env")
+	if err == nil {
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if string(got) == "MY SECRET" || src == FromDisk {
+			t.Fatalf("served the local excluded .env from %s", src)
+		}
+	}
+	if _, err := config.SaveProject(filepath.Join(b.Folder, "inner"), config.Project{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Writable("inner/new.md"); err == nil {
+		t.Fatal("a nested project's path must not be writable from the parent")
+	}
+	if err := b.Writable("notes/new.md"); err != nil {
+		t.Fatalf("ordinary path: %v", err)
+	}
+}
