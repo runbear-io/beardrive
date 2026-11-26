@@ -498,3 +498,32 @@ func TestLocalMCPRawReadIsBounded(t *testing.T) {
 		t.Fatalf("small raw read: %q %v", out, err)
 	}
 }
+
+// The swap, the check and any swap back happen under the volume lock, so no
+// sync cycle can scan the moment our bytes sit at the path before a refusal
+// (bot review P1).
+func TestLocalMCPSwapHoldsTheVolumeLock(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	abs := filepath.Join(m.v.root, "notes.md")
+	os.WriteFile(abs, []byte("v1\n"), 0o644)
+	out, _ := m.read(ctx, lRead{Path: "notes.md"})
+	sha := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
+	held := false
+	mcpBeforeRename = func() { os.WriteFile(abs, []byte("second\n"), 0o644) }
+	mcpBeforeSwapBack = func() {
+		unlock, err := m.v.sess.Store.TryLock()
+		if err != nil || unlock == nil {
+			held = true
+			return
+		}
+		unlock()
+	}
+	defer func() { mcpBeforeRename, mcpBeforeSwapBack = nil, nil }()
+	if _, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha}); err == nil {
+		t.Fatal("must be refused")
+	}
+	if !held {
+		t.Fatal("the volume lock was not held between the swap and the swap back")
+	}
+}

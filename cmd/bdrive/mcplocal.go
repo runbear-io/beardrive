@@ -716,7 +716,17 @@ func (m *localMCP) put(rel string, content []byte, base string) (out string, err
 	if mcpBeforeRename != nil {
 		mcpBeforeRename()
 	}
-	if err := m.swapIn(rel, abs, tmp.Name(), base, ours); err != nil {
+	// Under the volume lock, which every sync cycle holds while it scans:
+	// swapIn briefly puts our bytes at abs before it checks what they
+	// displaced, and a scan in that instant would journal — and push — a
+	// write it is about to refuse and swap back.
+	unlock, locked := m.v.sess.Store.LockWithin(30 * time.Second)
+	if !locked {
+		return "", fmt.Errorf("%s: a sync cycle kept this project busy; nothing was written — try again", rel)
+	}
+	err = m.swapIn(rel, abs, tmp.Name(), base, ours)
+	unlock()
+	if err != nil {
 		return "", err
 	}
 	daemon.WakeSupervisor()
