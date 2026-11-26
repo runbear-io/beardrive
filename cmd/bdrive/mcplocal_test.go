@@ -485,3 +485,16 @@ func TestLocalMCPEditRefusesAnOversizeResultBeforeBuildingIt(t *testing.T) {
 		t.Fatal("file changed")
 	}
 }
+
+// A raw read is bounded like a numbered one (bot review P1).
+func TestLocalMCPRawReadIsBounded(t *testing.T) {
+	m := testLocalMCP(t)
+	os.WriteFile(filepath.Join(m.v.root, "big.md"), []byte(strings.Repeat("x", localReadOut+1)), 0o644)
+	if _, err := m.read(context.Background(), lRead{Path: "big.md", Raw: true}); err == nil || !strings.Contains(err.Error(), "bdrive cat") {
+		t.Fatalf("got %v", err)
+	}
+	os.WriteFile(filepath.Join(m.v.root, "ok.md"), []byte("small"), 0o644)
+	if out, err := m.read(context.Background(), lRead{Path: "ok.md", Raw: true}); err != nil || out != "small" {
+		t.Fatalf("small raw read: %q %v", out, err)
+	}
+}

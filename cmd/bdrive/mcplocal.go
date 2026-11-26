@@ -217,6 +217,10 @@ func (m *localMCP) read(ctx context.Context, in lRead) (string, error) {
 		return "", err
 	}
 	if in.Raw {
+		// The same reply bound as a numbered read (and the hub's raw read).
+		if len(b) > localReadOut {
+			return "", fmt.Errorf("%s is %s, more than a raw read returns (%s); copy it with `bdrive cat %s`, or read it by lines", rel, humanBytes(int64(len(b))), humanBytes(localReadOut), rel)
+		}
 		return string(b), nil
 	}
 	// Lines are walked in place, never split into a slice: a file of many
