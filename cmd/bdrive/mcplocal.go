@@ -480,21 +480,27 @@ type displacedMeta struct {
 
 // preserveDisplaced moves the file a swap displaced from rel into
 // .bdrive/displaced (never synced), with a sidecar naming rel and the sha it
-// held. sweepDisplaced decides its fate later. If the move fails the file
-// stays at its staging name (a .bdrive-tmp- name the scanner ignores).
-func (m *localMCP) preserveDisplaced(rel, tmp, base string) {
+// held; sweepDisplaced decides its fate later. If that fails — say rel sits
+// on another filesystem than the project root (EXDEV) — the file is kept
+// next to rel instead, in the same directory and so on the same filesystem,
+// under a visible name, and the returned note tells the caller where.
+func (m *localMCP) preserveDisplaced(rel, abs, tmp, base string) (note string) {
 	dir := m.displacedDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return
-	}
 	id := strconv.FormatInt(time.Now().UnixNano(), 10)
 	meta, _ := json.Marshal(displacedMeta{Path: rel, Base: base})
-	if err := store.WriteFileAtomic(filepath.Join(dir, id+".json"), meta, 0o600); err != nil {
-		return
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, id)); err != nil {
+	if os.MkdirAll(dir, 0o700) == nil &&
+		store.WriteFileAtomic(filepath.Join(dir, id+".json"), meta, 0o600) == nil {
+		if os.Rename(tmp, filepath.Join(dir, id)) == nil {
+			return ""
+		}
 		os.Remove(filepath.Join(dir, id+".json"))
 	}
+	kept := keepDisplaced(abs, tmp)
+	if kept == tmp {
+		return fmt.Sprintf("the version this replaced could not be moved aside and is still at %s", tmp)
+	}
+	r, _ := filepath.Rel(m.v.root, kept)
+	return fmt.Sprintf("the version this replaced is kept as %s (it syncs; delete it when done)", filepath.ToSlash(r))
 }
 
 // sweepDisplaced settles displaced versions. One that still holds exactly
@@ -591,7 +597,7 @@ func fileSHA(p string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func (m *localMCP) put(rel string, content []byte, base string) (string, error) {
+func (m *localMCP) put(rel string, content []byte, base string) (out string, err error) {
 	if err := m.v.sess.Writable(rel); err != nil {
 		return "", err
 	}
@@ -643,7 +649,13 @@ func (m *localMCP) put(rel string, content []byte, base string) (string, error) 
 			os.Remove(tmp.Name())
 			return
 		}
-		m.preserveDisplaced(rel, tmp.Name(), base)
+		if note := m.preserveDisplaced(rel, abs, tmp.Name(), base); note != "" {
+			if err != nil {
+				err = fmt.Errorf("%w\n[%s]", err, note)
+			} else {
+				out += "\n[" + note + "]"
+			}
+		}
 	}()
 	_, werr := tmp.Write(content)
 	if cerr := tmp.Close(); werr == nil {
@@ -826,10 +838,22 @@ func (m *localMCP) restore(ctx context.Context, in lRestore) (string, error) {
 	}
 	for _, op := range ops {
 		if op.Path == rel && op.Kind == journal.KindPut && strings.HasPrefix(op.Blob, strings.ToLower(in.SHA)) {
-			if err := m.v.sess.Restore(ctx, rel, op.Blob); err != nil {
+			// Through put, like write: the same conditional swap and the same
+			// keeping of whatever it displaces.
+			if err := m.v.sess.EnsureContent(ctx, rel, journal.FileState{Blob: op.Blob, Size: op.Size}); err != nil {
 				return "", err
 			}
-			daemon.WakeSupervisor()
+			content, err := os.ReadFile(m.v.sess.Store.BlobPath(op.Blob))
+			if err != nil {
+				return "", err
+			}
+			base, err := m.nowSHA(rel)
+			if err != nil {
+				return "", err
+			}
+			if _, err := m.put(rel, content, base); err != nil {
+				return "", err
+			}
 			return fmt.Sprintf("restored %s to sha:%s; it syncs within seconds", rel, op.Blob), nil
 		}
 	}

@@ -248,3 +248,59 @@ func TestLocalMCPKeepsDisplacedFileWithALongName(t *testing.T) {
 		t.Fatal("the third save was lost")
 	}
 }
+
+// When .bdrive/displaced cannot take the displaced version, it is kept next to
+// the file (same directory, same filesystem) and the reply says where (bot
+// review P1).
+func TestLocalMCPDisplacedFallbackIsVisibleAndReported(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	os.MkdirAll(filepath.Join(m.v.root, ".bdrive"), 0o755)
+	os.WriteFile(m.displacedDir(), []byte("not a folder"), 0o644) // MkdirAll fails
+	abs := filepath.Join(m.v.root, "notes.md")
+	os.WriteFile(abs, []byte("v1\n"), 0o644)
+	out, _ := m.read(ctx, lRead{Path: "notes.md"})
+	sha := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
+	res, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, _ := filepath.Glob(abs + ".bdrive-mcp-displaced-*")
+	if len(matches) != 1 || !strings.Contains(res, filepath.Base(matches[0])) {
+		t.Fatalf("fallback not kept/reported: %v\n%s", matches, res)
+	}
+}
+
+// restore goes through the same conditional swap as write (bot review P1).
+func TestLocalMCPRestoreRefusesARacingWrite(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	abs := filepath.Join(m.v.root, "notes.md")
+	os.WriteFile(abs, []byte("v1\n"), 0o644)
+	if _, err := m.v.sess.Cycle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(abs, []byte("v2\n"), 0o644)
+	if _, err := m.v.sess.Cycle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.v.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	v1, _ := fileSHAOf("v1\n")
+	mcpBeforeRename = func() { os.WriteFile(abs, []byte("editor save\n"), 0o644) }
+	defer func() { mcpBeforeRename = nil }()
+	if _, err := m.restore(ctx, lRestore{Path: "notes.md", SHA: v1}); err == nil {
+		t.Fatal("restore over a racing save must be refused")
+	}
+	if b, _ := os.ReadFile(abs); string(b) != "editor save\n" {
+		t.Fatalf("racing save lost: %q", b)
+	}
+	mcpBeforeRename = nil
+	if _, err := m.restore(ctx, lRestore{Path: "notes.md", SHA: v1}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(abs); string(b) != "v1\n" {
+		t.Fatalf("restore = %q", b)
+	}
+}
