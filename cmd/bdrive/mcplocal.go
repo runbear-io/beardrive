@@ -504,8 +504,22 @@ func (m *localMCP) swapIn(rel, abs, tmp, base, ours string) error {
 	if err := swapFn(tmp, abs); err != nil {
 		// Put their version back by plain rename instead: atomic, and it
 		// removes our refused bytes from abs, so no scan can journal them.
+		// Whatever abs holds right now is hard-linked aside first: if it is
+		// not our bytes, a third writer saved after the swap, and that save
+		// is kept rather than replaced.
+		aside := filepath.Join(filepath.Dir(abs), fmt.Sprintf(".bdrive-tmp-mcp-aside-%d", time.Now().UnixNano()))
+		linked := os.Link(abs, aside) == nil
 		if rerr := os.Rename(tmp, abs); rerr != nil {
+			if linked {
+				os.Remove(aside)
+			}
 			return fmt.Errorf("%s changed while you were changing it, and putting the other version back failed (%v / %v); it is at %s, and %s still holds your refused change — fix it by hand before the next sync", rel, err, rerr, keepDisplaced(abs, tmp), rel)
+		}
+		if linked {
+			if got, _ := fileSHA(aside); got != ours {
+				return fmt.Errorf("%s is being changed by something else right now; nothing was written, and a version saved during the check is at %s", rel, keepDisplaced(abs, aside))
+			}
+			os.Remove(aside)
 		}
 		return changedErr(rel, prev)
 	}

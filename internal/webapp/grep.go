@@ -106,6 +106,12 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 		bytesRead += charged
 		rc, verify, spent, err := openForGrep(r.Context(), v, p, fi, budget)
 		if err != nil {
+			// A failed open still spent what it read (a manifest).
+			if spent != nil {
+				if actual := spent(); actual > charged {
+					bytesRead += actual - charged
+				}
+			}
 			out.Unreadable = append(out.Unreadable, p)
 			continue
 		}
@@ -265,14 +271,15 @@ func openForGrep(ctx context.Context, v *volume, p string, fi FileInfo, budget i
 		return rc, func() bool { return true }, func() int64 { return fi.Size }, err
 	}
 	var src io.ReadCloser
-	var requests int64
+	var requests, manBytes int64
 	if whole, err := rs.Backend.Get(ctx, "blobs/"+fi.Blob); err == nil {
 		src = whole
 	} else {
-		cr, err := rs.openChunks(ctx, fi.Blob, budget)
+		cr, mb, err := rs.openChunks(ctx, fi.Blob, budget)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, func() int64 { return mb }, err
 		}
+		manBytes = mb
 		src, requests = cr, int64(len(cr.(*chunkStream).keys))
 	}
 	h := sha256.New()
@@ -284,7 +291,7 @@ func openForGrep(ctx context.Context, v *volume, p string, fi FileInfo, budget i
 		}
 		return hex.EncodeToString(h.Sum(nil)) == fi.Blob
 	}
-	spent := func() int64 { return (budget + 1 - lr.N) + requests*grepChunkFloor }
+	spent := func() int64 { return (budget + 1 - lr.N) + requests*grepChunkFloor + manBytes }
 	return struct {
 		io.Reader
 		io.Closer
@@ -296,11 +303,12 @@ func openForGrep(ctx context.Context, v *volume, p string, fi FileInfo, budget i
 // only when the scan reaches it, read up to its declared length plus one,
 // and must hash to its key — a lying chunk is a read error, never content.
 // The caller's sha check over the whole stream completes the verification.
-func (r *RemoteSource) openChunks(ctx context.Context, sha string, budget int64) (io.ReadCloser, error) {
+func (r *RemoteSource) openChunks(ctx context.Context, sha string, budget int64) (io.ReadCloser, int64, error) {
 	mrc, err := r.Backend.Get(ctx, "manifests/"+sha)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	mc := &manifestCounter{r: io.LimitReader(mrc, 8<<20)}
 	var man struct {
 		Size   int64 `json:"size"`
 		Chunks []struct {
@@ -308,32 +316,32 @@ func (r *RemoteSource) openChunks(ctx context.Context, sha string, budget int64)
 			N int64  `json:"n"`
 		} `json:"chunks"`
 	}
-	derr := json.NewDecoder(io.LimitReader(mrc, 8<<20)).Decode(&man)
+	derr := json.NewDecoder(mc).Decode(&man)
 	mrc.Close()
 	if derr != nil || man.Size < 0 || man.Size > budget || len(man.Chunks) > maxManifestChunks {
-		return nil, fmt.Errorf("manifest for %s unusable within budget", sha)
+		return nil, mc.n, fmt.Errorf("manifest for %s unusable within budget", sha)
 	}
 	var total int64
 	for _, c := range man.Chunks {
 		if c.N < 0 || c.N > maxReassembleChunkBytes || !blobKeyRe.MatchString("blobs/"+c.H) {
-			return nil, fmt.Errorf("manifest for %s names an invalid chunk", sha)
+			return nil, mc.n, fmt.Errorf("manifest for %s names an invalid chunk", sha)
 		}
 		total += c.N
 	}
 	if total != man.Size {
-		return nil, fmt.Errorf("manifest for %s has inconsistent total size", sha)
+		return nil, mc.n, fmt.Errorf("manifest for %s has inconsistent total size", sha)
 	}
 	// The manifest actually opened is costed like the one that was sized:
 	// bytes plus a floor per chunk request, all within the budget.
 	if total+int64(len(man.Chunks))*grepChunkFloor > budget {
-		return nil, fmt.Errorf("manifest for %s costs more than the page allows", sha)
+		return nil, mc.n, fmt.Errorf("manifest for %s costs more than the page allows", sha)
 	}
 	cs := &chunkStream{ctx: ctx, be: r.Backend}
 	for _, c := range man.Chunks {
 		cs.keys = append(cs.keys, c.H)
 		cs.sizes = append(cs.sizes, c.N)
 	}
-	return cs, nil
+	return cs, mc.n, nil
 }
 
 type chunkStream struct {

@@ -525,3 +525,41 @@ func TestLocalMCPSwapHoldsTheVolumeLock(t *testing.T) {
 		t.Fatal("the volume lock was not held between the swap and the swap back")
 	}
 }
+
+// The rename fallback for a failed swap back keeps a third save that landed
+// after the swap, instead of replacing it (bot review P1).
+func TestLocalMCPRenameFallbackKeepsAThirdSave(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	abs := filepath.Join(m.v.root, "notes.md")
+	os.WriteFile(abs, []byte("v1\n"), 0o644)
+	out, _ := m.read(ctx, lRead{Path: "notes.md"})
+	sha := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
+	calls := 0
+	swapFn = func(a, b string) error {
+		calls++
+		if calls == 2 {
+			return os.ErrPermission
+		}
+		return swapFiles(a, b)
+	}
+	mcpBeforeRename = func() { os.WriteFile(abs, []byte("second\n"), 0o644) }
+	mcpBeforeSwapBack = func() { os.WriteFile(abs, []byte("third\n"), 0o644) }
+	defer func() { swapFn, mcpBeforeRename, mcpBeforeSwapBack = swapFiles, nil, nil }()
+	if _, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha}); err == nil {
+		t.Fatal("must be refused")
+	}
+	found := false
+	entries, _ := os.ReadDir(m.v.root)
+	for _, e := range entries {
+		if b, _ := os.ReadFile(filepath.Join(m.v.root, e.Name())); string(b) == "third\n" && strings.Contains(e.Name(), "displaced") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("third save lost: %v", entries)
+	}
+	if b, _ := os.ReadFile(abs); string(b) == "mine\n" {
+		t.Fatal("refused bytes left at the path")
+	}
+}

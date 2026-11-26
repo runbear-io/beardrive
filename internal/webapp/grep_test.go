@@ -240,3 +240,17 @@ func TestOpenForGrepReportsActualCost(t *testing.T) {
 		t.Fatalf("spent = %d, want the 3000 bytes really read (declared 1)", got)
 	}
 }
+
+// A failed chunk open still reports the manifest bytes it read.
+func TestOpenForGrepChargesAFailedManifestRead(t *testing.T) {
+	ctx := context.Background()
+	be, _ := remote.Open(ctx, "file://"+t.TempDir())
+	v := &volume{source: &RemoteSource{Backend: be}}
+	sha := strings.Repeat("e", 64)
+	man := `{"size":999999,"chunks":[]}`
+	be.Put(ctx, "manifests/"+sha, strings.NewReader(man), int64(len(man)))
+	_, _, spent, err := openForGrep(ctx, v, "f", FileInfo{Blob: sha}, 100)
+	if err == nil || spent == nil || spent() != int64(len(man)) {
+		t.Fatalf("err=%v spent=%v", err, spent != nil)
+	}
+}
