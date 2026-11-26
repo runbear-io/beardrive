@@ -326,7 +326,7 @@ func (m *localMCP) grep(ctx context.Context, in lGrep) (string, error) {
 		}
 	}
 	sort.Strings(local)
-	grepLocal(m.v.root, local, re, in.FilesOnly, func(rel string, hits []hit) bool {
+	grepLocal(m.v.root, local, re, in.FilesOnly, limit+1, func(rel string, hits []hit) bool {
 		for _, h := range hits {
 			if !emit(rel, h) {
 				return false

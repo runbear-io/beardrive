@@ -416,10 +416,22 @@ func TestGrepFileSkipsFIFOReplacingCandidate(t *testing.T) {
 	}
 	var hits []hit
 	queryReadBounded(t, abs, func() (string, error) {
-		hits = grepFile(folder, abs, regexp.MustCompile("needle"), false)
+		hits = grepFile(folder, abs, regexp.MustCompile("needle"), false, 0)
 		return "", nil
 	})
 	if len(hits) != 0 {
 		t.Errorf("FIFO produced matches: %v", hits)
+	}
+}
+
+// One file's search keeps at most maxHits lines, so a parallel batch cannot
+// hold every match of many large files at once (bot review P1).
+func TestGrepReaderCapsHitsPerFile(t *testing.T) {
+	text := strings.Repeat("needle\n", 50000)
+	if got := len(grepReader(strings.NewReader(text), regexp.MustCompile("needle"), false, 7)); got != 7 {
+		t.Fatalf("hits = %d, want 7", got)
+	}
+	if got := len(grepReader(strings.NewReader(text), regexp.MustCompile("needle"), false, 0)); got != maxHitsPerFile {
+		t.Fatalf("default cap: hits = %d, want %d", got, maxHitsPerFile)
 	}
 }
