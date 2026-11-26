@@ -1,0 +1,238 @@
+package syncer
+
+import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
+)
+
+const lazyTestThreshold = 1024
+
+// setLazy writes the device's .bdrive/config.json with a lazy policy.
+func setLazy(t *testing.T, s *Session, on bool, pinned ...string) {
+	t.Helper()
+	p, _, err := config.LoadProject(s.Folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Lazy = config.Lazy{Enabled: on, Threshold: lazyTestThreshold, Pinned: pinned}
+	if _, err := config.SaveProject(s.Folder, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func big(tag string) string { return tag + strings.Repeat("x", 4*lazyTestThreshold) + "\n" }
+
+func ownDeletes(t *testing.T, s *Session) []string {
+	t.Helper()
+	ops, err := s.Store.DeviceOps(s.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, op := range ops {
+		if op.Kind == journal.KindDelete {
+			out = append(out, op.Path)
+		}
+	}
+	return out
+}
+
+func onDisk(s *Session, rel string) bool {
+	_, err := os.Lstat(filepath.Join(s.Folder, filepath.FromSlash(rel)))
+	return err == nil
+}
+
+// lazyPair is A (syncs everything) and B (lazy, "pinned" pinned) after B's
+// first cycle on a project holding one small, one big and one pinned big file.
+func lazyPair(t *testing.T) (a, b *Session) {
+	t.Helper()
+	be := sharedRemote(t)
+	a = newDevice(t, "deva", be)
+	write(t, a.Folder, "small.md", "small")
+	write(t, a.Folder, "docs/big.html", big("v1"))
+	write(t, a.Folder, "pinned/big.json", big("pin"))
+	cycle(t, a)
+	b = newDevice(t, "devb", be)
+	setLazy(t, b, true, "pinned")
+	cycle(t, b)
+	return a, b
+}
+
+func TestLazy_BigFileStaysOnHub(t *testing.T) {
+	_, b := lazyPair(t)
+	if read(t, b.Folder, "small.md") != "small" {
+		t.Fatal("small file not materialized")
+	}
+	if read(t, b.Folder, "pinned/big.json") != big("pin") {
+		t.Fatal("pinned big file not materialized")
+	}
+	if onDisk(b, "docs/big.html") {
+		t.Fatal("lazy file was written to disk")
+	}
+	if b.Store.HasBlob(sha(big("v1"))) {
+		t.Fatal("lazy file's content was downloaded on sync")
+	}
+	ix, err := b.LoadIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ix.Files["docs/big.html"]; !ok || ix.Materialized("docs/big.html") {
+		t.Fatal("index must know the lazy file and report it not materialized")
+	}
+	if n, _ := ix.LazyCount(); n != 1 {
+		t.Fatalf("LazyCount = %d, want 1", n)
+	}
+}
+
+// The core safety rule: a lazy file absent from disk is never a local delete,
+// through a full scan, a watcher hint naming it (remove and rename), the
+// parent folder removed, and a fresh Session on the same store (restart).
+func TestLazy_AbsentIsNeverADelete(t *testing.T) {
+	a, b := lazyPair(t)
+	ctx := context.Background()
+	cycle(t, b) // full scan
+	for _, hint := range []*ScanHint{
+		{Events: []ScanEvent{{Path: "docs/big.html", Kind: ScanRemove}}},
+		{Events: []ScanEvent{{Path: "docs/big.html", Kind: ScanRename}}},
+		{Events: []ScanEvent{{Path: "docs", Kind: ScanRemove, Directory: true}}},
+		{Full: true},
+	} {
+		if _, err := b.CycleWithScanHint(ctx, hint); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Restart: a new process, same folder and store.
+	b2 := &Session{Folder: b.Folder, Store: b.Store, Device: b.Device, Backend: b.Backend}
+	cycle(t, b2)
+	if d := ownDeletes(t, b2); len(d) != 0 {
+		t.Fatalf("lazy device journaled deletes: %v", d)
+	}
+	cycle(t, a)
+	if read(t, a.Folder, "docs/big.html") != big("v1") {
+		t.Fatal("peer lost the lazy file")
+	}
+}
+
+func TestLazy_ReadThroughCacheAndPeerUpdate(t *testing.T) {
+	a, b := lazyPair(t)
+	ctx := context.Background()
+	ix, _ := b.LoadIndex()
+	rc, src, err := b.Open(ctx, ix, "docs/big.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if string(got) != big("v1") || src != FromHub {
+		t.Fatalf("first read: src=%s ok=%v", src, string(got) == big("v1"))
+	}
+	// Cache hit: no backend needed at all.
+	be := b.Backend
+	b.Backend = nil
+	rc, src, err = b.Open(ctx, ix, "docs/big.html")
+	if err != nil || src != FromCache {
+		t.Fatalf("second read: src=%s err=%v", src, err)
+	}
+	rc.Close()
+	b.Backend = be
+	// Reading never puts the file on disk, even with its blob cached.
+	cycle(t, b)
+	if onDisk(b, "docs/big.html") {
+		t.Fatal("a read materialized the lazy file")
+	}
+	// A peer update moves the fold; the old cached copy is not served.
+	write(t, a.Folder, "docs/big.html", big("v2"))
+	cycle(t, a)
+	cycle(t, b)
+	if onDisk(b, "docs/big.html") || b.Store.HasBlob(sha(big("v2"))) {
+		t.Fatal("peer update of a lazy file was downloaded")
+	}
+	ix, _ = b.LoadIndex()
+	rc, src, err = b.Open(ctx, ix, "docs/big.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ = io.ReadAll(rc)
+	rc.Close()
+	if string(got) != big("v2") || src != FromHub {
+		t.Fatalf("after update: src=%s, v2=%v", src, string(got) == big("v2"))
+	}
+	// A peer delete of a lazy file touches nothing on this disk.
+	if err := os.Remove(filepath.Join(a.Folder, "docs/big.html")); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	cycle(t, b)
+	ix, _ = b.LoadIndex()
+	if _, ok := ix.Files["docs/big.html"]; ok {
+		t.Fatal("deleted lazy file still in index")
+	}
+	if d := ownDeletes(t, b); len(d) != 0 {
+		t.Fatalf("lazy device journaled deletes: %v", d)
+	}
+}
+
+// A write to a lazy path fetches the hub version first, so a concurrent edit
+// on another device merges instead of forking into a conflict copy.
+func TestLazy_WriteFetchesBaseAndMerges(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	lines := make([]string, 0, 400)
+	for i := 0; i < 400; i++ {
+		lines = append(lines, "line "+strings.Repeat("y", 10))
+	}
+	base := strings.Join(lines, "\n") + "\n"
+	write(t, a.Folder, "notes.md", base)
+	cycle(t, a)
+	b := newDevice(t, "devb", be)
+	setLazy(t, b, true)
+	cycle(t, b)
+	if onDisk(b, "notes.md") {
+		t.Fatal("precondition: notes.md should be lazy")
+	}
+	ctx := context.Background()
+	ix, _ := b.LoadIndex()
+	rc, _, err := b.Open(ctx, ix, "notes.md") // fetches the base into the store
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := io.ReadAll(rc)
+	rc.Close()
+	write(t, b.Folder, "notes.md", "B top\n"+string(cur))
+	write(t, a.Folder, "notes.md", base+"A bottom\n")
+	cycle(t, a)
+	cycle(t, b)
+	cycle(t, a)
+	want := "B top\n" + base + "A bottom\n"
+	if got := read(t, a.Folder, "notes.md"); got != want {
+		t.Fatalf("A did not get the merge (len %d vs %d)", len(got), len(want))
+	}
+	if got := read(t, b.Folder, "notes.md"); got != want {
+		t.Fatal("B did not get the merge")
+	}
+	// B wrote it, so it is an ordinary local file now.
+	if ix, _ := b.LoadIndex(); !ix.Materialized("notes.md") {
+		t.Fatal("a written lazy path should be tracked")
+	}
+}
+
+func TestLazy_TurnOffAndPinDownload(t *testing.T) {
+	_, b := lazyPair(t)
+	setLazy(t, b, true, "pinned", "docs")
+	cycle(t, b)
+	if read(t, b.Folder, "docs/big.html") != big("v1") {
+		t.Fatal("pinning a folder did not download it")
+	}
+	setLazy(t, b, false)
+	cycle(t, b)
+	if d := ownDeletes(t, b); len(d) != 0 {
+		t.Fatalf("journaled deletes: %v", d)
+	}
+}

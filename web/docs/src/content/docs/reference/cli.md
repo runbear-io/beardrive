@@ -24,6 +24,11 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive share <file>` | Public URL for a synced file — links are per-file, so a folder is refused with a file inside it named instead. `--list`, `--revoke`, `--expires` (the hub's Share dialog can also set an expiry on an existing link). Refuses a file whose first 1 MiB holds credential-shaped strings — `--force` shares it anyway |
 | `bdrive comments [path...]` | Review comments left on files in the hub's viewer — open ones by default (`--all`, `--resolved`, `--json`), with the quoted text and its line in your copy of the file. `reply <id> -m`, `resolve <id> [-m note]`, `reopen <id>` act on a thread; `<id>` may be any unique prefix. See [Review comments](/guides/review-comments/) |
 | `bdrive mcp list` / `bdrive mcp revoke <id>` | Agents connected to your account over MCP. Connections are created in a browser (the hub's consent screen, where you pick which projects to share); revoking takes effect on the agent's next call and kills its refresh token with it. See [Connect an agent over MCP](/guides/mcp/) |
+| `bdrive mcp [--folder dir]` | Local MCP server (stdio) for one synced project, with the hub MCP's tool names — `list`, `read`, `glob`, `grep`, `write`, `edit` (sha compare-and-swap), `delete`, `history`, `restore`. Reads come from disk, else the local cache, else the hub. Writes land in the folder and sync like an editor's. See [on-demand files](#on-demand-files-bdrive-lazy) |
+| `bdrive lazy [on\|off]` | On-demand files on this device: files over `--threshold` (default 64 KiB) outside pinned folders stay on the hub until read; `--cache-max` (default 2 GiB) caps what reads keep. No argument prints the setting. `bdrive init --lazy` turns it on before the first download |
+| `bdrive pin` / `bdrive unpin <folder>...` | In lazy mode, keep a folder fully downloaded (for builds, editors, `git`, offline work) |
+| `bdrive cat <file>...` | Print a synced file — from disk, the local cache, or the hub |
+| `bdrive ls [-R] [folder]` | List a synced folder as the project holds it; files kept on the hub are marked `(on hub)` |
 | `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it, and a plain `bdrive sync` with no `--note` clears it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: it also reports the files teammates changed since the agent's last turn |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each detected agent platform's user config — once per machine, covering every folder. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection. `uninstall` removes only BearDrive's own hook entries |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
@@ -174,10 +179,42 @@ when nothing did — `bdrive grep -q` has no equivalent, use `-l` and check the
 status.
 
 :::note[Local, not hub-wide]
-This searches *this* folder. Searching contents across a whole hub, or from the
+This searches *this* folder. In lazy mode it also searches the files this
+folder keeps on the hub, from the local cache or by the hub. A note on stderr
+says how many were searched there. Searching contents across a whole hub, or from the
 browser, is not built yet — the ⌘K palette covers file names, projects and
 actions.
 :::
+
+### On-demand files (`bdrive lazy`)
+
+With lazy mode on, this device downloads only small files (64 KiB or less by
+default) and pinned folders. The other files stay on the hub until something
+reads them:
+
+```sh
+bdrive init --lazy            # join a project without downloading large files
+bdrive lazy                   # setting, and how many files stay on the hub
+bdrive pin build-inputs       # keep a folder fully downloaded
+bdrive ls exports             # list it, hub-only files marked (on hub)
+bdrive cat exports/deck.html  # read one: disk, then cache, then hub
+bdrive grep 'Q3 revenue'      # local files + cache + a paged search on the hub
+```
+
+- The journals are always local, so names, sizes and history work offline.
+  Content is addressed by sha256: a cached copy is valid exactly when the
+  journals name its sha, so a cache hit makes no request.
+- Content read on demand is kept up to `--cache-max` (2 GiB by default). The
+  least recently read goes first, when the daemon or `bdrive gc --apply`
+  prunes.
+- A file kept on the hub is never treated as deleted because it is missing
+  from disk. Writing to its path makes it an ordinary local file that syncs.
+- Your agent's own Read and Grep tools cannot see a file that is not on disk.
+  The turn hook names the folders that hold such files. Use `bdrive cat`,
+  `bdrive grep`, or register the local MCP server:
+  `claude mcp add beardrive -- bdrive mcp --folder ~/team`.
+- Files already on disk stay on disk. Lazy mode controls downloads; it never
+  removes your files.
 
 ### `bdrive stale` — find the docs your code has outgrown
 

@@ -2570,3 +2570,7 @@ func clipAroundMatch(text string, re *regexp.Regexp, isMatch bool) string {
 	}
 	return out
 }
+
+// MatchGlob is the MCP glob rule (matchGlob), for the local `bdrive mcp`
+// server, so one pattern means the same thing through either door.
+func MatchGlob(pattern, name string) bool { return matchGlob(pattern, name) }

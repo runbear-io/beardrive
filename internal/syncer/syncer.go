@@ -130,6 +130,29 @@ type Session struct {
 	// the backfill never downloads one twice in a cycle. Reset with inbound.
 	fetched    map[string]bool
 	cacheDirty bool
+
+	// lazy is the mount's on-demand policy, re-read from .bdrive/config.json
+	// at the top of every cycle. See lazyUnmaterialized.
+	lazy config.Lazy
+}
+
+// lazyUnmaterialized reports whether rel is a lazy file this mount does not
+// hold: lazy mode is on, the file is over the size limit and outside every
+// pinned folder, and the mount's state cache has no entry for it. Such a path
+// is neither downloaded nor written.
+//
+// This is the whole safety argument for lazy mode. The scan mints a delete
+// ONLY for a path that is in the state cache and missing from disk, and a
+// lazy path is never put in the cache — so a lazy file that is not on disk
+// can never become a delete, on any scan path (full, watcher hint, restart).
+// A path that IS in the cache is an ordinary file on this disk and keeps
+// syncing like one, including updates; lazy mode never takes a file off disk.
+func (s *Session) lazyUnmaterialized(rel string, want journal.FileState, cache map[string]store.CachedFile) bool {
+	if want.Link != "" || want.Blob == "" || rel == IgnoreFile || !s.lazy.Applies(rel, want.Size) {
+		return false
+	}
+	_, tracked := cache[rel]
+	return !tracked
 }
 
 // ScanEventKind describes one local filesystem observation. These types are
@@ -530,6 +553,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			return nil, fmt.Errorf("project config gone at %s", s.Folder)
 		}
 	}
+	s.lazy = proj.Lazy
 	if s.ExpectedRemote != "" && !config.SameRemote(proj.Remote, s.ExpectedRemote) {
 		return nil, fmt.Errorf("project remote changed (%q -> %q)", s.ExpectedRemote, proj.Remote)
 	}
@@ -1814,7 +1838,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		}
 	}
 	for p := range touched {
-		if win, ok := fold.Target[p]; ok && win.Blob != "" && !s.Store.HasBlob(win.Blob) {
+		if win, ok := fold.Target[p]; ok && win.Blob != "" && !s.Store.HasBlob(win.Blob) && !s.lazyUnmaterialized(p, win, cache) {
 			fetchList = append(fetchList, journal.Op{Kind: journal.KindPut, Path: p, Blob: win.Blob, Size: win.Size, Mode: win.Mode})
 		}
 	}
@@ -2006,7 +2030,7 @@ func (s *Session) backfillOps(target map[string]journal.FileState, cache map[str
 		if c, ok := cache[rel]; ok && sameValue(c.Blob, c.Link, want.Blob, want.Link) {
 			continue
 		}
-		if filter.Skip(rel) {
+		if filter.Skip(rel) || s.lazyUnmaterialized(rel, want, cache) {
 			continue
 		}
 		if s.fetched[want.Blob] || s.Store.HasBlob(want.Blob) {
@@ -2448,6 +2472,11 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 			}
 		}
 		if filter.Skip(rel) {
+			continue
+		}
+		// Not written even when a read already cached its content: a lazy
+		// file is read through bdrive cat / bdrive mcp, never put on disk.
+		if s.lazyUnmaterialized(rel, want, cache) {
 			continue
 		}
 		wrote, err := s.materializeFile(rel, want, cache)

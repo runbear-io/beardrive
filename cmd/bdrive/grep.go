@@ -3,16 +3,21 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"sort"
+	"sync"
 
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
@@ -129,30 +134,48 @@ func runGrep(cmd *cobra.Command, pattern string, folderArg []string, ignoreCase,
 	out := cmd.OutOrStdout()
 	var lines, files int
 	truncated := false
-	for _, rel := range paths {
-		hits := grepFile(folder, filepath.Join(folder, rel), re, filesOnly)
-		if len(hits) == 0 {
-			continue
+	lastFile := ""
+	// emit prints one hit and reports whether there is room for another.
+	emit := func(rel string, h hit) bool {
+		if limit > 0 && lines >= limit {
+			truncated = true
+			return false
 		}
-		files++
+		if rel != lastFile {
+			files++
+			lastFile = rel
+		}
+		if filesOnly {
+			fmt.Fprintln(out, safeField(rel, 160))
+		} else {
+			// Both the path and the matched text are content a teammate
+			// wrote and synced — the same trust level `bdrive log` treats
+			// journal strings with, over a wider surface. safeField, or a
+			// lone CR repaints the row and U+202E reverses it.
+			fmt.Fprintf(out, "%s:%d: %s\n", safeField(rel, 160), h.line, safeField(h.text, 400))
+		}
+		lines++
+		return true
+	}
+	grepLocal(folder, paths, re, filesOnly, func(rel string, hits []hit) bool {
 		for _, h := range hits {
-			if limit > 0 && lines >= limit {
-				truncated = true
-				break
+			if !emit(rel, h) {
+				return false
 			}
-			if filesOnly {
-				fmt.Fprintln(out, safeField(rel, 160))
-			} else {
-				// Both the path and the matched text are content a teammate
-				// wrote and synced — the same trust level `bdrive log` treats
-				// journal strings with, over a wider surface. safeField, or a
-				// lone CR repaints the row and U+202E reverses it.
-				fmt.Fprintf(out, "%s:%d: %s\n", safeField(rel, 160), h.line, safeField(h.text, 400))
-			}
-			lines++
 		}
-		if truncated {
-			break
+		return true
+	})
+	// Lazy mode: the files this device keeps on the hub are part of the
+	// project too. Searched from the local cache when held, and by the hub
+	// otherwise — never downloaded just to be searched.
+	if !truncated && proj.Lazy.Enabled {
+		if v, err := openView(cmd.Context(), folder, true); err == nil {
+			defer v.close()
+			notes, cut := lazyGrep(cmd.Context(), v, re, pattern, filesOnly, func(string) bool { return true }, emit)
+			truncated = truncated || cut
+			for _, n := range notes {
+				fmt.Fprintln(cmd.ErrOrStderr(), "note:", n)
+			}
 		}
 	}
 	if lines == 0 {
@@ -187,7 +210,11 @@ func grepFile(folder, abs string, re *regexp.Regexp, filesOnly bool) []hit {
 		return nil
 	}
 	defer f.Close()
+	return grepReader(f, re, filesOnly)
+}
 
+// grepReader is grepFile over any reader: a working file or a cached blob.
+func grepReader(f io.Reader, re *regexp.Regexp, filesOnly bool) []hit {
 	head := make([]byte, binarySniff)
 	n, err := f.Read(head)
 	if err != nil && err != io.EOF {
@@ -211,4 +238,130 @@ func grepFile(folder, abs string, re *regexp.Regexp, filesOnly bool) []hit {
 		}
 	}
 	return hits // sc.Err() ignored: an over-long line ends this file, not the run
+}
+
+// hubGrepPage bounds one hub grep request's path list (the hub's own cap).
+const hubGrepPage = 5000
+
+// lazyGrep searches the project files that are not on disk: from the blob
+// cache when this device holds the version, and through the hub's paged grep
+// otherwise. keep filters candidate paths (scope, glob). emit returns false
+// once the caller's limit is reached, which ends the search (cut reports it).
+// notes are sentences about what could not be searched — a search is never
+// narrowed silently.
+func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr string, filesOnly bool,
+	keep func(rel string) bool, emit func(rel string, h hit) bool) (notes []string, cut bool) {
+	var remoteOnly []string
+	rels := make([]string, 0, len(v.ix.Files))
+	for rel := range v.ix.Files {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		if !keep(rel) {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(v.root, filepath.FromSlash(rel))); err == nil {
+			continue // on disk: the local pass searched it
+		}
+		fs := v.ix.Files[rel]
+		if !v.sess.Store.HasBlob(fs.Blob) {
+			remoteOnly = append(remoteOnly, rel)
+			continue
+		}
+		f, err := v.sess.Store.OpenBlob(fs.Blob)
+		if err != nil {
+			remoteOnly = append(remoteOnly, rel)
+			continue
+		}
+		hits := grepReader(f, re, filesOnly)
+		f.Close()
+		for _, h := range hits {
+			if !emit(rel, h) {
+				return notes, true
+			}
+		}
+	}
+	if len(remoteOnly) == 0 {
+		return notes, false
+	}
+	g, ok := v.sess.Backend.(remote.Grepper)
+	if !ok || v.sess.Backend == nil {
+		return append(notes, fmt.Sprintf("%s kept on the hub were not searched (hub unreachable)", plural(len(remoteOnly), "file"))), false
+	}
+	var binary, unreadable int
+	searched := 0
+	for len(remoteOnly) > 0 {
+		page := remoteOnly[:min(len(remoteOnly), hubGrepPage)]
+		resp, err := g.Grep(ctx, remote.GrepRequest{Pattern: expr, FilesOnly: filesOnly, Paths: page, MaxMatches: 1000})
+		if err != nil || resp.Scanned == 0 {
+			if err == nil {
+				err = fmt.Errorf("no progress")
+			}
+			notes = append(notes, fmt.Sprintf("%s kept on the hub were not searched: %v", plural(len(remoteOnly), "file"), err))
+			break
+		}
+		searched += resp.Scanned
+		binary += len(resp.Binary)
+		unreadable += len(resp.Unreadable)
+		if filesOnly {
+			for _, f := range resp.Files {
+				if !emit(f, hit{}) {
+					return notes, true
+				}
+			}
+		} else {
+			for _, m := range resp.Matches {
+				if !emit(m.Path, hit{line: m.Line, text: m.Text}) {
+					return notes, true
+				}
+			}
+			if resp.Total > len(resp.Matches) {
+				// The page stopped at its match cap inside its last file:
+				// resume there would repeat matches, so say so instead.
+				notes = append(notes, fmt.Sprintf("the hub found %d more match(es) than it returned; narrow the pattern", resp.Total-len(resp.Matches)))
+				cut = true
+			}
+		}
+		remoteOnly = remoteOnly[resp.Scanned:]
+	}
+	notes = append(notes, fmt.Sprintf("searched %s on the hub (kept there by lazy mode)", plural(searched, "file")))
+	if binary > 0 || unreadable > 0 {
+		notes = append(notes, fmt.Sprintf("skipped on the hub: %d binary, %d unreadable", binary, unreadable))
+	}
+	return notes, cut
+}
+
+// grepLocal searches working files in parallel and hands each file's hits to
+// fn in path order, stopping when fn returns false. Files are processed in
+// bounded batches, so memory is one batch of hits and an early stop does not
+// read the rest of the tree.
+func grepLocal(folder string, paths []string, re *regexp.Regexp, filesOnly bool, fn func(rel string, hits []hit) bool) {
+	workers := runtime.NumCPU()
+	batch := 64 * workers
+	for start := 0; start < len(paths); start += batch {
+		chunk := paths[start:min(len(paths), start+batch)]
+		out := make([][]hit, len(chunk))
+		var wg sync.WaitGroup
+		next := make(chan int)
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range next {
+					out[i] = grepFile(folder, filepath.Join(folder, filepath.FromSlash(chunk[i])), re, filesOnly)
+				}
+			}()
+		}
+		for i := range chunk {
+			next <- i
+		}
+		close(next)
+		wg.Wait()
+		for i, hits := range out {
+			if len(hits) > 0 && !fn(chunk[i], hits) {
+				return
+			}
+		}
+	}
 }

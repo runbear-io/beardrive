@@ -32,6 +32,11 @@ classDiagram
         -firePostSync(res)
         -logInbound(rel, deleted)
         +Restore(ctx, path, sha) error
+        +LoadIndex() Index
+        +EnsureContent(ctx, rel, want) error
+        +Open(ctx, ix, rel) reader, Source
+        -lazy config.Lazy
+        -lazyUnmaterialized(rel, want, cache) bool
         -pushChunked(ctx, blob) bytes
         -fetchChunked(ctx, op, basis) error
         -chunkSpans(blob) []span
@@ -48,6 +53,15 @@ classDiagram
     note for ScanHint "Daemon-only local discovery hint. Nil keeps the full-scan compatibility path; empty skips local discovery while pull/materialize still run. Uncertain or overflowed batches force Full."
     ScanHint o-- ScanEvent
     Session ..> ScanHint : targeted local discovery
+    class Index {
+        <<syncer/lazy.go>>
+        +Files map path to FileState
+        +Lazy config.Lazy
+        +Materialized(rel) bool
+        +LazyCount() n, bytes
+    }
+    Session ..> Index : read side of lazy mode
+    note for Index "Lazy mode (on-demand files). lazyUnmaterialized is the one rule: lazy on, size over Lazy.Threshold, outside every Pinned folder, and NOT in the mount's state cache. pull's fetch list, backfillOps and materialize all skip such a path, so it is neither downloaded nor written. That is also the whole delete-safety argument: the scan mints a delete only for a path in the state cache that is missing from disk, and a lazy path never enters the cache, so a missing lazy file is never a delete on any scan path (full, watcher hint, restart). A cached (on-disk) path keeps syncing as before, updates included: lazy mode never removes a file from disk. Index/Open/EnsureContent are the read side used by bdrive cat/ls/grep and the local bdrive mcp: disk, then the blob store (sha-addressed, so a hit needs no request), then fetchOneBlob from the hub. They take no lock and write no journal or cache; EnsureContent touches the blob mtime as the LRU clock"
     note for Session "syncer also exposes LogEntries (causal order, what bdrive restore walks) plus CommitTime / DisplayTime / SortForDisplay — the order bdrive log prints: newest-first by when a change was journaled (CommitTime), tie-broken by the file's own write time (DisplayTime) so one scan reads by edit time"
     note for Session "Restore writes a historical blob back into the working folder as an ordinary edit (fetching it from the hub when this device never held it) — the next Cycle journals it like any other change; it takes no lock and appends to no journal itself"
     note for Session "internal/syncer — re-derive the clock → scan → commit local ops → pull peer journals → adopt on join → re-assert withdrawn ops → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
@@ -174,6 +188,7 @@ classDiagram
         -dir volume dir
         +PutBlob / PutBlobFileVerified / MaterializeBlobToTemp / OpenBlob / HasBlob
         +PruneLocalBlobs / PruneLocalBlobsForDevice / PlanPruneLocalBlobsForDevice
+        +EvictLazyBlobs(candidates, cap, minAge, dryRun)
         +AppendOps / DeviceOps / AllOps / JournalPrefixAt
         +ReplayFold() FoldResult
         +OwnOpCount / OwnOpsFrom
@@ -259,6 +274,7 @@ classDiagram
         +PruneVolumeBlobs(st, minAge, dryRun)
         -map~string, volumeWorker~ workers
     }
+    note for daemon "Lazy cache cap: after the ordinary prune, evictLazyCache (only when EVERY mount of the volume has lazy mode on) takes the current blobs of lazy paths that no mount cache holds, no unpushed op touches and no non-lazy path shares, and keeps the most recently read up to the smallest Lazy.CacheMax (Store.EvictLazyBlobs; blob mtime is last-read time, minAge still protects young blobs). An evicted blob is just re-fetched on the next read"
     note for daemon "PruneVolumeBlobs is the one local-blob GC: the worker runs it every 10 min under TryLock, bdrive gc runs it (dry run by default) under LockWithin. It keeps mount caches, the current fold, and everything past the push cursor, so it only ever drops a local copy of a version the hub holds; restore re-fetches it"
     note for daemon "One detached bdrive daemon run supervisor per machine/user session. Holds BDRIVE_HOME/daemon.lock, with daemon.pid and daemon.log beside it. Reconciles valid, unpaused mounts into one worker per volume; exits cleanly when no active volumes remain"
     note for daemon "init, resume, sync, status &lt;folder&gt; and agent sync hooks start or wake the supervisor for unpaused projects. A binary fingerprint change replaces the old supervisor. Hook self-heal is asynchronous"
@@ -362,7 +378,9 @@ classDiagram
         restore url share comments export import
         web desktop daemon hooks read-log
         resume autostart mcp
+        lazy pin unpin cat ls gc
     }
+    note for Commands "On-demand files: lazy / pin / unpin edit the per-device Lazy block of .bdrive/config.json (init --lazy sets it before the first download). cat / ls and the local stdio `bdrive mcp` (no subcommand; mcplocal.go) share projectView: findProject, the volume store, syncer.Index, and Session.Open — never ResolveMount, never a lock. mcp tools mirror the hub MCP's names; write/edit go to the working folder through store.WriteFileAtomic after a sha compare-and-swap whose 'current' read fetches a lazy file's hub version first, so a concurrent edit merges. grep and the mcp grep add lazyGrep after the local pass: the blob cache for held versions, then remote.Grepper pages for the rest, with stderr/bracket notes for what was not searched. grepLocal scans working files in parallel batches, emitting in path order"
     note for Commands "mcp list / mcp revoke &lt;id&gt; is the terminal half of the hub's Connected agents page — the same /api/mcp/grants routes, reached with the saved device token. A revocation is a security control, so it must not depend on a browser being available"
     note for Commands "desktop is hidden and spawned by the BearDrive Desktop app: a loopback-only webapp.Server over this machine's volume stores (Desktop:true ⇒ PermRead for everyone), with sync control, sign-in and onboarding under /api/desktop/*"
     note for Commands "desktopRoutes classifies every per-project hub route as local (with a required reason) or proxied, and desktopHandler REGISTERS FROM IT — so &quot;classified as proxied&quot; and &quot;actually proxied&quot; cannot drift. It exists because the desktop mux falls through to a local server, which makes forgetting a route invisible: the local registry answers plausibly and wrongly. TestDesktopRoutesClassified fails on any hub route not listed, reading the hub's own list from webapp.APIRoutes"
@@ -402,6 +420,7 @@ classDiagram
         +Volume +Remote
         +Include legacy, read-only
         +PostSync local hook command
+        +Lazy enabled, threshold, cache_max, pinned
     }
     note for Project ".bdrive/config.json — travels with the folder (git clone, copy); presence alone is NOT consent to sync"
     note for Project "PostSync is a shell command this device runs after a cycle applies peers' changes. It lives here and ONLY here: .bdrive is in ReservedDirs and never syncs, so no hub and no teammate can put a command on someone else's machine. The daemon re-reads this file every tick, so an edit takes effect without a restart"

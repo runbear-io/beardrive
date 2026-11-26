@@ -1856,6 +1856,11 @@ func pruneVolumeBlobsSafely(volDir string) {
 // The caller must hold the volume flock.
 func PruneVolumeBlobs(st *store.Store, minAge time.Duration, dryRun bool) (removed int, freed int64, err error) {
 	extraKeep := make(map[string]bool)
+	// The lazy policy of every mount of the volume. A blob is evictable from
+	// the on-demand cache only when EVERY mount treats its path as lazy, so a
+	// worktree that syncs everything never has its content evicted.
+	var policies []config.Lazy
+	allLazy := true
 	mounts, err := config.LoadMounts()
 	if err == nil {
 		volID := filepath.Base(st.Dir())
@@ -1863,8 +1868,15 @@ func PruneVolumeBlobs(st *store.Store, minAge time.Duration, dryRun bool) (remov
 			if m.VolumeID != volID && mountID != volID {
 				continue
 			}
+			proj, ok, perr := config.LoadProject(m.Path)
+			if perr != nil || !ok || !proj.Lazy.Enabled {
+				allLazy = false
+			} else {
+				policies = append(policies, proj.Lazy)
+			}
 			cache, err := st.LoadCache(mountID)
 			if err != nil {
+				allLazy = false
 				continue
 			}
 			for _, c := range cache {
@@ -1873,15 +1885,90 @@ func PruneVolumeBlobs(st *store.Store, minAge time.Duration, dryRun bool) (remov
 				}
 			}
 		}
+	} else {
+		allLazy = false
 	}
 	var ownDevice string
 	if dev, err := config.LoadDevice(); err == nil {
 		ownDevice = dev.ID
 	}
 	if dryRun {
-		return st.PlanPruneLocalBlobsForDevice(ownDevice, extraKeep, minAge)
+		removed, freed, err = st.PlanPruneLocalBlobsForDevice(ownDevice, extraKeep, minAge)
+	} else {
+		removed, freed, err = st.PruneLocalBlobsForDevice(ownDevice, extraKeep, minAge)
 	}
-	return st.PruneLocalBlobsForDevice(ownDevice, extraKeep, minAge)
+	if err != nil || !allLazy || len(policies) == 0 {
+		return removed, freed, err
+	}
+	n, f, err := evictLazyCache(st, ownDevice, policies, extraKeep, minAge, dryRun)
+	return removed + n, freed + f, err
+}
+
+// evictLazyCache applies the on-demand cache cap (config.Lazy.CacheMax, the
+// smallest across the volume's mounts). Candidates are the current blobs of
+// lazy paths that no mount has on disk (keep holds every mount cache's blobs)
+// and that no unpushed op of this device touches — content the hub already
+// holds and syncer.EnsureContent fetches back on the next read.
+func evictLazyCache(st *store.Store, ownDevice string, policies []config.Lazy, keep map[string]bool, minAge time.Duration, dryRun bool) (int, int64, error) {
+	capBytes := policies[0].CacheBytes()
+	for _, p := range policies[1:] {
+		capBytes = min(capBytes, p.CacheBytes())
+	}
+	fold, err := st.ReplayFold()
+	if err != nil {
+		return 0, 0, err
+	}
+	sync, err := st.LoadSync()
+	if err != nil {
+		return 0, 0, err
+	}
+	if ownDevice == "" {
+		ownDevice = sync.Device
+	}
+	unpushed := map[string]bool{}
+	if ownDevice != "" {
+		ops, err := st.OwnOpsFrom(ownDevice, sync.PushedOps)
+		if err != nil && !os.IsNotExist(err) {
+			return 0, 0, err
+		}
+		for _, op := range ops {
+			unpushed[op.Path] = true
+		}
+	}
+	candidates := map[string]bool{}
+	for rel, fs := range fold.Target {
+		if fs.Blob == "" || keep[fs.Blob] || unpushed[rel] || rel == ".bdriveignore" {
+			continue
+		}
+		lazyEverywhere := true
+		for _, p := range policies {
+			if !p.Applies(rel, fs.Size) {
+				lazyEverywhere = false
+				break
+			}
+		}
+		if lazyEverywhere {
+			candidates[fs.Blob] = true
+		}
+	}
+	// A blob shared with a path that is NOT lazy (same bytes at a small or
+	// pinned path) or with an unpushed edit must stay.
+	for rel, fs := range fold.Target {
+		if !candidates[fs.Blob] {
+			continue
+		}
+		if unpushed[rel] {
+			delete(candidates, fs.Blob)
+			continue
+		}
+		for _, p := range policies {
+			if !p.Applies(rel, fs.Size) {
+				delete(candidates, fs.Blob)
+				break
+			}
+		}
+	}
+	return st.EvictLazyBlobs(candidates, capBytes, minAge, dryRun)
 }
 
 // passPulled reports whether a tick just pulled every mount of the volume from

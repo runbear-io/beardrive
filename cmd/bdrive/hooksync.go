@@ -7,6 +7,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/daemon"
 	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
+	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
 // `bdrive sync --hook <label>` is the agent-hook flavor of sync, run by the
@@ -51,6 +53,8 @@ type hookLink struct {
 	// is: the daemon usually scanned the agent's write seconds ago, so this
 	// cycle's own scan sees an unchanged file and finds nothing.
 	secrets map[string][]secrets.Finding
+	// lazy names where lazy mode keeps files on the hub (see lazyFolders).
+	lazy lazySummary
 }
 
 // hookChangedMax caps the changed-file list the turn pays for. Past it the
@@ -129,6 +133,66 @@ type hookSync struct {
 	base    string
 	paths   []store.InboundEvent
 	secrets map[string][]secrets.Finding
+	lazy    lazySummary
+}
+
+// lazySummary is what the turn is told about files lazy mode keeps on the
+// hub: how many, and the top-level folders holding the most of them.
+type lazySummary struct {
+	files   int
+	folders []string // mount-relative, "" for the root, most files first
+}
+
+// lazyFoldersShown caps the folders the hint names; it is paid every turn.
+const lazyFoldersShown = 5
+
+func lazyFolders(ix *syncer.Index) lazySummary {
+	var sum lazySummary
+	count := map[string]int{}
+	for rel, fs := range ix.Files {
+		if ix.Materialized(rel) || !ix.Lazy.Applies(rel, fs.Size) {
+			continue
+		}
+		sum.files++
+		top := ""
+		if i := strings.IndexByte(rel, '/'); i >= 0 {
+			top = rel[:i+1]
+		}
+		count[top]++
+	}
+	for f := range count {
+		sum.folders = append(sum.folders, f)
+	}
+	sort.Slice(sum.folders, func(i, j int) bool {
+		a, b := sum.folders[i], sum.folders[j]
+		return count[a] > count[b] || count[a] == count[b] && a < b
+	})
+	return sum
+}
+
+// hookLazy is the one line that tells an agent its own file tools cannot see
+// some of the project, and what to use instead.
+func hookLazy(links []hookLink) string {
+	var n int
+	var where []string
+	for _, l := range links {
+		n += l.lazy.files
+		for _, f := range l.lazy.folders {
+			if len(where) == lazyFoldersShown {
+				break
+			}
+			p := l.prefix + f
+			if p == "" {
+				p = "./"
+			}
+			where = append(where, "`"+p+"`")
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Lazy mode keeps %s on the hub, not on disk (mostly in %s): your own Read/Grep tools cannot see them — read and search them with `bdrive cat <path>`, `bdrive ls <folder>` and `bdrive grep <pattern>`, or the `bdrive mcp` tools.",
+		plural(n, "large file"), strings.Join(where, ", "))
 }
 
 // runHookSync syncs one mount and reports its hub base URL, if it has one,
@@ -212,7 +276,13 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string, cycle bool
 	if err != nil {
 		return hookSync{}, false // non-hub remote: nothing to link to
 	}
-	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found}, true
+	h := hookSync{base: server + "/" + projectID, paths: paths, secrets: found}
+	if proj.Lazy.Enabled {
+		if ix, err := sess.LoadIndex(); err == nil {
+			h.lazy = lazyFolders(ix)
+		}
+	}
+	return h, true
 }
 
 // hookLinkFor places one mount relative to the folder the hook ran in.
@@ -286,6 +356,9 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 
 	if changed := hookChanged(links); changed != "" {
 		context += " " + changed
+	}
+	if lazy := hookLazy(links); lazy != "" {
+		context += " " + lazy
 	}
 	if found := hookSecrets(links); found != "" {
 		context += " " + found

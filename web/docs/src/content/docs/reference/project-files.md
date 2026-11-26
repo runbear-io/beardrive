@@ -30,6 +30,18 @@ It is **never synced** and holds **no credentials**; the session token stays in
 Because everything is keyed by the mount id, the folder can be renamed or moved
 freely. Copy it to another machine and `bdrive init` resumes the same project.
 
+### `lazy`
+
+This device's on-demand setting, written by `bdrive lazy`, `bdrive pin` and
+`bdrive init --lazy`. It is per device: `.bdrive/` never syncs. When `enabled`
+is true, files over `threshold` bytes (default 65536) that are not under a
+`pinned` folder stay on the hub until read. Content read on demand is cached up
+to `cache_max` bytes (default 2 GiB).
+
+```jsonc
+"lazy": { "enabled": true, "threshold": 65536, "cache_max": 2147483648, "pinned": ["docs"] }
+```
+
 ### `post_sync`
 
 An optional shell command run **on this device** after a sync applies changes

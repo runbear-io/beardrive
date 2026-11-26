@@ -22,18 +22,32 @@ import (
 // needs a browser session and a hand-written curl is a security control
 // without a surface.
 func mcpCmd() *cobra.Command {
+	var folder string
 	c := &cobra.Command{
 		Use:   "mcp",
-		Short: "Manage agents connected to your hub over MCP",
-		Long: `List and revoke the MCP connections on your account.
+		Short: "Run a local MCP server for this project, or manage hub MCP connections",
+		Long: `With no subcommand, bdrive mcp is a local MCP server (stdio) for the synced
+project containing the current folder (or --folder). Its tools have the hub
+MCP's names — list, read, glob, grep, write, edit, delete, history, restore —
+and read files from disk, from the local cache, or, for files lazy mode keeps
+on the hub (bdrive lazy), from the hub. Register it with an agent, e.g.:
 
-An MCP connection lets an agent — Claude, ChatGPT, Cursor, anything that
-speaks MCP — read and write the projects you granted it, acting as you.
+  claude mcp add beardrive -- bdrive mcp --folder /path/to/project
+
+The list and revoke subcommands manage the hub-side MCP connections on your
+account. An MCP connection lets an agent — Claude, ChatGPT, Cursor, anything
+that speaks MCP — read and write the projects you granted it, acting as you.
 Connections are created in a browser (the hub's consent screen is where you
-tick which projects to share); this command is how you see and remove them.`,
-		Example: `  bdrive mcp list
+tick which projects to share); these commands are how you see and remove them.`,
+		Example: `  bdrive mcp --folder ~/team      # local stdio server
+  bdrive mcp list
   bdrive mcp revoke mcpg_1a2b3c4d`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return mcpServeRun(cmd, folder)
+		},
 	}
+	c.Flags().StringVar(&folder, "folder", "", "the synced project to serve (default: the current folder)")
 	c.AddCommand(mcpListCmd(), mcpRevokeCmd())
 	return c
 }
