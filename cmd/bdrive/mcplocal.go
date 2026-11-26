@@ -502,7 +502,12 @@ func (m *localMCP) swapIn(rel, abs, tmp, base, ours string) error {
 		mcpBeforeSwapBack()
 	}
 	if err := swapFn(tmp, abs); err != nil {
-		return fmt.Errorf("%s changed while you were changing it, and putting the other version back failed (%v); it is at %s", rel, err, keepDisplaced(abs, tmp))
+		// Put their version back by plain rename instead: atomic, and it
+		// removes our refused bytes from abs, so no scan can journal them.
+		if rerr := os.Rename(tmp, abs); rerr != nil {
+			return fmt.Errorf("%s changed while you were changing it, and putting the other version back failed (%v / %v); it is at %s, and %s still holds your refused change — fix it by hand before the next sync", rel, err, rerr, keepDisplaced(abs, tmp), rel)
+		}
+		return changedErr(rel, prev)
 	}
 	if back, _ := fileSHA(tmp); back != ours {
 		// abs was saved AGAIN between the two swaps: that save is now at tmp.

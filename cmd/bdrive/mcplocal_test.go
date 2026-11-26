@@ -306,9 +306,9 @@ func TestLocalMCPRestoreRefusesARacingWrite(t *testing.T) {
 	}
 }
 
-// When the swap back fails, the refusal names where the other version is
-// kept (bot review P1: the note must reach error replies too).
-func TestLocalMCPSwapBackFailureReportsKeptPath(t *testing.T) {
+// When the swap back fails, the other version is still put back (by rename),
+// so a refused write never stays at the path (bot review P1).
+func TestLocalMCPSwapBackFailureStillRestores(t *testing.T) {
 	m := testLocalMCP(t)
 	ctx := context.Background()
 	abs := filepath.Join(m.v.root, "notes.md")
@@ -329,12 +329,10 @@ func TestLocalMCPSwapBackFailureReportsKeptPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("must be refused")
 	}
-	matches, _ := filepath.Glob(abs + ".bdrive-mcp-displaced-*")
-	if len(matches) != 1 || !strings.Contains(err.Error(), filepath.Base(matches[0])) {
-		t.Fatalf("kept path not reported: %v / %v", matches, err)
-	}
-	if b, _ := os.ReadFile(matches[0]); string(b) != "second\n" {
-		t.Fatalf("kept = %q", b)
+	// The failed swap back falls back to a rename: their version is at the
+	// path again, and our refused bytes are not.
+	if b, _ := os.ReadFile(abs); string(b) != "second\n" {
+		t.Fatalf("file = %q, want the other writer's version back", b)
 	}
 }
 
