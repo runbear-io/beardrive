@@ -1,6 +1,9 @@
 package webapp
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -94,5 +97,36 @@ func TestHubGrepBoundsEachRead(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &out)
 	if len(out.Matches) != 3 || out.Total != 4 {
 		t.Fatalf("must stop reading at the match cap (Total one past): %+v", out.Total)
+	}
+}
+
+// The hub sizes a file from its own storage, never from the journal's
+// declared op.Size, which a writer chooses (bot review P1).
+func TestHubGrepSizesFromStorage(t *testing.T) {
+	ctx := context.Background()
+	be, err := remote.Open(ctx, "file://"+t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("x", 5000)
+	sum := sha256.Sum256([]byte(body))
+	sha := hex.EncodeToString(sum[:])
+	if err := be.Put(ctx, "blobs/"+sha, strings.NewReader(body), int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	rs := &RemoteSource{Backend: be}
+	v := &volume{source: rs}
+	if got := trustedSize(ctx, v, FileInfo{Blob: sha, Size: 1}); got != 5000 {
+		t.Fatalf("trustedSize = %d, want the stored 5000 (declared 1)", got)
+	}
+	// Chunk-only content: the manifest total, which reassembly enforces.
+	sha2 := strings.Repeat("a", 64)
+	man := `{"size":9000,"chunks":[{"h":"` + strings.Repeat("b", 64) + `","n":4000},{"h":"` + strings.Repeat("c", 64) + `","n":5000}]}`
+	be.Put(ctx, "manifests/"+sha2, strings.NewReader(man), int64(len(man)))
+	if got := trustedSize(ctx, v, FileInfo{Blob: sha2, Size: 1}); got != 9000 {
+		t.Fatalf("manifest size = %d, want 9000", got)
+	}
+	if got := trustedSize(ctx, v, FileInfo{Blob: strings.Repeat("d", 64), Size: 1}); got != -1 {
+		t.Fatalf("unknown object = %d, want -1", got)
 	}
 }

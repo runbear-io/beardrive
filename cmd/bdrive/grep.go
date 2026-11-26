@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/spf13/cobra"
@@ -164,7 +165,11 @@ func runGrep(cmd *cobra.Command, pattern string, folderArg []string, ignoreCase,
 	if limit > 0 {
 		perFile = limit + 1
 	}
-	grepLocal(folder, paths, re, filesOnly, perFile, func(rel string, hits []hit) bool {
+	var capped []string
+	grepLocal(folder, paths, re, filesOnly, perFile, func(rel string, hits []hit, more bool) bool {
+		if more {
+			capped = append(capped, rel)
+		}
 		for _, h := range hits {
 			if !emit(rel, h) {
 				return false
@@ -197,6 +202,9 @@ func runGrep(cmd *cobra.Command, pattern string, folderArg []string, ignoreCase,
 	if !filesOnly {
 		fmt.Fprintf(out, "%s, %s\n", plural(files, "file"), plural(lines, "matching line"))
 	}
+	for _, rel := range capped {
+		fmt.Fprintln(cmd.ErrOrStderr(), "note:", capNote(safeField(rel, 160)))
+	}
 	if truncated {
 		fmt.Fprintf(out, "output limited to %d lines — use -n 0 for all\n", limit)
 	}
@@ -217,10 +225,10 @@ type hit struct {
 // grepFile returns the matching lines in one file, or nothing when the file is
 // binary or unreadable — an unreadable file is skipped, never fatal, the same
 // posture the scan takes. With filesOnly it stops at the first match.
-func grepFile(folder, abs string, re *regexp.Regexp, filesOnly bool, maxHits int) []hit {
+func grepFile(folder, abs string, re *regexp.Regexp, filesOnly bool, maxHits int) ([]hit, bool) {
 	f, _, err := store.OpenRegularUnderRoot(folder, abs)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	defer f.Close()
 	return grepReader(f, re, filesOnly, maxHits)
@@ -233,34 +241,49 @@ func grepFile(folder, abs string, re *regexp.Regexp, filesOnly bool, maxHits int
 const maxHitsPerFile = 10000
 
 // grepReader is grepFile over any reader: a working file or a cached blob.
-func grepReader(f io.Reader, re *regexp.Regexp, filesOnly bool, maxHits int) []hit {
-	if maxHits <= 0 || maxHits > maxHitsPerFile {
+//
+// Memory is bounded twice: at most maxHits lines are kept (capped at
+// maxHitsPerFile), and each kept line is clipped to maxHitText bytes — output
+// shows 400 characters of a line anyway. more reports that the per-file cap,
+// not the caller's own limit, stopped the search, so the caller can say so.
+func grepReader(f io.Reader, re *regexp.Regexp, filesOnly bool, maxHits int) (hits []hit, more bool) {
+	clamped := maxHits <= 0 || maxHits > maxHitsPerFile
+	if clamped {
 		maxHits = maxHitsPerFile
 	}
 	head := make([]byte, binarySniff)
 	n, err := f.Read(head)
 	if err != nil && err != io.EOF {
-		return nil
+		return nil, false
 	}
 	head = head[:n]
 	if bytes.IndexByte(head, 0) >= 0 {
-		return nil // binary
+		return nil, false // binary
 	}
 
-	var hits []hit
 	sc := bufio.NewScanner(io.MultiReader(bytes.NewReader(head), f))
 	sc.Buffer(make([]byte, 0, 64<<10), maxLineScan)
 	for lineno := 1; sc.Scan(); lineno++ {
 		if !re.Match(sc.Bytes()) {
 			continue
 		}
-		hits = append(hits, hit{line: lineno, text: sc.Text()})
-		if filesOnly || len(hits) >= maxHits {
+		text := sc.Bytes()
+		if len(text) > maxHitText {
+			text = text[:maxHitText]
+		}
+		hits = append(hits, hit{line: lineno, text: strings.ToValidUTF8(string(text), "")})
+		if filesOnly {
 			break
 		}
+		if len(hits) >= maxHits {
+			return hits, clamped
+		}
 	}
-	return hits // sc.Err() ignored: an over-long line ends this file, not the run
+	return hits, false // sc.Err() ignored: an over-long line ends this file, not the run
 }
+
+// maxHitText bounds one kept line.
+const maxHitText = 1024
 
 // hubGrepPage bounds one hub grep request's path list (the hub's own cap).
 const hubGrepPage = 5000
@@ -299,8 +322,11 @@ func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr strin
 			remoteOnly = append(remoteOnly, rel)
 			continue
 		}
-		hits := grepReader(f, re, filesOnly, 0)
+		hits, more := grepReader(f, re, filesOnly, 0)
 		f.Close()
+		if more {
+			notes = append(notes, capNote(rel))
+		}
 		for _, h := range hits {
 			if !emit(rel, h) {
 				return notes, true
@@ -364,12 +390,15 @@ func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr strin
 // read the rest of the tree.
 // maxHits caps the hits kept per file (the caller's output limit; 0 for the
 // per-file default), so a batch holds at most batch × maxHits lines.
-func grepLocal(folder string, paths []string, re *regexp.Regexp, filesOnly bool, maxHits int, fn func(rel string, hits []hit) bool) {
+func grepLocal(folder string, paths []string, re *regexp.Regexp, filesOnly bool, maxHits int, fn func(rel string, hits []hit, more bool) bool) {
 	workers := runtime.NumCPU()
-	batch := 64 * workers
+	// Small batches: a batch's hits are what is held at once, so this keeps
+	// it to a few workers' worth of files (each ≤ maxHits × maxHitText).
+	batch := 4 * workers
 	for start := 0; start < len(paths); start += batch {
 		chunk := paths[start:min(len(paths), start+batch)]
 		out := make([][]hit, len(chunk))
+		more := make([]bool, len(chunk))
 		var wg sync.WaitGroup
 		next := make(chan int)
 		for w := 0; w < workers; w++ {
@@ -377,7 +406,7 @@ func grepLocal(folder string, paths []string, re *regexp.Regexp, filesOnly bool,
 			go func() {
 				defer wg.Done()
 				for i := range next {
-					out[i] = grepFile(folder, filepath.Join(folder, filepath.FromSlash(chunk[i])), re, filesOnly, maxHits)
+					out[i], more[i] = grepFile(folder, filepath.Join(folder, filepath.FromSlash(chunk[i])), re, filesOnly, maxHits)
 				}
 			}()
 		}
@@ -387,9 +416,14 @@ func grepLocal(folder string, paths []string, re *regexp.Regexp, filesOnly bool,
 		close(next)
 		wg.Wait()
 		for i, hits := range out {
-			if len(hits) > 0 && !fn(chunk[i], hits) {
+			if len(hits) > 0 && !fn(chunk[i], hits, more[i]) {
 				return
 			}
 		}
 	}
+}
+
+// capNote is what a search says about a file the per-file cap cut short.
+func capNote(rel string) string {
+	return fmt.Sprintf("%s has more than %d matching lines; only the first %d are shown", rel, maxHitsPerFile, maxHitsPerFile)
 }

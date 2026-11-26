@@ -326,7 +326,11 @@ func (m *localMCP) grep(ctx context.Context, in lGrep) (string, error) {
 		}
 	}
 	sort.Strings(local)
-	grepLocal(m.v.root, local, re, in.FilesOnly, limit+1, func(rel string, hits []hit) bool {
+	var capped []string
+	grepLocal(m.v.root, local, re, in.FilesOnly, limit+1, func(rel string, hits []hit, more bool) bool {
+		if more {
+			capped = append(capped, rel)
+		}
 		for _, h := range hits {
 			if !emit(rel, h) {
 				return false
@@ -335,13 +339,18 @@ func (m *localMCP) grep(ctx context.Context, in lGrep) (string, error) {
 		return true
 	})
 	var notes []string
+	for _, rel := range capped {
+		notes = append(notes, capNote(rel))
+	}
 	if !truncated {
 		var cut bool
 		searched := make(map[string]bool, len(local))
 		for _, p := range local {
 			searched[p] = true
 		}
-		notes, cut = lazyGrep(ctx, m.v, re, expr, in.FilesOnly, keep, searched, emit)
+		var more []string
+		more, cut = lazyGrep(ctx, m.v, re, expr, in.FilesOnly, keep, searched, emit)
+		notes = append(notes, more...)
 		truncated = truncated || cut
 	}
 	var out strings.Builder

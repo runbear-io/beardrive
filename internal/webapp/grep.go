@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,10 +68,16 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 		fi, ok := files[p]
 		// Sized BEFORE opening: on a hub, opening a blob can hash or
 		// reassemble the whole object, so the budget must decide whether it
-		// is opened at all, not only how much of it is read. A file that
-		// does not fit what is left of this page starts the next one; a file
-		// larger than a whole page is reported as not searched, unopened.
-		if ok && i > 0 && fi.Size > grepPageBytes-bytesRead && fi.Size <= grepPageBytes {
+		// is opened at all. The size is the STORED object's (trustedSize),
+		// never the journal's declared op.Size, which a writer chooses. A
+		// file that does not fit what is left of this page starts the next
+		// one; a file larger than a whole page, or one whose stored size
+		// cannot be established, is reported as not searched, unopened.
+		size := int64(-1)
+		if ok {
+			size = trustedSize(r.Context(), v, fi)
+		}
+		if ok && i > 0 && size >= 0 && size > grepPageBytes-bytesRead && size <= grepPageBytes {
 			break
 		}
 		out.Scanned = i + 1
@@ -78,10 +85,11 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 			out.Missing = append(out.Missing, p)
 			continue
 		}
-		if fi.Size > grepPageBytes {
+		if size < 0 || size > grepPageBytes {
 			out.Unreadable = append(out.Unreadable, p)
 			continue
 		}
+		fi.Size = size
 		rc, err := v.source.Open(r.Context(), p, fi)
 		if err != nil {
 			out.Unreadable = append(out.Unreadable, p)
@@ -126,4 +134,55 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, out)
+}
+
+// trustedSize is the size the hub's own storage records for a file's
+// content: the whole blob's stored length, or, for content kept only as
+// chunks, the manifest's total — which reassembly enforces, since every chunk
+// is hash-verified against its key. -1 when neither can be established. A
+// plain-folder source's size comes from the filesystem and is used as is.
+func trustedSize(ctx context.Context, v *volume, fi FileInfo) int64 {
+	rs, ok := v.source.(*RemoteSource)
+	if !ok {
+		return fi.Size
+	}
+	return rs.storedSize(ctx, fi.Blob)
+}
+
+func (r *RemoteSource) storedSize(ctx context.Context, sha string) int64 {
+	if !blobRe.MatchString(sha) {
+		return -1
+	}
+	if objs, err := r.Backend.List(ctx, "blobs/"+sha); err == nil {
+		for _, o := range objs {
+			if o.Key == "blobs/"+sha {
+				return o.Size
+			}
+		}
+	}
+	mrc, err := r.Backend.Get(ctx, "manifests/"+sha)
+	if err != nil {
+		return -1
+	}
+	defer mrc.Close()
+	var man struct {
+		Size   int64 `json:"size"`
+		Chunks []struct {
+			N int64 `json:"n"`
+		} `json:"chunks"`
+	}
+	if json.NewDecoder(io.LimitReader(mrc, 8<<20)).Decode(&man) != nil || man.Size < 0 || len(man.Chunks) > maxManifestChunks {
+		return -1
+	}
+	var total int64
+	for _, c := range man.Chunks {
+		if c.N < 0 || c.N > maxReassembleChunkBytes {
+			return -1
+		}
+		total += c.N
+	}
+	if total != man.Size {
+		return -1
+	}
+	return total
 }

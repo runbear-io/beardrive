@@ -416,7 +416,7 @@ func TestGrepFileSkipsFIFOReplacingCandidate(t *testing.T) {
 	}
 	var hits []hit
 	queryReadBounded(t, abs, func() (string, error) {
-		hits = grepFile(folder, abs, regexp.MustCompile("needle"), false, 0)
+		hits, _ = grepFile(folder, abs, regexp.MustCompile("needle"), false, 0)
 		return "", nil
 	})
 	if len(hits) != 0 {
@@ -428,10 +428,20 @@ func TestGrepFileSkipsFIFOReplacingCandidate(t *testing.T) {
 // hold every match of many large files at once (bot review P1).
 func TestGrepReaderCapsHitsPerFile(t *testing.T) {
 	text := strings.Repeat("needle\n", 50000)
-	if got := len(grepReader(strings.NewReader(text), regexp.MustCompile("needle"), false, 7)); got != 7 {
-		t.Fatalf("hits = %d, want 7", got)
+	hits, more := grepReader(strings.NewReader(text), regexp.MustCompile("needle"), false, 7)
+	if len(hits) != 7 || more {
+		t.Fatalf("hits = %d more=%v, want 7 and no cap note (the caller's own limit)", len(hits), more)
 	}
-	if got := len(grepReader(strings.NewReader(text), regexp.MustCompile("needle"), false, 0)); got != maxHitsPerFile {
-		t.Fatalf("default cap: hits = %d, want %d", got, maxHitsPerFile)
+	hits, more = grepReader(strings.NewReader(text), regexp.MustCompile("needle"), false, 0)
+	if len(hits) != maxHitsPerFile || !more {
+		t.Fatalf("default cap: hits = %d more=%v, want %d and a cap note", len(hits), more, maxHitsPerFile)
+	}
+	// Long matching lines are clipped, so held bytes stay bounded.
+	long := strings.Repeat("needle"+strings.Repeat("y", 1<<19)+"\n", 20)
+	hits, _ = grepReader(strings.NewReader(long), regexp.MustCompile("needle"), false, 0)
+	for _, h := range hits {
+		if len(h.text) > maxHitText {
+			t.Fatalf("kept line of %d bytes", len(h.text))
+		}
 	}
 }
