@@ -400,3 +400,26 @@ func TestLocalMCPGrepSearchesJournaledVersionOfLocalOnlyPath(t *testing.T) {
 		t.Fatalf("grep:\n%s", out)
 	}
 }
+
+// restore refuses a version larger than the tool's read bound instead of
+// loading it into memory (bot review P1).
+func TestLocalMCPRestoreRefusesAHugeVersion(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	abs := filepath.Join(m.v.root, "big.md")
+	os.WriteFile(abs, []byte(strings.Repeat("x", 4096)), 0o644)
+	m.v.sess.Cycle(ctx)
+	os.WriteFile(abs, []byte("small now"), 0o644)
+	m.v.sess.Cycle(ctx)
+	m.v.refresh()
+	old := localReadMax
+	localReadMax = 1024
+	defer func() { localReadMax = old }()
+	v1, _ := fileSHAOf(strings.Repeat("x", 4096))
+	if _, err := m.restore(ctx, lRestore{Path: "big.md", SHA: v1}); err == nil || !strings.Contains(err.Error(), "bdrive restore") {
+		t.Fatalf("got %v", err)
+	}
+	if b, _ := os.ReadFile(abs); string(b) != "small now" {
+		t.Fatalf("file changed: %q", b)
+	}
+}

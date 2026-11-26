@@ -153,13 +153,25 @@ func (r *RemoteSource) storedSize(ctx context.Context, sha string) int64 {
 	if !blobRe.MatchString(sha) {
 		return -1
 	}
+	// OpenBlob serves the whole blob when it verifies and falls back to
+	// reassembling the manifest when it does not, so the budget must cover
+	// whichever is LARGER: a small wrong whole blob must not admit a large
+	// reassembly. A presigned upload cannot grow an object afterwards — the
+	// signature covers Content-Length — so the listed size is the size.
+	whole, man := int64(-1), r.manifestSize(ctx, sha)
 	if objs, err := r.Backend.List(ctx, "blobs/"+sha); err == nil {
 		for _, o := range objs {
 			if o.Key == "blobs/"+sha {
-				return o.Size
+				whole = o.Size
 			}
 		}
 	}
+	return max(whole, man)
+}
+
+// manifestSize is a chunk manifest's total, which reassembly enforces since
+// every chunk is hash-verified against its key; -1 with no valid manifest.
+func (r *RemoteSource) manifestSize(ctx context.Context, sha string) int64 {
 	mrc, err := r.Backend.Get(ctx, "manifests/"+sha)
 	if err != nil {
 		return -1

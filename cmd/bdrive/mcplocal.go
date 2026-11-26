@@ -40,8 +40,11 @@ import (
 	"github.com/runbear-io/beardrive/internal/webapp"
 )
 
+// localReadMax is the largest file read, edited or restored whole (a var so
+// tests can shrink it).
+var localReadMax int64 = 64 << 20
+
 const (
-	localReadMax      = 64 << 20 // largest file read or edited whole
 	localReadLines    = 2000
 	localLineShown    = 4 << 10
 	localGrepMatches  = 200
@@ -856,7 +859,15 @@ func (m *localMCP) restore(ctx context.Context, in lRestore) (string, error) {
 			if err := m.v.sess.EnsureContent(ctx, rel, journal.FileState{Blob: op.Blob, Size: op.Size}); err != nil {
 				return "", err
 			}
-			content, err := os.ReadFile(m.v.sess.Store.BlobPath(op.Blob))
+			// Bounded like every read here; a larger version is restored with
+			// the CLI (bdrive restore), which streams it.
+			bp := m.v.sess.Store.BlobPath(op.Blob)
+			if fi, err := os.Stat(bp); err != nil {
+				return "", err
+			} else if fi.Size() > localReadMax {
+				return "", fmt.Errorf("that version of %s is %s, larger than this tool restores (%s); use `bdrive restore %s %s`", rel, humanBytes(fi.Size()), humanBytes(localReadMax), rel, op.Blob[:12])
+			}
+			content, err := os.ReadFile(bp)
 			if err != nil {
 				return "", err
 			}

@@ -126,6 +126,12 @@ func TestHubGrepSizesFromStorage(t *testing.T) {
 	if got := trustedSize(ctx, v, FileInfo{Blob: sha2, Size: 1}); got != 9000 {
 		t.Fatalf("manifest size = %d, want 9000", got)
 	}
+	// A small (wrong) whole blob beside a large manifest: OpenBlob may fall
+	// back to reassembly, so the larger size governs.
+	be.Put(ctx, "blobs/"+sha2, strings.NewReader("tiny"), 4)
+	if got := trustedSize(ctx, v, FileInfo{Blob: sha2, Size: 1}); got != 9000 {
+		t.Fatalf("small blob + big manifest = %d, want 9000", got)
+	}
 	if got := trustedSize(ctx, v, FileInfo{Blob: strings.Repeat("d", 64), Size: 1}); got != -1 {
 		t.Fatalf("unknown object = %d, want -1", got)
 	}
