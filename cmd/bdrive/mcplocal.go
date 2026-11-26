@@ -13,8 +13,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -364,7 +367,37 @@ func staleSHA(rel, want, have string) error {
 	return fmt.Errorf("%s changed since you read it (now sha:%s); read it again and redo the change", rel, have)
 }
 
-func (m *localMCP) put(rel string, content []byte) (string, error) {
+// mcpBeforeRename is a test seam: it runs between put's final check and its
+// rename, where an outside writer would race.
+var mcpBeforeRename func()
+
+// nowSHA is the sha of rel as it stands right now: the working file when on
+// disk, else the version the journals fold to, else "" (no such file).
+func (m *localMCP) nowSHA(rel string) (string, error) {
+	abs := filepath.Join(m.v.root, filepath.FromSlash(rel))
+	if f, _, err := store.OpenRegularUnderRoot(m.v.root, abs); err == nil {
+		defer f.Close()
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return "", err
+		}
+		return hex.EncodeToString(h.Sum(nil)), nil
+	} else if _, lerr := os.Lstat(abs); lerr == nil {
+		return "", fmt.Errorf("%s is not a regular file", rel)
+	}
+	if err := m.v.refresh(); err != nil {
+		return "", err
+	}
+	return m.v.ix.Files[rel].Blob, nil
+}
+
+// put writes content at rel, but only if rel still holds base (the sha the
+// caller checked; "" for "no such file"). The file is staged next to its
+// destination and compared again immediately before the rename, so an
+// editor's save or the daemon's pull landing after the caller's check is
+// refused rather than overwritten. What remains is the instant between that
+// last compare and rename(2) — the same window every editor's save has.
+func (m *localMCP) put(rel string, content []byte, base string) (string, error) {
 	if err := m.v.sess.Writable(rel); err != nil {
 		return "", err
 	}
@@ -387,7 +420,35 @@ func (m *localMCP) put(rel string, content []byte) (string, error) {
 		}
 		mode = fi.Mode().Perm()
 	}
-	if err := store.WriteFileAtomic(abs, content, mode); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(abs), ".bdrive-tmp-mcp-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name())
+	_, werr := tmp.Write(content)
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp.Name(), mode)
+	}
+	if werr != nil {
+		return "", werr
+	}
+	if mcpBeforeRename != nil {
+		mcpBeforeRename()
+	}
+	now, err := m.nowSHA(rel)
+	if err != nil {
+		return "", err
+	}
+	if now != base {
+		if now == "" {
+			return "", fmt.Errorf("%s was deleted while you were changing it; nothing was written", rel)
+		}
+		return "", fmt.Errorf("%s changed while you were changing it (now sha:%s); nothing was written — read it again and redo the change", rel, now)
+	}
+	if err := os.Rename(tmp.Name(), abs); err != nil {
 		return "", err
 	}
 	daemon.WakeSupervisor()
@@ -415,7 +476,10 @@ func (m *localMCP) write(ctx context.Context, in lWrite) (string, error) {
 			return "", err
 		}
 	}
-	return m.put(rel, []byte(in.Content))
+	if !exists {
+		sha = ""
+	}
+	return m.put(rel, []byte(in.Content), sha)
 }
 
 func (m *localMCP) edit(ctx context.Context, in lEdit) (string, error) {
@@ -449,10 +513,10 @@ func (m *localMCP) edit(ctx context.Context, in lEdit) (string, error) {
 	} else {
 		text = strings.Replace(text, in.OldString, in.NewString, 1)
 	}
-	return m.put(rel, []byte(text))
+	return m.put(rel, []byte(text), sha)
 }
 
-func (m *localMCP) delete(_ context.Context, in lPath) (string, error) {
+func (m *localMCP) delete(ctx context.Context, in lPath) (string, error) {
 	rel, err := cleanToolPath(in.Path)
 	if err != nil || rel == "" {
 		return "", fmt.Errorf("name a file to delete")
@@ -475,6 +539,21 @@ func (m *localMCP) delete(_ context.Context, in lPath) (string, error) {
 	}
 	if err := m.v.sess.Writable(rel); err != nil {
 		return "", err
+	}
+	// The scan journals a delete only for a file this mount tracks. A file
+	// that is on disk but not tracked yet — say a lazy path just written
+	// here, before the daemon scanned it — would vanish locally while the
+	// hub keeps its copy. Journal it first with one sync cycle.
+	if _, known := m.v.ix.Files[rel]; known && !m.v.ix.Materialized(rel) {
+		if _, err := m.v.sess.Cycle(ctx); err != nil {
+			return "", fmt.Errorf("%s is not synced from this device yet, and syncing it failed: %v", rel, err)
+		}
+		if err := m.v.refresh(); err != nil {
+			return "", err
+		}
+		if !m.v.ix.Materialized(rel) {
+			return "", fmt.Errorf("%s is not synced from this device yet; try again after the next sync", rel)
+		}
 	}
 	if err := os.Remove(abs); err != nil {
 		return "", err
@@ -527,6 +606,9 @@ func (m *localMCP) restore(ctx context.Context, in lRestore) (string, error) {
 	rel, err := cleanToolPath(in.Path)
 	if err != nil || rel == "" || len(in.SHA) < 8 {
 		return "", fmt.Errorf("name a file and a sha from history")
+	}
+	if err := m.v.sess.Writable(rel); err != nil {
+		return "", err
 	}
 	ops, err := syncer.LogEntries(m.v.sess.Store, rel, 0)
 	if err != nil {

@@ -31,6 +31,7 @@ func TestCLILazyE2E(t *testing.T) {
 		"docs/huge.json":  bigLine("needle-huge", 12000),
 		"keep/pinned.bin": bigLine("pinned", 5000),
 		"docs/note.md":    "a note\n",
+		"old/big2.html":   bigLine("old", 6000),
 	}
 	for rel, body := range files {
 		p := filepath.Join(aDir, filepath.FromSlash(rel))
@@ -66,7 +67,7 @@ func TestCLILazyE2E(t *testing.T) {
 		_, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel)))
 		return err == nil
 	}
-	for rel, want := range map[string]bool{"small.md": true, "docs/note.md": true, "big.html": false, "docs/huge.json": false, "keep/pinned.bin": false} {
+	for rel, want := range map[string]bool{"old/big2.html": false, "small.md": true, "docs/note.md": true, "big.html": false, "docs/huge.json": false, "keep/pinned.bin": false} {
 		if got := present(bDir, rel); got != want {
 			t.Fatalf("B %s on disk = %v, want %v", rel, got, want)
 		}
@@ -84,7 +85,7 @@ func TestCLILazyE2E(t *testing.T) {
 	if out := mustRun(b, bDir, "grep", "-l", "needle"); !strings.Contains(out, "big.html") || !strings.Contains(out, "small.md") || !strings.Contains(out, "docs/huge.json") {
 		t.Fatalf("combined grep missed a file:\n%s", out)
 	}
-	if out := mustRun(b, bDir, "lazy"); !strings.Contains(out, "on the hub only: 3 files") {
+	if out := mustRun(b, bDir, "lazy"); !strings.Contains(out, "on the hub only: 4 files") {
 		t.Fatalf("lazy status:\n%s", out)
 	}
 
@@ -137,6 +138,19 @@ func TestCLILazyE2E(t *testing.T) {
 	if out, isErr := call("write", map[string]any{"path": "node_modules/x.js", "content": "x"}); !isErr || !strings.Contains(out, "excluded") {
 		t.Fatalf("a write that would never sync must be refused:\n%s", out)
 	}
+	// Write a lazy path, then delete it before any scan: the delete must
+	// reach the hub, not just this disk (bot review P1).
+	out2, _ := call("read", map[string]any{"path": "old/big2.html", "limit": 1})
+	m2 := regexp.MustCompile(`sha:([0-9a-f]{64})`).FindStringSubmatch(out2)
+	if m2 == nil {
+		t.Fatalf("read old/big2.html:\n%s", out2)
+	}
+	if out, isErr := call("write", map[string]any{"path": "old/big2.html", "content": "rewritten\n", "sha": m2[1]}); isErr {
+		t.Fatalf("write lazy path:\n%s", out)
+	}
+	if out, isErr := call("delete", map[string]any{"path": "old/big2.html"}); isErr {
+		t.Fatalf("delete right after write:\n%s", out)
+	}
 	outside := t.TempDir()
 	if err := os.Symlink(outside, filepath.Join(bDir, "escape")); err != nil {
 		t.Fatal(err)
@@ -163,6 +177,9 @@ func TestCLILazyE2E(t *testing.T) {
 		mustRun(b, bDir, "sync")
 	}
 	mustRun(a, aDir, "sync")
+	if present(aDir, "old/big2.html") {
+		t.Fatal("a write-then-delete through MCP never reached the hub")
+	}
 	if !present(aDir, "big.html") {
 		t.Fatal("A lost big.html: a lazy file became a delete")
 	}
