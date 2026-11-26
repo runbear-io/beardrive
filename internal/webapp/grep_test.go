@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -134,5 +135,38 @@ func TestHubGrepSizesFromStorage(t *testing.T) {
 	}
 	if got, _, _ := trustedSize(ctx, v, FileInfo{Blob: strings.Repeat("d", 64), Size: 1}); got != -1 {
 		t.Fatalf("unknown object = %d, want -1", got)
+	}
+}
+
+// The grep reads a whole blob itself, bounded and hash-verified: bytes that
+// are not their sha's content, or that outgrew the budget since sizing, are
+// rejected (bot review P1).
+func TestOpenForGrepVerifiesWithinBudget(t *testing.T) {
+	ctx := context.Background()
+	be, _ := remote.Open(ctx, "file://"+t.TempDir())
+	v := &volume{source: &RemoteSource{Backend: be}}
+	good := "hello needle\n"
+	sum := sha256.Sum256([]byte(good))
+	sha := hex.EncodeToString(sum[:])
+	be.Put(ctx, "blobs/"+sha, strings.NewReader(good), int64(len(good)))
+	check := func(blob string, budget int64) bool {
+		rc, verify, err := openForGrep(ctx, v, "f", FileInfo{Blob: blob}, budget)
+		if err != nil {
+			return false
+		}
+		defer rc.Close()
+		io.Copy(io.Discard, io.LimitReader(rc, 4)) // a scan that stopped early
+		return verify()
+	}
+	if !check(sha, 1<<20) {
+		t.Fatal("honest blob rejected")
+	}
+	if check(sha, 5) {
+		t.Fatal("a blob larger than the budget must be rejected")
+	}
+	bad := strings.Repeat("b", 64)
+	be.Put(ctx, "blobs/"+bad, strings.NewReader("not that content"), 16)
+	if check(bad, 1<<20) {
+		t.Fatal("bytes that are not the sha's content must be rejected")
 	}
 }

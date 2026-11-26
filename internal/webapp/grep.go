@@ -2,6 +2,8 @@ package webapp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -100,32 +102,43 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 			budget = grepPageBytes
 		}
 		bytesRead += min(cost, budget)
-		rc, err := v.source.Open(r.Context(), p, fi)
+		rc, verify, err := openForGrep(r.Context(), v, p, fi, budget)
 		if err != nil {
 			out.Unreadable = append(out.Unreadable, p)
 			continue
 		}
-		// The read itself is bounded by the same budget, so a file cut by it
-		// is reported as not fully searched, never as a clean negative.
-		capped := false
+		// The read is bounded by the same budget, so a file cut by it is
+		// reported as not fully searched, never as a clean negative. This
+		// file's results are held aside until verify confirms the bytes were
+		// the content its sha names.
+		var mine []remote.GrepMatch
+		total, capped := 0, false
+		room := maxMatches - len(out.Matches)
 		found, isBin, cut := scanBlob(io.LimitReader(rc, budget), re, 0, func(line int, text string, isMatch bool) bool {
 			if !isMatch {
 				return true
 			}
-			out.Total++
+			total++
 			if req.FilesOnly {
 				return false
 			}
-			if len(out.Matches) >= maxMatches {
-				// Stop reading at the cap. Total is one past what was
-				// returned, which tells the caller there was more.
+			if len(mine) >= room {
+				// Stop at the cap. Total is one past what was returned,
+				// which tells the caller there was more.
 				capped = true
 				return false
 			}
-			out.Matches = append(out.Matches, remote.GrepMatch{Path: p, Line: line, Text: text})
+			mine = append(mine, remote.GrepMatch{Path: p, Line: line, Text: text})
 			return true
 		})
+		ok = verify()
 		rc.Close()
+		if !ok {
+			out.Unreadable = append(out.Unreadable, p)
+			continue
+		}
+		out.Total += total
+		out.Matches = append(out.Matches, mine...)
 		switch {
 		case isBin:
 			out.Binary = append(out.Binary, p)
@@ -227,4 +240,39 @@ func (c *manifestCounter) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n += int64(n)
 	return n, err
+}
+
+// openForGrep opens one file for the grep scan without letting the open
+// itself do unbounded work. A plain-folder source is read as is. On a hub,
+// a whole blob is read straight from storage — not through OpenBlob, whose
+// verification hashes the object before returning however large it has
+// grown since it was sized — with its sha256 computed as the scan reads, and
+// verify drains the remainder (still within budget) and reports whether the
+// bytes were the content the sha names; the caller keeps the file's results
+// only then. Content that exists only as chunks goes through OpenBlob, whose
+// reassembly is hash-verified and capped at maxReassembleBytes.
+func openForGrep(ctx context.Context, v *volume, p string, fi FileInfo, budget int64) (io.ReadCloser, func() bool, error) {
+	rs, isRemote := v.source.(*RemoteSource)
+	if !isRemote {
+		rc, err := v.source.Open(ctx, p, fi)
+		return rc, func() bool { return true }, err
+	}
+	whole, err := rs.Backend.Get(ctx, "blobs/"+fi.Blob)
+	if err != nil {
+		rc, err := rs.OpenBlob(ctx, fi.Blob)
+		return rc, func() bool { return true }, err
+	}
+	h := sha256.New()
+	lr := &io.LimitedReader{R: whole, N: budget + 1}
+	tee := io.TeeReader(lr, h)
+	verify := func() bool {
+		if _, err := io.Copy(io.Discard, tee); err != nil || lr.N == 0 {
+			return false // unreadable, or larger than the budget
+		}
+		return hex.EncodeToString(h.Sum(nil)) == fi.Blob
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{tee, whole}, verify, nil
 }
