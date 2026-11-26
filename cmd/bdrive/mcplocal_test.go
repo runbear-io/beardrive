@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/store"
@@ -166,16 +171,51 @@ func TestLocalMCPKeepsALateWriteThroughAnOpenDescriptor(t *testing.T) {
 	if _, err := fd.WriteAt([]byte("late edit\n"), 0); err != nil {
 		t.Fatal(err)
 	}
-	matches, _ := filepath.Glob(filepath.Join(m.v.root, ".bdrive", "displaced", "*-notes.md"))
-	if len(matches) != 1 {
-		t.Fatalf("displaced version not preserved: %v", matches)
-	}
-	if b, _ := os.ReadFile(matches[0]); !strings.HasPrefix(string(b), "late edit") {
-		t.Fatalf("late write through an open descriptor was lost: %q", b)
-	}
 	if b, _ := os.ReadFile(abs); string(b) != "mine\n" {
 		t.Fatalf("file = %q", b)
 	}
+	// The next tool call settles it: a changed displaced file becomes a
+	// visible, syncing file next to the original and is reported.
+	late := m.sweepDisplaced()
+	if len(late) != 1 || !strings.HasPrefix(late[0], "notes.md.bdrive-mcp-late-") {
+		t.Fatalf("late save not surfaced: %v", late)
+	}
+	if b, _ := os.ReadFile(filepath.Join(m.v.root, late[0])); !strings.HasPrefix(string(b), "late edit") {
+		t.Fatalf("late write through an open descriptor was lost: %q", b)
+	}
+}
+
+// Untouched displaced versions are pruned after the TTL; a changed one is
+// never pruned, however old (bot review P1).
+func TestLocalMCPDisplacedTTL(t *testing.T) {
+	m := testLocalMCP(t)
+	dir := m.displacedDir()
+	os.MkdirAll(dir, 0o700)
+	old := strconv.FormatInt(time.Now().Add(-48*time.Hour).UnixNano(), 10)
+	old2 := strconv.FormatInt(time.Now().Add(-47*time.Hour).UnixNano(), 10)
+	put := func(id, content, base string) {
+		os.WriteFile(filepath.Join(dir, id), []byte(content), 0o600)
+		meta, _ := json.Marshal(displacedMeta{Path: "a.md", Base: base})
+		os.WriteFile(filepath.Join(dir, id+".json"), meta, 0o600)
+	}
+	untouched, _ := fileSHAOf("prev")
+	put(old, "prev", untouched)
+	put(old2, "changed later", untouched)
+	late := m.sweepDisplaced()
+	if _, err := os.Stat(filepath.Join(dir, old)); err == nil {
+		t.Fatal("an untouched expired version was not pruned")
+	}
+	if len(late) != 1 {
+		t.Fatalf("a changed expired version must be surfaced, not deleted: %v", late)
+	}
+	if b, _ := os.ReadFile(filepath.Join(m.v.root, late[0])); string(b) != "changed later" {
+		t.Fatalf("surfaced = %q", b)
+	}
+}
+
+func fileSHAOf(s string) (string, error) {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // A kept file gets a short name, so a long file name cannot make keeping it

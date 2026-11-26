@@ -385,7 +385,10 @@ journals always are. Its content is fetched only when something reads it.
   write/edit is a real compare-and-swap. The new file is swapped in
   atomically and the version it replaced is checked. If someone else saved in
   between, their version goes back and the write is refused. The replaced file
-  is kept for a day in `.bdrive/displaced/`, which never syncs. On a
+  goes to `.bdrive/displaced/`, which never syncs. If nothing touches it, it is
+  deleted after a day. If an editor writes to it after the swap (through a file
+  it already had open), it becomes a visible, syncing
+  `<name>.bdrive-mcp-late-<id>` file, and the next tool reply names it. On a
   filesystem with no atomic swap, MCP never overwrites an existing file.
 - **Agents.** Your agent's own Read and Grep tools cannot see a file that is
   not on disk. When lazy mode is on, the turn hook adds one line that names

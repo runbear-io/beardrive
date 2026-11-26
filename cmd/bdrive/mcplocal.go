@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -143,6 +144,14 @@ func localTool[In any](srv *mcp.Server, m *localMCP, name, title, desc string, r
 			err := m.v.refresh()
 			if err == nil {
 				out, err = fn(ctx, in)
+			}
+			if late := m.sweepDisplaced(); len(late) > 0 {
+				note := fmt.Sprintf("\n[a file was saved by another program while it was being replaced; that save is kept as %s — check it and merge by hand]", strings.Join(late, ", "))
+				if err != nil {
+					err = fmt.Errorf("%w%s", err, note)
+				} else {
+					out += note
+				}
 			}
 			if err != nil {
 				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, nil, nil
@@ -459,34 +468,94 @@ func (m *localMCP) swapIn(rel, abs, tmp, base, ours string) error {
 	return changedErr(rel, prev)
 }
 
-// displacedTTL is how long a displaced previous version is kept.
-// ponytail: age-based pruning on the next write; a size cap if MCP writes of
-// very large files become common.
+// displacedTTL is how long an untouched displaced version is kept.
 const displacedTTL = 24 * time.Hour
 
-// preserveDisplaced moves a file a swap displaced into .bdrive/displaced,
-// pruning entries older than displacedTTL. If the move fails the file stays
-// at its staging name (a .bdrive-tmp- name the scanner ignores): never lost.
-func (m *localMCP) preserveDisplaced(abs, tmp string) {
-	dir := filepath.Join(m.v.root, config.ProjectDir, "displaced")
+func (m *localMCP) displacedDir() string {
+	return filepath.Join(m.v.root, config.ProjectDir, "displaced")
+}
+
+// displacedMeta is the sidecar beside each displaced file.
+type displacedMeta struct {
+	Path string `json:"path"` // project path it was displaced from
+	Base string `json:"base"` // its sha at the moment of the swap
+}
+
+// preserveDisplaced moves the file a swap displaced from rel into
+// .bdrive/displaced (never synced), with a sidecar naming rel and the sha it
+// held. sweepDisplaced decides its fate later. If the move fails the file
+// stays at its staging name (a .bdrive-tmp- name the scanner ignores).
+func (m *localMCP) preserveDisplaced(rel, tmp, base string) {
+	dir := m.displacedDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return
 	}
-	if entries, err := os.ReadDir(dir); err == nil {
-		// Aged by the time in the NAME (when it was displaced), not its
-		// mtime, which is the old version's own and usually long past.
-		for _, e := range entries {
-			stamp, _, ok := strings.Cut(e.Name(), "-")
-			if ns, err := strconv.ParseInt(stamp, 10, 64); ok && err == nil && time.Since(time.Unix(0, ns)) > displacedTTL {
+	id := strconv.FormatInt(time.Now().UnixNano(), 10)
+	meta, _ := json.Marshal(displacedMeta{Path: rel, Base: base})
+	if err := store.WriteFileAtomic(filepath.Join(dir, id+".json"), meta, 0o600); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, id)); err != nil {
+		os.Remove(filepath.Join(dir, id+".json"))
+	}
+}
+
+// sweepDisplaced settles displaced versions. One that still holds exactly
+// the sha it was displaced with is the previous version, already in history,
+// and is deleted once it is older than displacedTTL. One that CHANGED was
+// written after the swap — an editor saving through a descriptor it opened
+// before — and is never deleted: it is moved next to its file as a visible,
+// syncing "<name>.bdrive-mcp-late-<id>" and reported. It returns those paths.
+func (m *localMCP) sweepDisplaced() []string {
+	dir := m.displacedDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var promoted []string
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		var meta displacedMeta
+		if err != nil || json.Unmarshal(raw, &meta) != nil {
+			continue
+		}
+		file := filepath.Join(dir, id)
+		sha, err := fileSHA(file)
+		if err != nil {
+			os.Remove(filepath.Join(dir, e.Name())) // the file itself is gone
+			continue
+		}
+		if sha == meta.Base {
+			if ns, err := strconv.ParseInt(id, 10, 64); err == nil && time.Since(time.Unix(0, ns)) > displacedTTL {
+				os.Remove(file)
 				os.Remove(filepath.Join(dir, e.Name()))
 			}
+			continue
+		}
+		rel, err := cleanToolPath(meta.Path)
+		if err != nil || rel == "" {
+			continue // keep it where it is; never delete a changed one
+		}
+		name := path.Base(rel)
+		if len(name) > 64 {
+			name = name[:64]
+		}
+		late := path.Join(path.Dir(rel), name+".bdrive-mcp-late-"+id)
+		dst := filepath.Join(m.v.root, filepath.FromSlash(late))
+		if !store.UnderRoot(m.v.root, filepath.Dir(dst)) || os.MkdirAll(filepath.Dir(dst), 0o755) != nil {
+			continue
+		}
+		if os.Link(file, dst) == nil {
+			os.Remove(file)
+			os.Remove(filepath.Join(dir, e.Name()))
+			promoted = append(promoted, late)
 		}
 	}
-	name := filepath.Base(abs)
-	if len(name) > 64 {
-		name = name[:64]
-	}
-	_ = os.Rename(tmp, filepath.Join(dir, fmt.Sprintf("%d-%s", time.Now().UnixNano(), name)))
+	return promoted
 }
 
 // keepDisplaced moves a file a swap displaced to a visible name beside abs.
@@ -577,7 +646,7 @@ func (m *localMCP) put(rel string, content []byte, base string) (string, error) 
 			os.Remove(tmp.Name())
 			return
 		}
-		m.preserveDisplaced(abs, tmp.Name())
+		m.preserveDisplaced(rel, tmp.Name(), base)
 	}()
 	_, werr := tmp.Write(content)
 	if cerr := tmp.Close(); werr == nil {
