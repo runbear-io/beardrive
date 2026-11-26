@@ -401,6 +401,7 @@ var errNoSwap = errors.New("atomic swap not supported here")
 // Test seams around swapIn's two exchanges.
 var (
 	mcpBeforeSwapBack func()
+	mcpBeforeCleanup  func()
 	swapFn            = swapFiles
 )
 
@@ -457,10 +458,16 @@ func (m *localMCP) swapIn(rel, abs, tmp, base, ours string) error {
 	return changedErr(rel, prev)
 }
 
-// keepDisplaced moves a file a swap displaced to a visible name beside abs,
-// so put's cleanup cannot delete it.
+// keepDisplaced moves a file a swap displaced to a visible name beside abs.
+// The name is short whatever abs is called, so it cannot fail on a name
+// length limit; if the rename fails anyway the file stays where it is (a
+// .bdrive-tmp- name the scanner ignores) and that path is reported.
 func keepDisplaced(abs, tmp string) string {
-	kept := fmt.Sprintf("%s.bdrive-mcp-displaced-%d", abs, time.Now().UnixNano())
+	name := filepath.Base(abs)
+	if len(name) > 64 {
+		name = name[:64]
+	}
+	kept := filepath.Join(filepath.Dir(abs), fmt.Sprintf("%s.bdrive-mcp-displaced-%d", name, time.Now().UnixNano()))
 	if os.Rename(tmp, kept) != nil {
 		return tmp
 	}
@@ -514,7 +521,22 @@ func (m *localMCP) put(rel string, content []byte, base string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	defer os.Remove(tmp.Name())
+	sum := sha256.Sum256(content)
+	ours := hex.EncodeToString(sum[:])
+	// Whatever ends up at the staging path — our bytes, or a version a swap
+	// displaced — is deleted only if it is content we can name. Re-hashed at
+	// this last moment, so a write that reached the displaced file through a
+	// descriptor opened before the swap is kept, not deleted.
+	defer func() {
+		if mcpBeforeCleanup != nil {
+			mcpBeforeCleanup()
+		}
+		if got, err := fileSHA(tmp.Name()); err == nil && got != base && got != ours {
+			keepDisplaced(abs, tmp.Name())
+			return
+		}
+		os.Remove(tmp.Name())
+	}()
 	_, werr := tmp.Write(content)
 	if cerr := tmp.Close(); werr == nil {
 		werr = cerr
@@ -528,8 +550,7 @@ func (m *localMCP) put(rel string, content []byte, base string) (string, error) 
 	if mcpBeforeRename != nil {
 		mcpBeforeRename()
 	}
-	sum := sha256.Sum256(content)
-	if err := m.swapIn(rel, abs, tmp.Name(), base, hex.EncodeToString(sum[:])); err != nil {
+	if err := m.swapIn(rel, abs, tmp.Name(), base, ours); err != nil {
 		return "", err
 	}
 	daemon.WakeSupervisor()

@@ -143,3 +143,62 @@ func TestLocalMCPRefusesOverwriteWithoutSwap(t *testing.T) {
 		t.Fatalf("creating a new file needs no swap: %v", err)
 	}
 }
+
+// An editor holding the old file open writes through that descriptor after
+// the swap succeeded: the write lands on the displaced file, which is kept
+// rather than deleted (bot review P1).
+func TestLocalMCPKeepsALateWriteThroughAnOpenDescriptor(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	abs := filepath.Join(m.v.root, "notes.md")
+	os.WriteFile(abs, []byte("v1\n"), 0o644)
+	out, _ := m.read(ctx, lRead{Path: "notes.md"})
+	sha := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
+	fd, err := os.OpenFile(abs, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	mcpBeforeCleanup = func() { fd.WriteAt([]byte("late edit\n"), 0) }
+	defer func() { mcpBeforeCleanup = nil }()
+	if _, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha}); err != nil {
+		t.Fatal(err)
+	}
+	matches, _ := filepath.Glob(abs + ".bdrive-mcp-displaced-*")
+	if len(matches) != 1 {
+		t.Fatalf("late write through an open descriptor was deleted: %v", matches)
+	}
+	if b, _ := os.ReadFile(matches[0]); !strings.HasPrefix(string(b), "late edit") {
+		t.Fatalf("kept = %q", b)
+	}
+}
+
+// A kept file gets a short name, so a long file name cannot make keeping it
+// fail and let cleanup delete it (bot review P1).
+func TestLocalMCPKeepsDisplacedFileWithALongName(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	name := strings.Repeat("n", 240) + ".md"
+	abs := filepath.Join(m.v.root, name)
+	if err := os.WriteFile(abs, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := m.read(ctx, lRead{Path: name})
+	sha := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
+	mcpBeforeRename = func() { os.WriteFile(abs, []byte("second\n"), 0o644) }
+	mcpBeforeSwapBack = func() { os.WriteFile(abs, []byte("third\n"), 0o644) }
+	defer func() { mcpBeforeRename, mcpBeforeSwapBack = nil, nil }()
+	if _, err := m.write(ctx, lWrite{Path: name, Content: "mine\n", SHA: sha}); err == nil {
+		t.Fatal("write must be refused")
+	}
+	found := false
+	entries, _ := os.ReadDir(m.v.root)
+	for _, e := range entries {
+		if b, _ := os.ReadFile(filepath.Join(m.v.root, e.Name())); string(b) == "third\n" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the third save was lost")
+	}
+}
