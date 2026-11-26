@@ -113,6 +113,7 @@ var desktopRoutes = []struct {
 	{"GET /api/p/{project}/history/summary", routeLocal, "counted from the same local journals the history feed replays"},
 	{"GET /api/p/{project}/history/emptied", routeLocal, "replayed from the same local journals the history feed reads"},
 	{"GET /api/p/{project}/blob", routeLocal, "old versions come from local blobs"},
+	{"POST /api/p/{project}/grep", routeProxy, ""},
 	{"GET /api/p/{project}/store/list", routeLocal, "the local volume store"},
 	{"GET /api/p/{project}/store/object", routeLocal, "the local volume store"},
 	{"GET /api/p/{project}/store/exists", routeLocal, "the local volume store"},

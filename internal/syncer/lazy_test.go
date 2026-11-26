@@ -236,3 +236,53 @@ func TestLazy_TurnOffAndPinDownload(t *testing.T) {
 		t.Fatalf("journaled deletes: %v", d)
 	}
 }
+
+// A conflict copy is always written to disk, even when it is large: it holds
+// a losing edit, and lazy mode must not make that edit vanish from view.
+func TestLazy_ConflictCopyIsMaterialized(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	bin := func(tag string) string { return tag + "\x00" + strings.Repeat("b", 4*lazyTestThreshold) }
+	write(t, a.Folder, "data.bin", bin("v0"))
+	cycle(t, a)
+	b := newDevice(t, "devb", be)
+	setLazy(t, b, true)
+	cycle(t, b)
+	write(t, b.Folder, "data.bin", bin("from-b")) // B's own edit: tracked now
+	write(t, a.Folder, "data.bin", bin("from-a"))
+	cycle(t, a)
+	cycle(t, b)
+	entries, _ := os.ReadDir(b.Folder)
+	found := false
+	for _, e := range entries {
+		if strings.Contains(e.Name(), conflictMarker) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no conflict copy on the lazy device's disk: %v", entries)
+	}
+}
+
+// A stale untracked file under a read-only folder, at a lazy path, is put
+// back from the hub (its bytes kept aside), not left serving stale content.
+func TestLazy_ReadOnlyStaleFileIsReverted(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	write(t, a.Folder, "locked/big.md", big("hub"))
+	cycle(t, a)
+	b := newDevice(t, "devb", scopedRemote{Backend: be, readOnly: []string{"locked/"}, tag: "t1"})
+	setLazy(t, b, true)
+	write(t, b.Folder, "locked/big.md", "stale local copy")
+	cycle(t, b)
+	cycle(t, b)
+	if got := read(t, b.Folder, "locked/big.md"); got != big("hub") {
+		t.Fatalf("read-only stale file not reverted: %q", got[:min(20, len(got))])
+	}
+	if got := read(t, b.Folder, "locked/big (local, not synced).md"); got != "stale local copy" {
+		t.Fatalf("local bytes not kept aside: %q", got)
+	}
+	if d := ownDeletes(t, b); len(d) != 0 {
+		t.Fatalf("deletes: %v", d)
+	}
+}

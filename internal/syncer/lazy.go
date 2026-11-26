@@ -150,3 +150,36 @@ func (s *Session) Open(ctx context.Context, ix *Index, rel string) (io.ReadClose
 	}
 	return f, src, nil
 }
+
+// Writable reports why a write at rel would never sync from this device, or
+// nil: excluded by the ignore rules or scope, under a folder the hub made
+// read-only (the next cycle reverts it), or under a folder this account
+// cannot read. The local MCP refuses such a write up front instead of
+// reporting a success that silently never reaches anyone.
+func (s *Session) Writable(rel string) error {
+	if neverSync(rel) {
+		return fmt.Errorf("%s: BearDrive never syncs this path", rel)
+	}
+	proj, _, err := config.LoadProject(s.Folder)
+	if err != nil {
+		return err
+	}
+	filter, err := loadFilter(s.Folder, proj.Include)
+	if err != nil {
+		return fmt.Errorf("load %s: %w", IgnoreFile, err)
+	}
+	st, err := s.Store.LoadSync()
+	if err != nil {
+		return err
+	}
+	filter.AcceptRules(st.IgnoreAccepted)
+	switch {
+	case filter.SkipUp(rel):
+		return fmt.Errorf("%s is excluded from syncing here (see %s and this project's scope)", rel, IgnoreFile)
+	case underAny(rel, sanePrefixes(st.Denied)):
+		return fmt.Errorf("%s is in a folder you cannot access", rel)
+	case underAny(rel, sanePrefixes(st.ReadOnly)):
+		return fmt.Errorf("%s is in a read-only folder; your change would be reverted", rel)
+	}
+	return nil
+}

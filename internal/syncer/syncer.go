@@ -136,6 +136,9 @@ type Session struct {
 	lazy config.Lazy
 }
 
+// conflictMarker is in the name of every conflict copy (conflictName).
+const conflictMarker = ".bdrive-conflict-"
+
 // lazyUnmaterialized reports whether rel is a lazy file this mount does not
 // hold: lazy mode is on, the file is over the size limit and outside every
 // pinned folder, and the mount's state cache has no entry for it. Such a path
@@ -151,8 +154,23 @@ func (s *Session) lazyUnmaterialized(rel string, want journal.FileState, cache m
 	if want.Link != "" || want.Blob == "" || rel == IgnoreFile || !s.lazy.Applies(rel, want.Size) {
 		return false
 	}
-	_, tracked := cache[rel]
-	return !tracked
+	if _, tracked := cache[rel]; tracked {
+		return false
+	}
+	// A conflict copy holds a losing edit, often this device's own: it is
+	// always written, or the user sees their edit vanish from disk.
+	if strings.Contains(path.Base(rel), conflictMarker) {
+		return false
+	}
+	// Something already on disk under a read-only folder is never journaled
+	// by the scan, so only materialize can put the project's version back
+	// (keeping the local bytes aside). Leaving it would serve stale bytes.
+	if s.readOnlyPath(rel) {
+		if _, err := os.Lstat(filepath.Join(s.Folder, filepath.FromSlash(rel))); err == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // ScanEventKind describes one local filesystem observation. These types are
@@ -2408,7 +2426,7 @@ func (s *Session) preserveLocalEntry(abs, rel string, fi os.FileInfo) error {
 // it would replay and fail on every cycle from then on, triggered by one
 // ordinary concurrent edit.
 func conflictName(p, deviceName string, t time.Time) string {
-	suffix := ".bdrive-conflict-" + clip(sanitize(deviceName), 32) + "-" + t.UTC().Format("20060102T150405Z")
+	suffix := conflictMarker + clip(sanitize(deviceName), 32) + "-" + t.UTC().Format("20060102T150405Z")
 	dir, base := path.Split(p)
 	return dir + clip(base, 255-len(suffix)) + suffix
 }

@@ -134,6 +134,20 @@ func TestCLILazyE2E(t *testing.T) {
 	if out, isErr := call("delete", map[string]any{"path": "big.html"}); !isErr || !strings.Contains(out, "kept on the hub") {
 		t.Fatalf("deleting a lazy file must explain itself:\n%s", out)
 	}
+	if out, isErr := call("write", map[string]any{"path": "node_modules/x.js", "content": "x"}); !isErr || !strings.Contains(out, "excluded") {
+		t.Fatalf("a write that would never sync must be refused:\n%s", out)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(bDir, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if _, isErr := call("write", map[string]any{"path": "escape/sub/x.md", "content": "x"}); !isErr {
+		t.Fatal("a write through a symlink out of the project must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "sub")); err == nil {
+		t.Fatal("refused write still created a folder outside the project")
+	}
+	os.Remove(filepath.Join(bDir, "escape"))
 	sess.Close()
 
 	// Pin a folder: it downloads.

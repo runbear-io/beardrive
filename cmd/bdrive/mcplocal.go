@@ -365,7 +365,15 @@ func staleSHA(rel, want, have string) error {
 }
 
 func (m *localMCP) put(rel string, content []byte) (string, error) {
+	if err := m.v.sess.Writable(rel); err != nil {
+		return "", err
+	}
 	abs := filepath.Join(m.v.root, filepath.FromSlash(rel))
+	// Containment BEFORE MkdirAll: MkdirAll follows symlinks, so checking
+	// after it would already have created folders outside the project.
+	if !store.UnderRoot(m.v.root, filepath.Dir(abs)) {
+		return "", fmt.Errorf("%s: not a path in this project", rel)
+	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return "", err
 	}
@@ -464,6 +472,9 @@ func (m *localMCP) delete(_ context.Context, in lPath) (string, error) {
 	}
 	if fi.IsDir() || !store.UnderRoot(m.v.root, filepath.Dir(abs)) {
 		return "", fmt.Errorf("%s is not a file", rel)
+	}
+	if err := m.v.sess.Writable(rel); err != nil {
+		return "", err
 	}
 	if err := os.Remove(abs); err != nil {
 		return "", err

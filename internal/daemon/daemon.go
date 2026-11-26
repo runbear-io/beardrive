@@ -1906,9 +1906,11 @@ func PruneVolumeBlobs(st *store.Store, minAge time.Duration, dryRun bool) (remov
 
 // evictLazyCache applies the on-demand cache cap (config.Lazy.CacheMax, the
 // smallest across the volume's mounts). Candidates are the current blobs of
-// lazy paths that no mount has on disk (keep holds every mount cache's blobs)
-// and that no unpushed op of this device touches — content the hub already
-// holds and syncer.EnsureContent fetches back on the next read.
+// paths every mount treats as lazy, minus everything the ordinary prune would
+// keep for another reason (store.UnevictableBlobs: every mount cache in the
+// volume, every blob and base of an unpushed op and the history at its
+// path) and minus any blob a non-lazy path also uses. What is left is
+// content the hub already holds and syncer.EnsureContent fetches back.
 func evictLazyCache(st *store.Store, ownDevice string, policies []config.Lazy, keep map[string]bool, minAge time.Duration, dryRun bool) (int, int64, error) {
 	capBytes := policies[0].CacheBytes()
 	for _, p := range policies[1:] {
@@ -1918,54 +1920,27 @@ func evictLazyCache(st *store.Store, ownDevice string, policies []config.Lazy, k
 	if err != nil {
 		return 0, 0, err
 	}
-	sync, err := st.LoadSync()
+	never, err := st.UnevictableBlobs(ownDevice, keep)
 	if err != nil {
 		return 0, 0, err
 	}
-	if ownDevice == "" {
-		ownDevice = sync.Device
-	}
-	unpushed := map[string]bool{}
-	if ownDevice != "" {
-		ops, err := st.OwnOpsFrom(ownDevice, sync.PushedOps)
-		if err != nil && !os.IsNotExist(err) {
-			return 0, 0, err
+	lazyEverywhere := func(rel string, size int64) bool {
+		for _, p := range policies {
+			if !p.Applies(rel, size) {
+				return false
+			}
 		}
-		for _, op := range ops {
-			unpushed[op.Path] = true
-		}
+		return rel != ".bdriveignore"
 	}
 	candidates := map[string]bool{}
 	for rel, fs := range fold.Target {
-		if fs.Blob == "" || keep[fs.Blob] || unpushed[rel] || rel == ".bdriveignore" {
-			continue
-		}
-		lazyEverywhere := true
-		for _, p := range policies {
-			if !p.Applies(rel, fs.Size) {
-				lazyEverywhere = false
-				break
-			}
-		}
-		if lazyEverywhere {
+		if fs.Blob != "" && !never[fs.Blob] && lazyEverywhere(rel, fs.Size) {
 			candidates[fs.Blob] = true
 		}
 	}
-	// A blob shared with a path that is NOT lazy (same bytes at a small or
-	// pinned path) or with an unpushed edit must stay.
 	for rel, fs := range fold.Target {
-		if !candidates[fs.Blob] {
-			continue
-		}
-		if unpushed[rel] {
-			delete(candidates, fs.Blob)
-			continue
-		}
-		for _, p := range policies {
-			if !p.Applies(rel, fs.Size) {
-				delete(candidates, fs.Blob)
-				break
-			}
+		if candidates[fs.Blob] && !lazyEverywhere(rel, fs.Size) {
+			delete(candidates, fs.Blob) // same bytes at a small or pinned path
 		}
 	}
 	return st.EvictLazyBlobs(candidates, capBytes, minAge, dryRun)

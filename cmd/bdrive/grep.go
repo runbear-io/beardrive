@@ -52,9 +52,11 @@ the files this project actually syncs are searched: a .bdriveignore rule or a
 narrowed ` + "`bdrive scope`" + ` excludes a file from search exactly as it excludes it
 from sync, and binary files are skipped.
 
-It searches the real files on disk, not the hub — a pure read with no daemon,
-no lock, and no network, so it works offline and never blocks on a sync in
-progress. Exit status is 0 when something matched and 1 when nothing did.`,
+It searches the real files on disk — a pure read with no daemon and no lock,
+so it never blocks on a sync in progress. With lazy mode on (bdrive lazy), the
+files kept on the hub are searched too: from the local cache when this device
+holds them, otherwise by the hub, with a note on stderr saying so. Exit
+status is 0 when something matched and 1 when nothing did.`,
 		Example: `  bdrive grep 'retention.*fold'   # regexp over the whole project
   bdrive grep -i -l TODO          # case-insensitive, paths only
   bdrive grep -F 'a[b]c' docs     # literal string, inside ./docs`,
@@ -176,6 +178,8 @@ func runGrep(cmd *cobra.Command, pattern string, folderArg []string, ignoreCase,
 			for _, n := range notes {
 				fmt.Fprintln(cmd.ErrOrStderr(), "note:", n)
 			}
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "note: files lazy mode keeps on the hub were not searched: %v\n", err)
 		}
 	}
 	if lines == 0 {
@@ -289,7 +293,7 @@ func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr strin
 	if !ok || v.sess.Backend == nil {
 		return append(notes, fmt.Sprintf("%s kept on the hub were not searched (hub unreachable)", plural(len(remoteOnly), "file"))), false
 	}
-	var binary, unreadable int
+	var binary, unreadable, missing int
 	searched := 0
 	for len(remoteOnly) > 0 {
 		page := remoteOnly[:min(len(remoteOnly), hubGrepPage)]
@@ -302,6 +306,7 @@ func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr strin
 			break
 		}
 		searched += resp.Scanned
+		missing += len(resp.Missing)
 		binary += len(resp.Binary)
 		unreadable += len(resp.Unreadable)
 		if filesOnly {
@@ -326,8 +331,8 @@ func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr strin
 		remoteOnly = remoteOnly[resp.Scanned:]
 	}
 	notes = append(notes, fmt.Sprintf("searched %s on the hub (kept there by lazy mode)", plural(searched, "file")))
-	if binary > 0 || unreadable > 0 {
-		notes = append(notes, fmt.Sprintf("skipped on the hub: %d binary, %d unreadable", binary, unreadable))
+	if binary > 0 || unreadable > 0 || missing > 0 {
+		notes = append(notes, fmt.Sprintf("skipped on the hub: %d binary, %d unreadable, %d no longer there or not visible to you", binary, unreadable, missing))
 	}
 	return notes, cut
 }
