@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"regexp"
@@ -249,30 +250,126 @@ func (c *manifestCounter) Read(p []byte) (int, error) {
 // grown since it was sized — with its sha256 computed as the scan reads, and
 // verify drains the remainder (still within budget) and reports whether the
 // bytes were the content the sha names; the caller keeps the file's results
-// only then. Content that exists only as chunks goes through OpenBlob, whose
-// reassembly is hash-verified and capped at maxReassembleBytes.
+// only then. Content that exists only as chunks is reassembled the same way
+// (openChunks), never through OpenBlob.
 func openForGrep(ctx context.Context, v *volume, p string, fi FileInfo, budget int64) (io.ReadCloser, func() bool, error) {
 	rs, isRemote := v.source.(*RemoteSource)
 	if !isRemote {
 		rc, err := v.source.Open(ctx, p, fi)
 		return rc, func() bool { return true }, err
 	}
-	whole, err := rs.Backend.Get(ctx, "blobs/"+fi.Blob)
-	if err != nil {
-		rc, err := rs.OpenBlob(ctx, fi.Blob)
-		return rc, func() bool { return true }, err
+	var src io.ReadCloser
+	if whole, err := rs.Backend.Get(ctx, "blobs/"+fi.Blob); err == nil {
+		src = whole
+	} else {
+		cr, err := rs.openChunks(ctx, fi.Blob, budget)
+		if err != nil {
+			return nil, nil, err
+		}
+		src = cr
 	}
 	h := sha256.New()
-	lr := &io.LimitedReader{R: whole, N: budget + 1}
+	lr := &io.LimitedReader{R: src, N: budget + 1}
 	tee := io.TeeReader(lr, h)
 	verify := func() bool {
 		if _, err := io.Copy(io.Discard, tee); err != nil || lr.N == 0 {
-			return false // unreadable, or larger than the budget
+			return false // unreadable, a chunk that failed its hash, or over budget
 		}
 		return hex.EncodeToString(h.Sum(nil)) == fi.Blob
 	}
 	return struct {
 		io.Reader
 		io.Closer
-	}{tee, whole}, verify, nil
+	}{tee, src}, verify, nil
+}
+
+// openChunks streams chunk-only content in order, for grep: the manifest is
+// read bounded and must total no more than budget, each chunk is fetched
+// only when the scan reaches it, read up to its declared length plus one,
+// and must hash to its key — a lying chunk is a read error, never content.
+// The caller's sha check over the whole stream completes the verification.
+func (r *RemoteSource) openChunks(ctx context.Context, sha string, budget int64) (io.ReadCloser, error) {
+	mrc, err := r.Backend.Get(ctx, "manifests/"+sha)
+	if err != nil {
+		return nil, err
+	}
+	var man struct {
+		Size   int64 `json:"size"`
+		Chunks []struct {
+			H string `json:"h"`
+			N int64  `json:"n"`
+		} `json:"chunks"`
+	}
+	derr := json.NewDecoder(io.LimitReader(mrc, 8<<20)).Decode(&man)
+	mrc.Close()
+	if derr != nil || man.Size < 0 || man.Size > budget || len(man.Chunks) > maxManifestChunks {
+		return nil, fmt.Errorf("manifest for %s unusable within budget", sha)
+	}
+	var total int64
+	for _, c := range man.Chunks {
+		if c.N < 0 || c.N > maxReassembleChunkBytes || !blobKeyRe.MatchString("blobs/"+c.H) {
+			return nil, fmt.Errorf("manifest for %s names an invalid chunk", sha)
+		}
+		total += c.N
+	}
+	if total != man.Size {
+		return nil, fmt.Errorf("manifest for %s has inconsistent total size", sha)
+	}
+	cs := &chunkStream{ctx: ctx, be: r.Backend}
+	for _, c := range man.Chunks {
+		cs.keys = append(cs.keys, c.H)
+		cs.sizes = append(cs.sizes, c.N)
+	}
+	return cs, nil
+}
+
+type chunkStream struct {
+	ctx   context.Context
+	be    remote.Backend
+	keys  []string
+	sizes []int64
+	cur   io.ReadCloser
+	lr    *io.LimitedReader
+	h     hash.Hash
+	want  string
+	n     int64
+}
+
+func (c *chunkStream) Read(p []byte) (int, error) {
+	for {
+		if c.cur == nil {
+			if len(c.keys) == 0 {
+				return 0, io.EOF
+			}
+			rc, err := c.be.Get(c.ctx, "chunks/"+c.keys[0])
+			if err != nil {
+				return 0, err
+			}
+			c.cur, c.want, c.n, c.h = rc, c.keys[0], c.sizes[0], sha256.New()
+			c.lr = &io.LimitedReader{R: rc, N: c.n + 1}
+			c.keys, c.sizes = c.keys[1:], c.sizes[1:]
+		}
+		n, err := c.lr.Read(p)
+		c.h.Write(p[:n])
+		if err == io.EOF {
+			read := c.n + 1 - c.lr.N
+			c.cur.Close()
+			c.cur = nil
+			if read != c.n || hex.EncodeToString(c.h.Sum(nil)) != c.want {
+				return n, fmt.Errorf("chunk %s does not hash to its key", c.want)
+			}
+			if n > 0 {
+				return n, nil
+			}
+			continue
+		}
+		return n, err
+	}
+}
+
+func (c *chunkStream) Close() error {
+	if c.cur != nil {
+		return c.cur.Close()
+	}
+	return nil
 }

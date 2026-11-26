@@ -170,3 +170,45 @@ func TestOpenForGrepVerifiesWithinBudget(t *testing.T) {
 		t.Fatal("bytes that are not the sha's content must be rejected")
 	}
 }
+
+// Chunk-only content is reassembled by the grep itself, bounded and
+// verified chunk by chunk — never through OpenBlob (bot review P1).
+func TestOpenForGrepReassemblesChunksWithinBudget(t *testing.T) {
+	ctx := context.Background()
+	be, _ := remote.Open(ctx, "file://"+t.TempDir())
+	v := &volume{source: &RemoteSource{Backend: be}}
+	parts := []string{"first part with needle\n", "second part\n"}
+	hexOf := func(s string) string { x := sha256.Sum256([]byte(s)); return hex.EncodeToString(x[:]) }
+	whole := parts[0] + parts[1]
+	sha := hexOf(whole)
+	man := `{"size":` + fmt.Sprint(len(whole)) + `,"chunks":[`
+	for i, p := range parts {
+		be.Put(ctx, "chunks/"+hexOf(p), strings.NewReader(p), int64(len(p)))
+		if i > 0 {
+			man += ","
+		}
+		man += `{"h":"` + hexOf(p) + `","n":` + fmt.Sprint(len(p)) + `}`
+	}
+	man += `]}`
+	be.Put(ctx, "manifests/"+sha, strings.NewReader(man), int64(len(man)))
+	read := func(budget int64) (string, bool) {
+		rc, verify, err := openForGrep(ctx, v, "f", FileInfo{Blob: sha}, budget)
+		if err != nil {
+			return "", false
+		}
+		defer rc.Close()
+		b, _ := io.ReadAll(rc)
+		return string(b), verify()
+	}
+	if got, ok := read(1 << 20); !ok || got != whole {
+		t.Fatalf("reassembly: %q ok=%v", got, ok)
+	}
+	if _, ok := read(10); ok {
+		t.Fatal("a manifest over the budget must not be reassembled")
+	}
+	// A chunk whose bytes are not its key's content is refused.
+	be.Put(ctx, "chunks/"+hexOf(parts[1]), strings.NewReader("tampered!!!\n"), 12)
+	if _, ok := read(1 << 20); ok {
+		t.Fatal("a tampered chunk must fail verification")
+	}
+}
