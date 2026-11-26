@@ -31,9 +31,10 @@ import (
 // Index is a read-only view of a mount: every path the project holds, as
 // this device's journals fold it, after this mount's ignore rules.
 type Index struct {
-	Files map[string]journal.FileState
-	Lazy  config.Lazy
-	cache map[string]store.CachedFile
+	Files  map[string]journal.FileState
+	Lazy   config.Lazy
+	cache  map[string]store.CachedFile
+	filter *Filter
 }
 
 // LoadIndex folds the local journals into the project's current file list.
@@ -51,6 +52,9 @@ func (s *Session) LoadIndex() (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
+	if st, err := s.Store.LoadSync(); err == nil {
+		filter.AcceptRules(st.IgnoreAccepted)
+	}
 	cache, err := s.Store.LoadCacheReadOnly(s.mountID())
 	if err != nil {
 		cache = nil
@@ -62,7 +66,7 @@ func (s *Session) LoadIndex() (*Index, error) {
 		}
 		files[rel] = fs
 	}
-	return &Index{Files: files, Lazy: proj.Lazy, cache: cache}, nil
+	return &Index{Files: files, Lazy: proj.Lazy, cache: cache, filter: filter}, nil
 }
 
 // Materialized reports whether this mount wrote rel to disk (its state cache
@@ -129,11 +133,19 @@ func (s *Session) Open(ctx context.Context, ix *Index, rel string) (io.ReadClose
 	if !journal.SafePath(rel) || neverSync(rel) {
 		return nil, "", fmt.Errorf("%s: not a path in this project", rel)
 	}
+	// Only what this project syncs is readable here: never a file the
+	// ignore rules or scope exclude (a local .env), never one inside a nested
+	// project (its own project's business). A project file not journaled yet
+	// is still readable — it is on its way up.
+	want, indexed := ix.Files[rel]
+	if ix.filter != nil && (ix.filter.Skip(rel) || ix.filter.underMountOnDisk(rel) || (!indexed && ix.filter.SkipUp(rel))) {
+		return nil, "", fmt.Errorf("%s: not a file this project syncs", rel)
+	}
 	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
 	if f, _, err := store.OpenRegularUnderRoot(s.Folder, abs); err == nil {
 		return f, FromDisk, nil
 	}
-	want, ok := ix.Files[rel]
+	ok := indexed
 	if !ok {
 		return nil, "", fmt.Errorf("%s: no such file", rel)
 	}

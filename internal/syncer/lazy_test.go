@@ -286,3 +286,39 @@ func TestLazy_ReadOnlyStaleFileIsReverted(t *testing.T) {
 		t.Fatalf("deletes: %v", d)
 	}
 }
+
+// Open serves only what the project syncs: never an excluded local file or a
+// file inside a nested project (bot review P1).
+func TestLazy_OpenRefusesExcludedAndNestedFiles(t *testing.T) {
+	a := newDevice(t, "deva", nil)
+	setLazy(t, a, true)
+	write(t, a.Folder, IgnoreFile, ".env\n")
+	write(t, a.Folder, ".env", "SECRET=1")
+	write(t, a.Folder, "notes.md", "ok")
+	write(t, a.Folder, "inner/notes.md", "other project")
+	if _, err := config.SaveProject(filepath.Join(a.Folder, "inner"), config.Project{}); err != nil {
+		t.Fatal(err)
+	}
+	write(t, a.Folder, "fresh.md", "not journaled yet")
+	cycle(t, a)
+	write(t, a.Folder, "fresh2.md", "not journaled yet")
+	ix, err := a.LoadIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, rel := range []string{".env", "inner/notes.md"} {
+		if rc, _, err := a.Open(ctx, ix, rel); err == nil {
+			rc.Close()
+			t.Errorf("%s was readable", rel)
+		}
+	}
+	for _, rel := range []string{"notes.md", "fresh2.md"} {
+		rc, _, err := a.Open(ctx, ix, rel)
+		if err != nil {
+			t.Errorf("%s: %v", rel, err)
+			continue
+		}
+		rc.Close()
+	}
+}
