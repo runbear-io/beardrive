@@ -315,6 +315,11 @@ func (r *RemoteSource) openChunks(ctx context.Context, sha string, budget int64)
 	if total != man.Size {
 		return nil, fmt.Errorf("manifest for %s has inconsistent total size", sha)
 	}
+	// The manifest actually opened is costed like the one that was sized:
+	// bytes plus a floor per chunk request, all within the budget.
+	if total+int64(len(man.Chunks))*grepChunkFloor > budget {
+		return nil, fmt.Errorf("manifest for %s costs more than the page allows", sha)
+	}
 	cs := &chunkStream{ctx: ctx, be: r.Backend}
 	for _, c := range man.Chunks {
 		cs.keys = append(cs.keys, c.H)

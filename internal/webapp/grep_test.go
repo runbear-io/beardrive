@@ -203,6 +203,10 @@ func TestOpenForGrepReassemblesChunksWithinBudget(t *testing.T) {
 	if got, ok := read(1 << 20); !ok || got != whole {
 		t.Fatalf("reassembly: %q ok=%v", got, ok)
 	}
+	// Bytes fit but the chunk requests do not: refused before any chunk fetch.
+	if _, ok := read(int64(len(whole)) + grepChunkFloor); ok {
+		t.Fatal("chunk request cost must count against the budget")
+	}
 	if _, ok := read(10); ok {
 		t.Fatal("a manifest over the budget must not be reassembled")
 	}
