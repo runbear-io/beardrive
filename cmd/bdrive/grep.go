@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/spf13/cobra"
 
@@ -251,16 +252,29 @@ func grepReader(f io.Reader, re *regexp.Regexp, filesOnly bool, maxHits int) (hi
 	if clamped {
 		maxHits = maxHitsPerFile
 	}
+	grepEach(f, re, filesOnly, func(h hit) bool {
+		hits = append(hits, h)
+		if len(hits) >= maxHits {
+			more = clamped
+			return false
+		}
+		return true
+	})
+	return hits, more
+}
+
+// grepEach calls each for every matching line, clipped to maxHitText, until
+// it returns false. Binary files yield nothing. Holds one line at a time.
+func grepEach(f io.Reader, re *regexp.Regexp, filesOnly bool, each func(hit) bool) {
 	head := make([]byte, binarySniff)
 	n, err := f.Read(head)
 	if err != nil && err != io.EOF {
-		return nil, false
+		return
 	}
 	head = head[:n]
 	if bytes.IndexByte(head, 0) >= 0 {
-		return nil, false // binary
+		return // binary
 	}
-
 	sc := bufio.NewScanner(io.MultiReader(bytes.NewReader(head), f))
 	sc.Buffer(make([]byte, 0, 64<<10), maxLineScan)
 	for lineno := 1; sc.Scan(); lineno++ {
@@ -271,15 +285,11 @@ func grepReader(f io.Reader, re *regexp.Regexp, filesOnly bool, maxHits int) (hi
 		if len(text) > maxHitText {
 			text = text[:maxHitText]
 		}
-		hits = append(hits, hit{line: lineno, text: strings.ToValidUTF8(string(text), "")})
-		if filesOnly {
-			break
-		}
-		if len(hits) >= maxHits {
-			return hits, clamped
+		if !each(hit{line: lineno, text: strings.ToValidUTF8(string(text), "")}) || filesOnly {
+			return
 		}
 	}
-	return hits, false // sc.Err() ignored: an over-long line ends this file, not the run
+	// sc.Err() ignored: an over-long line ends this file, not the run
 }
 
 // maxHitText bounds one kept line.
@@ -392,13 +402,19 @@ func lazyGrep(ctx context.Context, v *projectView, re *regexp.Regexp, expr strin
 // per-file default), so a batch holds at most batch × maxHits lines.
 func grepLocal(folder string, paths []string, re *regexp.Regexp, filesOnly bool, maxHits int, fn func(rel string, hits []hit, more bool) bool) {
 	workers := runtime.NumCPU()
-	// Small batches: a batch's hits are what is held at once, so this keeps
-	// it to a few workers' worth of files (each ≤ maxHits × maxHitText).
 	batch := 4 * workers
 	for start := 0; start < len(paths); start += batch {
 		chunk := paths[start:min(len(paths), start+batch)]
 		out := make([][]hit, len(chunk))
 		more := make([]bool, len(chunk))
+		partial := make([]bool, len(chunk))
+		// One byte budget for everything the batch holds, whatever the core
+		// count or the caller's limit. A file that would overrun it is
+		// dropped from the batch and searched again below, in order,
+		// streaming each hit straight to fn — so nothing is skipped and the
+		// held memory never exceeds the budget.
+		var budget atomic.Int64
+		budget.Store(grepBatchBytes)
 		var wg sync.WaitGroup
 		next := make(chan int)
 		for w := 0; w < workers; w++ {
@@ -406,7 +422,7 @@ func grepLocal(folder string, paths []string, re *regexp.Regexp, filesOnly bool,
 			go func() {
 				defer wg.Done()
 				for i := range next {
-					out[i], more[i] = grepFile(folder, filepath.Join(folder, filepath.FromSlash(chunk[i])), re, filesOnly, maxHits)
+					out[i], more[i], partial[i] = grepFileBudget(folder, chunk[i], re, filesOnly, maxHits, &budget)
 				}
 			}()
 		}
@@ -416,11 +432,73 @@ func grepLocal(folder string, paths []string, re *regexp.Regexp, filesOnly bool,
 		close(next)
 		wg.Wait()
 		for i, hits := range out {
+			if partial[i] {
+				if !grepStream(folder, chunk[i], re, filesOnly, fn) {
+					return
+				}
+				continue
+			}
 			if len(hits) > 0 && !fn(chunk[i], hits, more[i]) {
 				return
 			}
 		}
 	}
+}
+
+// grepBatchBytes bounds what one parallel batch holds (see grepLocal).
+var grepBatchBytes int64 = 16 << 20
+
+// grepFileBudget is grepFile charging each kept line to budget. If the
+// budget runs out it gives back what it took and reports partial: the
+// caller streams that file instead.
+func grepFileBudget(folder, rel string, re *regexp.Regexp, filesOnly bool, maxHits int, budget *atomic.Int64) (hits []hit, more, partial bool) {
+	f, _, err := store.OpenRegularUnderRoot(folder, filepath.Join(folder, filepath.FromSlash(rel)))
+	if err != nil {
+		return nil, false, false
+	}
+	defer f.Close()
+	clamped := maxHits <= 0 || maxHits > maxHitsPerFile
+	if clamped {
+		maxHits = maxHitsPerFile
+	}
+	var taken int64
+	grepEach(f, re, filesOnly, func(h hit) bool {
+		cost := int64(len(h.text)) + 64
+		if budget.Add(-cost) < 0 {
+			budget.Add(cost)
+			partial = true
+			return false
+		}
+		taken += cost
+		hits = append(hits, h)
+		if len(hits) >= maxHits {
+			more = clamped
+			return false
+		}
+		return true
+	})
+	if partial {
+		budget.Add(taken)
+		return nil, false, true
+	}
+	return hits, more, false
+}
+
+// grepStream searches one file in order, handing each hit to fn as it is
+// found. It holds one line at a time and has no per-file cap. It reports
+// whether fn wants more.
+func grepStream(folder, rel string, re *regexp.Regexp, filesOnly bool, fn func(rel string, hits []hit, more bool) bool) bool {
+	f, _, err := store.OpenRegularUnderRoot(folder, filepath.Join(folder, filepath.FromSlash(rel)))
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	keepGoing := true
+	grepEach(f, re, filesOnly, func(h hit) bool {
+		keepGoing = fn(rel, []hit{h}, false)
+		return keepGoing
+	})
+	return keepGoing
 }
 
 // capNote is what a search says about a file the per-file cap cut short.

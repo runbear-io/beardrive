@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -442,6 +443,37 @@ func TestGrepReaderCapsHitsPerFile(t *testing.T) {
 	for _, h := range hits {
 		if len(h.text) > maxHitText {
 			t.Fatalf("kept line of %d bytes", len(h.text))
+		}
+	}
+}
+
+// When a batch's byte budget runs out, the overflowing files are streamed in
+// order instead — every hit still arrives, in path order, and nothing beyond
+// the budget is held (bot review P1).
+func TestGrepLocalStreamsPastTheBatchBudget(t *testing.T) {
+	folder := t.TempDir()
+	var paths []string
+	for i := 0; i < 6; i++ {
+		rel := fmt.Sprintf("f%d.md", i)
+		os.WriteFile(filepath.Join(folder, rel), []byte(strings.Repeat(fmt.Sprintf("needle %d\n", i), 300)), 0o644)
+		paths = append(paths, rel)
+	}
+	old := grepBatchBytes
+	grepBatchBytes = 4096 // a few hundred hits at most
+	defer func() { grepBatchBytes = old }()
+	var got []string
+	grepLocal(folder, paths, regexp.MustCompile("needle"), false, 0, func(rel string, hits []hit, more bool) bool {
+		for range hits {
+			got = append(got, rel)
+		}
+		return true
+	})
+	if len(got) != 6*300 {
+		t.Fatalf("hits = %d, want %d", len(got), 6*300)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] < got[i-1] {
+			t.Fatalf("out of path order at %d: %s after %s", i, got[i], got[i-1])
 		}
 	}
 }
