@@ -150,7 +150,7 @@ func TestOpenForGrepVerifiesWithinBudget(t *testing.T) {
 	sha := hex.EncodeToString(sum[:])
 	be.Put(ctx, "blobs/"+sha, strings.NewReader(good), int64(len(good)))
 	check := func(blob string, budget int64) bool {
-		rc, verify, err := openForGrep(ctx, v, "f", FileInfo{Blob: blob}, budget)
+		rc, verify, _, err := openForGrep(ctx, v, "f", FileInfo{Blob: blob}, budget)
 		if err != nil {
 			return false
 		}
@@ -192,7 +192,7 @@ func TestOpenForGrepReassemblesChunksWithinBudget(t *testing.T) {
 	man += `]}`
 	be.Put(ctx, "manifests/"+sha, strings.NewReader(man), int64(len(man)))
 	read := func(budget int64) (string, bool) {
-		rc, verify, err := openForGrep(ctx, v, "f", FileInfo{Blob: sha}, budget)
+		rc, verify, _, err := openForGrep(ctx, v, "f", FileInfo{Blob: sha}, budget)
 		if err != nil {
 			return "", false
 		}
@@ -214,5 +214,29 @@ func TestOpenForGrepReassemblesChunksWithinBudget(t *testing.T) {
 	be.Put(ctx, "chunks/"+hexOf(parts[1]), strings.NewReader("tampered!!!\n"), 12)
 	if _, ok := read(1 << 20); ok {
 		t.Fatal("a tampered chunk must fail verification")
+	}
+}
+
+// What an open actually cost is reported, so the page is charged for the
+// object it really read, not the estimate (bot review P1).
+func TestOpenForGrepReportsActualCost(t *testing.T) {
+	ctx := context.Background()
+	be, _ := remote.Open(ctx, "file://"+t.TempDir())
+	v := &volume{source: &RemoteSource{Backend: be}}
+	body := strings.Repeat("y", 3000)
+	x := sha256.Sum256([]byte(body))
+	sha := hex.EncodeToString(x[:])
+	be.Put(ctx, "blobs/"+sha, strings.NewReader(body), int64(len(body)))
+	rc, verify, spent, err := openForGrep(ctx, v, "f", FileInfo{Blob: sha, Size: 1}, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, io.LimitReader(rc, 10))
+	if !verify() {
+		t.Fatal("verify")
+	}
+	rc.Close()
+	if got := spent(); got != 3000 {
+		t.Fatalf("spent = %d, want the 3000 bytes really read (declared 1)", got)
 	}
 }

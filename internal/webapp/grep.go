@@ -102,8 +102,9 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 		if i == 0 {
 			budget = grepPageBytes
 		}
-		bytesRead += min(cost, budget)
-		rc, verify, err := openForGrep(r.Context(), v, p, fi, budget)
+		charged := min(cost, budget)
+		bytesRead += charged
+		rc, verify, spent, err := openForGrep(r.Context(), v, p, fi, budget)
 		if err != nil {
 			out.Unreadable = append(out.Unreadable, p)
 			continue
@@ -134,6 +135,11 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 		})
 		ok = verify()
 		rc.Close()
+		// Settle against what the open ACTUALLY cost (bytes read plus chunk
+		// requests made), in case the object differed from what was sized.
+		if actual := spent(); actual > charged {
+			bytesRead += actual - charged
+		}
 		if !ok {
 			out.Unreadable = append(out.Unreadable, p)
 			continue
@@ -252,21 +258,22 @@ func (c *manifestCounter) Read(p []byte) (int, error) {
 // bytes were the content the sha names; the caller keeps the file's results
 // only then. Content that exists only as chunks is reassembled the same way
 // (openChunks), never through OpenBlob.
-func openForGrep(ctx context.Context, v *volume, p string, fi FileInfo, budget int64) (io.ReadCloser, func() bool, error) {
+func openForGrep(ctx context.Context, v *volume, p string, fi FileInfo, budget int64) (io.ReadCloser, func() bool, func() int64, error) {
 	rs, isRemote := v.source.(*RemoteSource)
 	if !isRemote {
 		rc, err := v.source.Open(ctx, p, fi)
-		return rc, func() bool { return true }, err
+		return rc, func() bool { return true }, func() int64 { return fi.Size }, err
 	}
 	var src io.ReadCloser
+	var requests int64
 	if whole, err := rs.Backend.Get(ctx, "blobs/"+fi.Blob); err == nil {
 		src = whole
 	} else {
 		cr, err := rs.openChunks(ctx, fi.Blob, budget)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		src = cr
+		src, requests = cr, int64(len(cr.(*chunkStream).keys))
 	}
 	h := sha256.New()
 	lr := &io.LimitedReader{R: src, N: budget + 1}
@@ -277,10 +284,11 @@ func openForGrep(ctx context.Context, v *volume, p string, fi FileInfo, budget i
 		}
 		return hex.EncodeToString(h.Sum(nil)) == fi.Blob
 	}
+	spent := func() int64 { return (budget + 1 - lr.N) + requests*grepChunkFloor }
 	return struct {
 		io.Reader
 		io.Closer
-	}{tee, src}, verify, nil
+	}{tee, src}, verify, spent, nil
 }
 
 // openChunks streams chunk-only content in order, for grep: the manifest is
