@@ -77,6 +77,15 @@ func TestHubGrepBoundsEachRead(t *testing.T) {
 	if out.Total != 0 || len(out.Unreadable) != 1 || out.Unreadable[0] != "big.txt" {
 		t.Fatalf("a partially read file must be reported: %+v", out)
 	}
+	// A file that does not fit what is left of a page starts the next page.
+	grepPageBytes = int64(len(big)) + 100
+	doAs(t, h, "PUT", "/api/p/"+p.ID+"/upload/content?path=big2.txt", []byte(big), c["alice"])
+	rec = doAs(t, h, "POST", "/api/p/"+p.ID+"/grep", remote.GrepRequest{Pattern: "needle", Paths: []string{"big.txt", "big2.txt"}}, c["bob"])
+	out = remote.GrepResponse{}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.Scanned != 1 || out.Total != 1 || len(out.Unreadable) != 0 {
+		t.Fatalf("second file should wait for the next page: %+v", out)
+	}
 	grepPageBytes = old
 	many := strings.Repeat("hit\n", 5000)
 	doAs(t, h, "PUT", "/api/p/"+p.ID+"/upload/content?path=many.txt", []byte(many), c["alice"])

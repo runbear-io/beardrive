@@ -64,10 +64,22 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 		if i > 0 && (i >= maxGrepFiles || bytesRead >= grepPageBytes || len(out.Matches) >= maxMatches) {
 			break
 		}
-		out.Scanned = i + 1
 		fi, ok := files[p]
+		// Sized BEFORE opening: on a hub, opening a blob can hash or
+		// reassemble the whole object, so the budget must decide whether it
+		// is opened at all, not only how much of it is read. A file that
+		// does not fit what is left of this page starts the next one; a file
+		// larger than a whole page is reported as not searched, unopened.
+		if ok && i > 0 && fi.Size > grepPageBytes-bytesRead && fi.Size <= grepPageBytes {
+			break
+		}
+		out.Scanned = i + 1
 		if !ok {
 			out.Missing = append(out.Missing, p)
+			continue
+		}
+		if fi.Size > grepPageBytes {
+			out.Unreadable = append(out.Unreadable, p)
 			continue
 		}
 		rc, err := v.source.Open(r.Context(), p, fi)
