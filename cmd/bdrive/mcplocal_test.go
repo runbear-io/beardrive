@@ -97,3 +97,49 @@ func TestSwapFilesExchanges(t *testing.T) {
 		t.Fatalf("swap: a=%q b=%q", ga, gb)
 	}
 }
+
+// A third save landing between the swap and the swap back is kept on disk,
+// never deleted with the staging file (bot review P1).
+func TestLocalMCPKeepsASaveDuringSwapBack(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	abs := filepath.Join(m.v.root, "notes.md")
+	os.WriteFile(abs, []byte("v1\n"), 0o644)
+	out, _ := m.read(ctx, lRead{Path: "notes.md"})
+	sha := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
+	mcpBeforeRename = func() { os.WriteFile(abs, []byte("second\n"), 0o644) }
+	mcpBeforeSwapBack = func() { os.WriteFile(abs, []byte("third\n"), 0o644) }
+	defer func() { mcpBeforeRename, mcpBeforeSwapBack = nil, nil }()
+	_, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha})
+	if err == nil {
+		t.Fatal("write must be refused")
+	}
+	if b, _ := os.ReadFile(abs); string(b) != "second\n" {
+		t.Fatalf("file = %q, want the second writer's version back", b)
+	}
+	matches, _ := filepath.Glob(abs + ".bdrive-mcp-displaced-*")
+	if len(matches) != 1 {
+		t.Fatalf("third save not kept: %v (%v)", matches, err)
+	}
+	if b, _ := os.ReadFile(matches[0]); string(b) != "third\n" {
+		t.Fatalf("kept file = %q", b)
+	}
+}
+
+// Without an atomic exchange an existing file is never overwritten.
+func TestLocalMCPRefusesOverwriteWithoutSwap(t *testing.T) {
+	m := testLocalMCP(t)
+	abs := filepath.Join(m.v.root, "notes.md")
+	os.WriteFile(abs, []byte("v1\n"), 0o644)
+	swapFn = func(a, b string) error { return errNoSwap }
+	defer func() { swapFn = swapFiles }()
+	if _, err := m.write(context.Background(), lWrite{Path: "notes.md", Content: "x"}); err == nil || !strings.Contains(err.Error(), "atomically") {
+		t.Fatalf("got %v", err)
+	}
+	if b, _ := os.ReadFile(abs); string(b) != "v1\n" {
+		t.Fatalf("file changed: %q", b)
+	}
+	if _, err := m.write(context.Background(), lWrite{Path: "fresh.md", Content: "x"}); err != nil {
+		t.Fatalf("creating a new file needs no swap: %v", err)
+	}
+}

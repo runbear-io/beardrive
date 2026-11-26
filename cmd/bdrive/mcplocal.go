@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
@@ -397,17 +398,26 @@ func (m *localMCP) nowSHA(rel string) (string, error) {
 // swapIn.
 var errNoSwap = errors.New("atomic swap not supported here")
 
-// swapIn moves the staged file tmp to abs only if abs still holds base.
+// Test seams around swapIn's two exchanges.
+var (
+	mcpBeforeSwapBack func()
+	swapFn            = swapFiles
+)
+
+// swapIn moves the staged file tmp (whose sha is ours) to abs only if abs
+// still holds base.
 //
 // A check followed by rename(2) always leaves a window in which another
 // writer's save is overwritten. So the check comes AFTER the move: the file
 // is atomically SWAPPED in (renamex_np / renameat2), which leaves whatever
 // abs held at that instant at tmp, and that displaced file is what gets
 // checked. If it is not base, someone else wrote in between: swap back and
-// refuse. Both versions are on disk at every step, so nothing is lost even
-// if the swap back itself races. A file that is not on disk is created with
-// link(2), which fails if anything appeared at abs meanwhile.
-func (m *localMCP) swapIn(rel, abs, tmp, base string) error {
+// refuse. Whatever any swap displaces is deleted only when it is content we
+// can name — base (already journaled) or our own bytes; anything else is a
+// third party's save and is kept beside the file. A file that is not on disk
+// is created with link(2), which fails if anything appeared meanwhile. A
+// filesystem with no atomic exchange gets no overwrite at all.
+func (m *localMCP) swapIn(rel, abs, tmp, base, ours string) error {
 	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
 		now, err := m.nowSHA(rel)
 		if err != nil {
@@ -424,31 +434,37 @@ func (m *localMCP) swapIn(rel, abs, tmp, base string) error {
 		}
 		return nil
 	}
-	switch err := swapFiles(tmp, abs); {
+	switch err := swapFn(tmp, abs); {
 	case errors.Is(err, errNoSwap):
-		// A filesystem without an atomic exchange: check, then rename. The
-		// one case left with the window described above.
-		now, err := m.nowSHA(rel)
-		if err != nil {
-			return err
-		}
-		if now != base {
-			return changedErr(rel, now)
-		}
-		return os.Rename(tmp, abs)
+		return fmt.Errorf("%s: this filesystem cannot replace a file atomically, so overwriting it here could lose a concurrent edit; change it with your own file tools", rel)
 	case err != nil:
 		return err
 	}
-	prev, err := fileSHA(tmp)
-	if err == nil && prev == base {
-		return nil
+	prev, _ := fileSHA(tmp)
+	if prev == base {
+		return nil // tmp now holds base; put's cleanup removes it
 	}
-	if serr := swapFiles(tmp, abs); serr != nil {
-		kept := abs + ".bdrive-mcp-displaced"
-		_ = os.Rename(tmp, kept)
-		return fmt.Errorf("%s changed while you were changing it, and putting the other version back failed (%v); it is at %s", rel, serr, kept)
+	if mcpBeforeSwapBack != nil {
+		mcpBeforeSwapBack()
+	}
+	if err := swapFn(tmp, abs); err != nil {
+		return fmt.Errorf("%s changed while you were changing it, and putting the other version back failed (%v); it is at %s", rel, err, keepDisplaced(abs, tmp))
+	}
+	if back, _ := fileSHA(tmp); back != ours {
+		// abs was saved AGAIN between the two swaps: that save is now at tmp.
+		return fmt.Errorf("%s is being changed by something else right now; nothing was written, and a version saved during the check is at %s", rel, keepDisplaced(abs, tmp))
 	}
 	return changedErr(rel, prev)
+}
+
+// keepDisplaced moves a file a swap displaced to a visible name beside abs,
+// so put's cleanup cannot delete it.
+func keepDisplaced(abs, tmp string) string {
+	kept := fmt.Sprintf("%s.bdrive-mcp-displaced-%d", abs, time.Now().UnixNano())
+	if os.Rename(tmp, kept) != nil {
+		return tmp
+	}
+	return kept
 }
 
 func changedErr(rel, now string) error {
@@ -512,7 +528,8 @@ func (m *localMCP) put(rel string, content []byte, base string) (string, error) 
 	if mcpBeforeRename != nil {
 		mcpBeforeRename()
 	}
-	if err := m.swapIn(rel, abs, tmp.Name(), base); err != nil {
+	sum := sha256.Sum256(content)
+	if err := m.swapIn(rel, abs, tmp.Name(), base, hex.EncodeToString(sum[:])); err != nil {
 		return "", err
 	}
 	daemon.WakeSupervisor()
