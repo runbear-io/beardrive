@@ -90,20 +90,21 @@ func (s *Server) handleGrep(v *volume, w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		fi.Size = size
-		rc, err := v.source.Open(r.Context(), p, fi)
-		if err != nil {
-			out.Unreadable = append(out.Unreadable, p)
-			continue
-		}
-		// The read itself is bounded by what is left of the page's budget
-		// (the whole budget for the first file), so one huge file cannot make
-		// a request read without limit. A file cut by it is reported as not
-		// fully searched, never as a clean negative.
+		// Charged BEFORE opening: an open that fails after verifying or
+		// reassembling the object cost that work too, so it spends the
+		// page's budget like a successful read.
 		budget := max(grepPageBytes-bytesRead, 0)
 		if i == 0 {
 			budget = grepPageBytes
 		}
 		bytesRead += min(fi.Size, budget)
+		rc, err := v.source.Open(r.Context(), p, fi)
+		if err != nil {
+			out.Unreadable = append(out.Unreadable, p)
+			continue
+		}
+		// The read itself is bounded by the same budget, so a file cut by it
+		// is reported as not fully searched, never as a clean negative.
 		capped := false
 		found, isBin, cut := scanBlob(io.LimitReader(rc, budget), re, 0, func(line int, text string, isMatch bool) bool {
 			if !isMatch {

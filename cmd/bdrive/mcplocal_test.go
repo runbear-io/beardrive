@@ -423,3 +423,21 @@ func TestLocalMCPRestoreRefusesAHugeVersion(t *testing.T) {
 		t.Fatalf("file changed: %q", b)
 	}
 }
+
+// read pages without splitting the whole file: numbering, paging and the
+// line count stay right on a file of many tiny lines (bot review P1).
+func TestLocalMCPReadPagesInPlace(t *testing.T) {
+	m := testLocalMCP(t)
+	os.WriteFile(filepath.Join(m.v.root, "many.md"), []byte(strings.Repeat("a\n", 100000)+"last"), 0o644)
+	out, err := m.read(context.Background(), lRead{Path: "many.md", Offset: 99999, Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "(100001 lines") || !strings.Contains(out, " 99999\ta\n") || !strings.Contains(out, "100001\tlast\n") {
+		t.Fatalf("read:\n%s", out)
+	}
+	out, _ = m.read(context.Background(), lRead{Path: "many.md", Limit: 2})
+	if !strings.Contains(out, "     2\ta\n") || !strings.Contains(out, "[99999 more lines — read with offset:3]") {
+		t.Fatalf("read head:\n%s", out)
+	}
+}

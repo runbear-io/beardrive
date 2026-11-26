@@ -12,6 +12,7 @@ package main
 // them; nothing here writes a journal or the state cache.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -214,27 +215,40 @@ func (m *localMCP) read(ctx context.Context, in lRead) (string, error) {
 	if in.Raw {
 		return string(b), nil
 	}
-	lines := strings.SplitAfter(string(b), "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+	// Lines are walked in place, never split into a slice: a file of many
+	// short lines would otherwise cost a string header per line.
+	total := bytes.Count(b, []byte("\n"))
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		total++
 	}
 	start := max(in.Offset, 1)
 	limit := in.Limit
 	if limit <= 0 {
 		limit = localReadLines
 	}
+	end := min(total, start-1+limit)
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s  sha:%s  (%d lines, from %s)\n", rel, sha, len(lines), src)
-	end := min(len(lines), start-1+limit)
-	for i := start - 1; i < end; i++ {
-		l := strings.TrimRight(lines[i], "\r\n")
-		if len(l) > localLineShown {
-			l = l[:localLineShown] + " [line cut]"
+	fmt.Fprintf(&sb, "%s  sha:%s  (%d lines, from %s)\n", rel, sha, total, src)
+	rest := b
+	for n := 1; n <= end && len(rest) > 0; n++ {
+		line := rest
+		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+			line, rest = rest[:i], rest[i+1:]
+		} else {
+			rest = nil
 		}
-		fmt.Fprintf(&sb, "%6d\t%s\n", i+1, l)
+		if n < start {
+			continue
+		}
+		line = bytes.TrimRight(line, "\r")
+		cut := ""
+		if len(line) > localLineShown {
+			line, cut = line[:localLineShown], " [line cut]"
+		}
+		fmt.Fprintf(&sb, "%6d\t%s%s\n", n, line, cut)
 	}
-	if end < len(lines) {
-		fmt.Fprintf(&sb, "[%d more lines — read with offset:%d]\n", len(lines)-end, end+1)
+	if end < total {
+		fmt.Fprintf(&sb, "[%d more lines — read with offset:%d]\n", total-end, end+1)
 	}
 	return sb.String(), nil
 }
