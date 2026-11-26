@@ -327,7 +327,8 @@ func (m *localMCP) grep(ctx context.Context, in lGrep) (string, error) {
 		truncated bool
 	)
 	emit := func(rel string, h hit) bool {
-		if lines >= limit {
+		// The reply is bounded in bytes too, whatever limit was asked.
+		if lines >= limit || sb.Len() > localReadOut {
 			truncated = true
 			return false
 		}
@@ -388,7 +389,7 @@ func (m *localMCP) grep(ctx context.Context, in lGrep) (string, error) {
 		fmt.Fprintf(&out, "[%s]\n", n)
 	}
 	if truncated {
-		fmt.Fprintf(&out, "[results cut at %d — raise limit or narrow path/glob]\n", limit)
+		fmt.Fprintf(&out, "[results cut after %d line(s) — narrow the pattern, path or glob]\n", lines)
 	}
 	return out.String(), nil
 }

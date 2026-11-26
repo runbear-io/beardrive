@@ -441,3 +441,16 @@ func TestLocalMCPReadPagesInPlace(t *testing.T) {
 		t.Fatalf("read head:\n%s", out)
 	}
 }
+
+// A grep reply is bounded in bytes whatever limit is asked, and says it was cut.
+func TestLocalMCPGrepOutputIsBounded(t *testing.T) {
+	m := testLocalMCP(t)
+	os.WriteFile(filepath.Join(m.v.root, "many.md"), []byte(strings.Repeat("needle "+strings.Repeat("z", 300)+"\n", 20000)), 0o644)
+	out, err := m.grep(context.Background(), lGrep{Pattern: "needle", Limit: 1 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > localReadOut+64<<10 || !strings.Contains(out, "results cut") {
+		t.Fatalf("reply of %d bytes", len(out))
+	}
+}
