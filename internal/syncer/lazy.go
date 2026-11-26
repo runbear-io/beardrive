@@ -169,7 +169,7 @@ func (s *Session) Writable(rel string) error {
 		return fmt.Errorf("load %s: %w", IgnoreFile, err)
 	}
 	st, err := s.Store.LoadSync()
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	filter.AcceptRules(st.IgnoreAccepted)

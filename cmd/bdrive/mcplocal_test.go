@@ -304,3 +304,54 @@ func TestLocalMCPRestoreRefusesARacingWrite(t *testing.T) {
 		t.Fatalf("restore = %q", b)
 	}
 }
+
+// When the swap back fails, the refusal names where the other version is
+// kept (bot review P1: the note must reach error replies too).
+func TestLocalMCPSwapBackFailureReportsKeptPath(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	abs := filepath.Join(m.v.root, "notes.md")
+	os.WriteFile(abs, []byte("v1\n"), 0o644)
+	out, _ := m.read(ctx, lRead{Path: "notes.md"})
+	sha := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
+	calls := 0
+	swapFn = func(a, b string) error {
+		calls++
+		if calls == 2 {
+			return os.ErrPermission
+		}
+		return swapFiles(a, b)
+	}
+	mcpBeforeRename = func() { os.WriteFile(abs, []byte("second\n"), 0o644) }
+	defer func() { swapFn, mcpBeforeRename = swapFiles, nil }()
+	_, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha})
+	if err == nil {
+		t.Fatal("must be refused")
+	}
+	matches, _ := filepath.Glob(abs + ".bdrive-mcp-displaced-*")
+	if len(matches) != 1 || !strings.Contains(err.Error(), filepath.Base(matches[0])) {
+		t.Fatalf("kept path not reported: %v / %v", matches, err)
+	}
+	if b, _ := os.ReadFile(matches[0]); string(b) != "second\n" {
+		t.Fatalf("kept = %q", b)
+	}
+}
+
+// restore passes put's note about a displaced version through.
+func TestLocalMCPRestoreReportsDisplacedFallback(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	abs := filepath.Join(m.v.root, "notes.md")
+	os.WriteFile(abs, []byte("v1\n"), 0o644)
+	m.v.sess.Cycle(ctx)
+	os.WriteFile(abs, []byte("v2\n"), 0o644)
+	m.v.sess.Cycle(ctx)
+	m.v.refresh()
+	os.MkdirAll(filepath.Join(m.v.root, ".bdrive"), 0o755)
+	os.WriteFile(m.displacedDir(), []byte("not a folder"), 0o644)
+	v1, _ := fileSHAOf("v1\n")
+	res, err := m.restore(ctx, lRestore{Path: "notes.md", SHA: v1})
+	if err != nil || !strings.Contains(res, "kept as") {
+		t.Fatalf("restore reply lost the note: %q %v", res, err)
+	}
+}

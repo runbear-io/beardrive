@@ -641,8 +641,8 @@ func (m *localMCP) put(rel string, content []byte, base string) (out string, err
 		if mcpBeforeCleanup != nil {
 			mcpBeforeCleanup()
 		}
-		fi, err := os.Lstat(tmp.Name())
-		if err != nil {
+		fi, lerr := os.Lstat(tmp.Name())
+		if lerr != nil {
 			return // moved aside already
 		}
 		if os.SameFile(fi, staged) {
@@ -851,10 +851,18 @@ func (m *localMCP) restore(ctx context.Context, in lRestore) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			if _, err := m.put(rel, content, base); err != nil {
+			res, err := m.put(rel, content, base)
+			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("restored %s to sha:%s; it syncs within seconds", rel, op.Blob), nil
+			// put's reply may carry a note about where a displaced version
+			// was kept; keep it.
+			_, note, _ := strings.Cut(res, "\n")
+			msg := fmt.Sprintf("restored %s to sha:%s; it syncs within seconds", rel, op.Blob)
+			if note != "" {
+				msg += "\n" + note
+			}
+			return msg, nil
 		}
 	}
 	return "", fmt.Errorf("no version of %s with sha %s (see history)", rel, in.SHA)
