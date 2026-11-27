@@ -306,7 +306,6 @@ func TestLocalMCPRestoreRefusesARacingWrite(t *testing.T) {
 	}
 }
 
-
 // restore passes put's note about a displaced version through.
 func TestLocalMCPRestoreReportsDisplacedFallback(t *testing.T) {
 	m := testLocalMCP(t)
@@ -496,11 +495,6 @@ func TestLocalMCPSwapHoldsTheVolumeLock(t *testing.T) {
 		t.Fatal("the volume lock was not held between the swap and the swap back")
 	}
 }
-
-
-
-
-
 
 // swapBackFails sets notes.md at v1 (journaled), reads its sha, and arranges
 // for a second writer to save just before our swap and for the swap back to
