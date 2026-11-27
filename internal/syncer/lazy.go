@@ -238,3 +238,6 @@ func (s *Session) Quarantine(rel, sha string, release bool) error {
 	}
 	return s.Store.SaveQuarantine(s.mountID(), q)
 }
+
+// MountKey is the key this session's per-mount state is stored under.
+func (s *Session) MountKey() string { return s.mountID() }

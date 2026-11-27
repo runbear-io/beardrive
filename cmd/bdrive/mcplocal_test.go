@@ -620,3 +620,24 @@ func TestLocalMCPRetryKeepsAnEarlierQuarantine(t *testing.T) {
 		t.Fatalf("file = %q", b)
 	}
 }
+
+// Retrying the exact refused content is refused while it is held back, so the
+// retry can never release the earlier attempt's quarantine (bot review P1).
+func TestLocalMCPSameContentRetryCannotReleaseTheQuarantine(t *testing.T) {
+	m, _, sha := swapBackFails(t)
+	ctx := context.Background()
+	if _, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha}); err == nil {
+		t.Fatal("first write must be refused")
+	}
+	mcpBeforeRename = nil
+	swapFn = func(a, b string) error { return os.ErrPermission }
+	out, _ := m.read(ctx, lRead{Path: "notes.md"})
+	cur := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
+	if _, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: cur}); err == nil || !strings.Contains(err.Error(), "held back") {
+		t.Fatalf("same-content retry: %v", err)
+	}
+	m.v.sess.Cycle(ctx)
+	if journaled(t, m, "mine\n") {
+		t.Fatal("the refused write synced after a same-content retry")
+	}
+}

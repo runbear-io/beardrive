@@ -24,6 +24,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -734,6 +735,16 @@ func (m *localMCP) put(rel string, content []byte, base string) (out string, err
 	unlock, locked := m.v.sess.Store.LockWithin(30 * time.Second)
 	if !locked {
 		return "", fmt.Errorf("%s: a sync cycle kept this project busy; nothing was written — try again", rel)
+	}
+	// The same bytes already held back at this path belong to an earlier
+	// attempt that could not be undone: this attempt must not take over —
+	// and so possibly release — that entry. Resolve the file first.
+	if q, qerr := m.v.sess.Store.LoadQuarantine(m.v.sess.MountKey()); qerr != nil || slices.Contains(q[rel], ours) {
+		unlock()
+		if qerr != nil {
+			return "", fmt.Errorf("%s: could not read the quarantine (%v); nothing was written", rel, qerr)
+		}
+		return "", fmt.Errorf("%s: an earlier attempt to write exactly this content here could not be completed and is held back from sync; edit the file by hand to resolve it first", rel)
 	}
 	if qerr := m.v.sess.Quarantine(rel, ours, false); qerr != nil {
 		unlock()
