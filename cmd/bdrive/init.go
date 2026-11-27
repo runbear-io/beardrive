@@ -127,7 +127,7 @@ func plural(n int, unit string) string {
 func initCmd() *cobra.Command {
 	var projectID, projectName, serverURL, template string
 	var only []string
-	var yes, foreground, noHooks, noAutostart bool
+	var yes, foreground, noHooks, noAutostart, lazy bool
 	c := &cobra.Command{
 		Use:   "init [folder]",
 		Short: "Start syncing a project in this folder",
@@ -243,6 +243,13 @@ the folder was renamed or moved.`,
 				// The project name came from the hub; it reaches a terminal
 				// here and on every later command (see safeField).
 				fmt.Printf("resuming %s (project %s)\n", folder, safeField(proj.Volume, 120))
+				if lazy && !proj.Lazy.Enabled {
+					proj.Lazy.Enabled = true
+					if _, err := config.SaveProject(folder, proj); err != nil {
+						return err
+					}
+					fmt.Println("  lazy mode: on (large files stay on the hub until read)")
+				}
 				// --only on an existing mount narrows it in place: the scope is
 				// just .bdriveignore rules, so re-running init is a legitimate
 				// way to set them (and is what `bdrive scope` points at).
@@ -382,6 +389,9 @@ the folder was renamed or moved.`,
 			proj := config.Project{
 				Volume: p.Name,
 				Remote: remoteURL,
+				// Set before the first sync, so the join itself downloads only
+				// what lazy mode keeps local.
+				Lazy: config.Lazy{Enabled: lazy},
 			}
 			proj, err = config.SaveProject(folder, proj)
 			if err != nil {
@@ -475,6 +485,7 @@ next steps:
 	c.Flags().BoolVarP(&foreground, "foreground", "f", false, "run the sync daemon in the foreground")
 	c.Flags().BoolVar(&noHooks, "no-hooks", false, "skip registering agent sync hooks")
 	c.Flags().BoolVar(&noAutostart, "no-autostart", false, "skip registering sync to restart at login")
+	c.Flags().BoolVar(&lazy, "lazy", false, "keep files over 64 KiB on the hub until read (see bdrive lazy)")
 	return c
 }
 

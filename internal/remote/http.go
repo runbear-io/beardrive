@@ -733,6 +733,38 @@ func (b *httpBackend) ReportReads(ctx context.Context, kind string, reads []Read
 	return nil
 }
 
+// maxGrepResponse bounds one hub grep answer: matches are line-clipped by the
+// hub and capped by MaxMatches, so this is headroom, not a limit in use.
+const maxGrepResponse = 32 << 20
+
+// Grep runs one page of a hub-side search (see GrepRequest).
+func (b *httpBackend) Grep(ctx context.Context, in GrepRequest) (GrepResponse, error) {
+	var out GrepResponse
+	body, err := json.Marshal(in)
+	if err != nil {
+		return out, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		b.base+"/api/p/"+b.project+"/grep", bytes.NewReader(body))
+	if err != nil {
+		return out, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.do(req)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return out, httpError(resp)
+	}
+	err = json.NewDecoder(io.LimitReader(resp.Body, maxGrepResponse)).Decode(&out)
+	if err == nil && (out.Scanned < 0 || out.Scanned > len(in.Paths)) {
+		err = fmt.Errorf("hub grep: scanned %d of %d paths", out.Scanned, len(in.Paths))
+	}
+	return out, err
+}
+
 // maxEventLine bounds one line of the hub's event stream. The daemon reads
 // this from a server a folder's config chose, so a stream that never sends a
 // newline must not be able to grow the process without limit. The frames are

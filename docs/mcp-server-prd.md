@@ -25,7 +25,7 @@ in its checklist is checked. Record progress and blockers in §Status.
 | Question | Answer |
 |---|---|
 | Where it runs | **Hub-hosted, `bdrive serve` mode only.** Streamable HTTP at `/mcp`. Zero install for the client. |
-| Local `bdrive mcp` (stdio) | **Out of scope.** A laptop with the CLI already has real files and hooks; a second path to the same bytes earns nothing. Revisit only if offline agent access is asked for. |
+| Local `bdrive mcp` (stdio) | **Shipped (2026-11-26, BEA-349) for on-demand files.** It was out of scope while a CLI laptop had every file on disk. Lazy mode (`bdrive lazy`) changes that: large files stay on the hub, so an agent's own Read and Grep tools cannot see them. `bdrive mcp` with no subcommand is a stdio server over one synced project. It uses the same tool names as `/mcp` (list, read, glob, grep, write, edit with sha compare-and-swap, delete, history, restore). Paths are relative to the project root. It reads from disk, then the local cache, then the hub, and it writes into the working folder. The hub-hosted `/mcp` is unchanged. |
 | Multi-project surface | **One virtual root.** Every tool takes one path; the first segment is the project id. `read("/wiki/docs/spec.md")`. `grep(pattern, path="/")` searches every connected project. |
 | Project selection | **At the OAuth consent screen**, as checkboxes. The grant records the set; the token is scoped to it. |
 | Writes | **Full write** — `write`, `edit`, `delete`, `move` — journaled under the hub's own device with `Op.User` = the OAuth'd account, exactly like a browser upload. History shows the human. |
@@ -281,6 +281,7 @@ agent's edit from a browser upload without a second identity concept.
 ## Non-goals
 
 - A local stdio server (`bdrive mcp`). Different problem, different day.
+  *(Superseded 2026-11-26: shipped for lazy mode. See the Decisions table.)*
 - MCP resources, prompts, sampling, elicitation. Tools only.
 - Binary file editing. `read` returns text; a binary path returns a download
   URL and its size instead.

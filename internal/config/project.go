@@ -194,6 +194,63 @@ type Project struct {
 	// never syncs, so no hub response and no peer's journal can put a command
 	// on someone else's machine.
 	PostSync string `json:"post_sync,omitempty"`
+	// Lazy is this device's on-demand setting for the mount. It is per device
+	// on purpose (never synced): how much of a project one laptop keeps on
+	// disk is nobody else's business.
+	Lazy Lazy `json:"lazy,omitzero"`
+}
+
+// DefaultLazyThreshold is the size up to which a lazy project still downloads
+// every file. On the measured team volume, files under 64 KiB are 69% of the
+// files and 6% of the bytes: the documents an agent greps stay local.
+const DefaultLazyThreshold = 64 << 10
+
+// DefaultLazyCacheMax caps the blobs kept for lazy files that were read on
+// demand. Past it, the least recently read are evicted first.
+const DefaultLazyCacheMax = 2 << 30
+
+// Lazy is a mount's on-demand policy. Enabled is off by default. A file over
+// Threshold bytes that is under no Pinned folder is "lazy": its metadata is
+// in the local journals, but this device downloads its content only when it
+// is read (bdrive cat, bdrive mcp), and keeps that content in a capped cache.
+type Lazy struct {
+	Enabled   bool     `json:"enabled,omitempty"`
+	Threshold int64    `json:"threshold,omitempty"`
+	CacheMax  int64    `json:"cache_max,omitempty"`
+	Pinned    []string `json:"pinned,omitempty"`
+}
+
+// MaxBytes is the eager size limit: files at or under it always download.
+func (l Lazy) MaxBytes() int64 {
+	if l.Threshold > 0 {
+		return l.Threshold
+	}
+	return DefaultLazyThreshold
+}
+
+// CacheBytes is the cap on the on-demand content cache.
+func (l Lazy) CacheBytes() int64 {
+	if l.CacheMax > 0 {
+		return l.CacheMax
+	}
+	return DefaultLazyCacheMax
+}
+
+// IsPinned reports whether rel is inside a pinned folder (or is a pinned file).
+func (l Lazy) IsPinned(rel string) bool {
+	for _, p := range l.Pinned {
+		p = strings.Trim(p, "/")
+		if p == "" || p == "." || rel == p || strings.HasPrefix(rel, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// Applies reports whether a file of this size at rel stays on the hub until
+// read. Always false when lazy mode is off.
+func (l Lazy) Applies(rel string, size int64) bool {
+	return l.Enabled && size > l.MaxBytes() && !l.IsPinned(rel)
 }
 
 // mountIDRe is the shape of a mount identity. The id is read verbatim from a

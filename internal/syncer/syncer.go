@@ -37,6 +37,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -130,6 +131,51 @@ type Session struct {
 	// the backfill never downloads one twice in a cycle. Reset with inbound.
 	fetched    map[string]bool
 	cacheDirty bool
+
+	// lazy is the mount's on-demand policy, re-read from .bdrive/config.json
+	// at the top of every cycle. See lazyUnmaterialized.
+	lazy config.Lazy
+	// quarantine is the mount's store.Quarantine, loaded per cycle: local
+	// contents the scan must never journal (see scan).
+	quarantine      map[string][]string
+	quarantineDirty bool
+}
+
+// conflictMarker is in the name of every conflict copy (conflictName).
+const conflictMarker = ".bdrive-conflict-"
+
+// lazyUnmaterialized reports whether rel is a lazy file this mount does not
+// hold: lazy mode is on, the file is over the size limit and outside every
+// pinned folder, and the mount's state cache has no entry for it. Such a path
+// is neither downloaded nor written.
+//
+// This is the whole safety argument for lazy mode. The scan mints a delete
+// ONLY for a path that is in the state cache and missing from disk, and a
+// lazy path is never put in the cache — so a lazy file that is not on disk
+// can never become a delete, on any scan path (full, watcher hint, restart).
+// A path that IS in the cache is an ordinary file on this disk and keeps
+// syncing like one, including updates; lazy mode never takes a file off disk.
+func (s *Session) lazyUnmaterialized(rel string, want journal.FileState, cache map[string]store.CachedFile) bool {
+	if want.Link != "" || want.Blob == "" || rel == IgnoreFile || !s.lazy.Applies(rel, want.Size) {
+		return false
+	}
+	if _, tracked := cache[rel]; tracked {
+		return false
+	}
+	// A conflict copy holds a losing edit, often this device's own: it is
+	// always written, or the user sees their edit vanish from disk.
+	if strings.Contains(path.Base(rel), conflictMarker) {
+		return false
+	}
+	// Something already on disk under a read-only folder is never journaled
+	// by the scan, so only materialize can put the project's version back
+	// (keeping the local bytes aside). Leaving it would serve stale bytes.
+	if s.readOnlyPath(rel) {
+		if _, err := os.Lstat(filepath.Join(s.Folder, filepath.FromSlash(rel))); err == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // ScanEventKind describes one local filesystem observation. These types are
@@ -530,6 +576,14 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			return nil, fmt.Errorf("project config gone at %s", s.Folder)
 		}
 	}
+	s.lazy = proj.Lazy
+	// Fail CLOSED: an unreadable quarantine is not an empty one, and a
+	// scan without it could journal bytes a writer refused to commit.
+	q, qerr := s.Store.LoadQuarantine(s.mountID())
+	if qerr != nil {
+		return nil, fmt.Errorf("read quarantine: %w", qerr)
+	}
+	s.quarantine, s.quarantineDirty = q, false
 	if s.ExpectedRemote != "" && !config.SameRemote(proj.Remote, s.ExpectedRemote) {
 		return nil, fmt.Errorf("project remote changed (%q -> %q)", s.ExpectedRemote, proj.Remote)
 	}
@@ -1089,6 +1143,12 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 // matters even on a cut-short cycle: the scan already journaled local edits,
 // and dropping the cache would make the next scan journal them all again.
 func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, loadedSync store.SyncState, sec *secretLog, cacheDirty bool) error {
+	if s.quarantineDirty {
+		if err := s.Store.SaveQuarantine(s.mountID(), s.quarantine); err != nil {
+			log.Printf("beardrive: could not update the quarantine: %v", err)
+		}
+		s.quarantineDirty = false
+	}
 	if cacheDirty || !s.Store.HasCache(s.mountID()) {
 		if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
 			return err
@@ -1298,6 +1358,17 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		// below means a file touched back to previously-flagged content still
 		// reports. Warn only: nothing here stops the op.
 		sec.scanBlob(s.Store, rel, sum)
+		// Bytes a local writer refused to commit (store.Quarantine) are never
+		// journaled while the file still holds them. Not cached either, so
+		// every scan looks again; any other content syncs and ends the entry.
+		if refused, held := s.quarantine[rel]; held {
+			if slices.Contains(refused, sum) {
+				recordRetry(rel)
+				return nil
+			}
+			delete(s.quarantine, rel)
+			s.quarantineDirty = true
+		}
 		if ok && c.Blob == sum {
 			// content unchanged, just touched
 			c.Size, c.MTimeNS, c.Mode, c.Dev, c.Ino = n, mt, mode, dev, ino
@@ -1814,7 +1885,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		}
 	}
 	for p := range touched {
-		if win, ok := fold.Target[p]; ok && win.Blob != "" && !s.Store.HasBlob(win.Blob) {
+		if win, ok := fold.Target[p]; ok && win.Blob != "" && !s.Store.HasBlob(win.Blob) && !s.lazyUnmaterialized(p, win, cache) {
 			fetchList = append(fetchList, journal.Op{Kind: journal.KindPut, Path: p, Blob: win.Blob, Size: win.Size, Mode: win.Mode})
 		}
 	}
@@ -2006,7 +2077,7 @@ func (s *Session) backfillOps(target map[string]journal.FileState, cache map[str
 		if c, ok := cache[rel]; ok && sameValue(c.Blob, c.Link, want.Blob, want.Link) {
 			continue
 		}
-		if filter.Skip(rel) {
+		if filter.Skip(rel) || s.lazyUnmaterialized(rel, want, cache) {
 			continue
 		}
 		if s.fetched[want.Blob] || s.Store.HasBlob(want.Blob) {
@@ -2384,7 +2455,7 @@ func (s *Session) preserveLocalEntry(abs, rel string, fi os.FileInfo) error {
 // it would replay and fail on every cycle from then on, triggered by one
 // ordinary concurrent edit.
 func conflictName(p, deviceName string, t time.Time) string {
-	suffix := ".bdrive-conflict-" + clip(sanitize(deviceName), 32) + "-" + t.UTC().Format("20060102T150405Z")
+	suffix := conflictMarker + clip(sanitize(deviceName), 32) + "-" + t.UTC().Format("20060102T150405Z")
 	dir, base := path.Split(p)
 	return dir + clip(base, 255-len(suffix)) + suffix
 }
@@ -2448,6 +2519,11 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 			}
 		}
 		if filter.Skip(rel) {
+			continue
+		}
+		// Not written even when a read already cached its content: a lazy
+		// file is read through bdrive cat / bdrive mcp, never put on disk.
+		if s.lazyUnmaterialized(rel, want, cache) {
 			continue
 		}
 		wrote, err := s.materializeFile(rel, want, cache)

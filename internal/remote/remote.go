@@ -279,6 +279,47 @@ type ReadReporter interface {
 	ReportReads(ctx context.Context, kind string, reads []ReadEvent) error
 }
 
+// Grepper is the optional hub-side search capability, in the ReadReporter
+// mold: a hub greps file content it holds so a lazy device need not download
+// it first. Object stores do not implement it.
+type Grepper interface {
+	Grep(ctx context.Context, req GrepRequest) (GrepResponse, error)
+}
+
+// GrepRequest searches an explicit list of paths (the files the caller does
+// not hold locally). The hub scans them in order within a per-request budget
+// and reports how many it consumed, so a caller pages by resending the rest —
+// a search is never cut silently.
+type GrepRequest struct {
+	Pattern    string   `json:"pattern"`
+	IgnoreCase bool     `json:"ignore_case,omitempty"`
+	FilesOnly  bool     `json:"files_only,omitempty"`
+	Paths      []string `json:"paths"`
+	MaxMatches int      `json:"max_matches,omitempty"`
+}
+
+// GrepMatch is one matching line.
+type GrepMatch struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+// GrepResponse: Scanned is how many of the request's Paths were searched
+// (a prefix of them); the caller resends Paths[Scanned:] for the rest.
+// Missing are paths the hub does not hold or the caller may not read;
+// Binary and Unreadable were skipped. Total counts every match found, even
+// past MaxMatches.
+type GrepResponse struct {
+	Matches    []GrepMatch `json:"matches"`
+	Files      []string    `json:"files"`
+	Scanned    int         `json:"scanned"`
+	Total      int         `json:"total"`
+	Missing    []string    `json:"missing,omitempty"`
+	Binary     []string    `json:"binary,omitempty"`
+	Unreadable []string    `json:"unreadable,omitempty"`
+}
+
 // Watcher is the optional change-notification capability, in the PutSigner
 // mold: a hub can tell a device that a peer pushed, so the daemon syncs on the
 // news instead of waiting out its remote interval. Object-store backends

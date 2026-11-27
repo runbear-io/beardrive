@@ -301,103 +301,9 @@ func (s *Store) PlanPruneLocalBlobsForDevice(ownDevice string, extraKeep map[str
 }
 
 func (s *Store) pruneLocalBlobs(ownDevice string, extraKeep map[string]bool, minAge time.Duration, dryRun bool) (removed int, freedBytes int64, err error) {
-	keep := make(map[string]bool, len(extraKeep))
-	for blob := range extraKeep {
-		keep[blob] = true
-	}
-	entries, err := os.ReadDir(s.dir)
+	keep, err := s.blobKeepSet(ownDevice, extraKeep, true)
 	if err != nil {
 		return 0, 0, err
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if name != "state.json" && !(strings.HasPrefix(name, "state-") && strings.HasSuffix(name, ".json")) {
-			continue
-		}
-		raw, readErr := os.ReadFile(filepath.Join(s.dir, name))
-		if readErr != nil {
-			return 0, 0, readErr
-		}
-		var cache map[string]CachedFile
-		if err := json.Unmarshal(raw, &cache); err != nil {
-			return 0, 0, err
-		}
-		for _, cached := range cache {
-			if cached.Blob != "" {
-				keep[cached.Blob] = true
-			}
-		}
-	}
-	s.collectCachedBlobs(keep)
-	fold, err := s.ReplayFold()
-	if err != nil {
-		return 0, 0, err
-	}
-	for _, state := range fold.Target {
-		if state.Blob != "" {
-			keep[state.Blob] = true
-		}
-	}
-	if fold.HasIgnorePut && fold.LatestIgnorePut.Blob != "" {
-		keep[fold.LatestIgnorePut.Blob] = true
-	}
-	if fold.HasIgnoreWinner && fold.IgnoreWinner.Blob != "" {
-		keep[fold.IgnoreWinner.Blob] = true
-	}
-	st, err := s.LoadSync()
-	if err != nil && !os.IsNotExist(err) {
-		return 0, 0, err
-	}
-	if ownDevice == "" && st.Device != "" {
-		ownDevice = st.Device
-	}
-	if ownDevice == "" || (st.Lamport == 0 && st.PushedOps == 0) {
-		ops, err := s.AllOps()
-		if err != nil {
-			return 0, 0, err
-		}
-		for _, op := range ops {
-			if op.Blob != "" {
-				keep[op.Blob] = true
-			}
-			if op.Base != "" {
-				keep[op.Base] = true
-			}
-		}
-	} else {
-		unpushed, err := s.OwnOpsFrom(ownDevice, st.PushedOps)
-		if err != nil && !os.IsNotExist(err) {
-			return 0, 0, err
-		}
-		unpushedPaths := make(map[string]bool, len(unpushed))
-		for _, op := range unpushed {
-			if op.Blob != "" {
-				keep[op.Blob] = true
-			}
-			if op.Base != "" {
-				keep[op.Base] = true
-			}
-			if op.Path != "" {
-				unpushedPaths[op.Path] = true
-			}
-		}
-		if len(unpushedPaths) > 0 {
-			ops, err := s.AllOps()
-			if err != nil {
-				return 0, 0, err
-			}
-			for _, op := range ops {
-				if !unpushedPaths[op.Path] {
-					continue
-				}
-				if op.Blob != "" {
-					keep[op.Blob] = true
-				}
-				if op.Base != "" {
-					keep[op.Base] = true
-				}
-			}
-		}
 	}
 	err = filepath.WalkDir(filepath.Join(s.dir, "blobs"), func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -429,6 +335,119 @@ func (s *Store) pruneLocalBlobs(ownDevice string, extraKeep map[string]bool, min
 		return nil
 	})
 	return removed, freedBytes, err
+}
+
+// UnevictableBlobs is the prune's keep set minus the current fold: every
+// blob a mount cache records (all state-*.json in the volume), the
+// .bdriveignore winners, and every blob and base of this device's unpushed
+// ops and of all ops at their paths (all ops when the device has never
+// pushed). The lazy-cache cap evicts only current-fold blobs outside it.
+func (s *Store) UnevictableBlobs(ownDevice string, extraKeep map[string]bool) (map[string]bool, error) {
+	return s.blobKeepSet(ownDevice, extraKeep, false)
+}
+
+func (s *Store) blobKeepSet(ownDevice string, extraKeep map[string]bool, withFold bool) (map[string]bool, error) {
+	keep := make(map[string]bool, len(extraKeep))
+	for blob := range extraKeep {
+		keep[blob] = true
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name != "state.json" && !(strings.HasPrefix(name, "state-") && strings.HasSuffix(name, ".json")) {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(s.dir, name))
+		if readErr != nil {
+			return nil, readErr
+		}
+		var cache map[string]CachedFile
+		if err := json.Unmarshal(raw, &cache); err != nil {
+			return nil, err
+		}
+		for _, cached := range cache {
+			if cached.Blob != "" {
+				keep[cached.Blob] = true
+			}
+		}
+	}
+	s.collectCachedBlobs(keep)
+	fold, err := s.ReplayFold()
+	if err != nil {
+		return nil, err
+	}
+	if withFold {
+		for _, state := range fold.Target {
+			if state.Blob != "" {
+				keep[state.Blob] = true
+			}
+		}
+	}
+	if fold.HasIgnorePut && fold.LatestIgnorePut.Blob != "" {
+		keep[fold.LatestIgnorePut.Blob] = true
+	}
+	if fold.HasIgnoreWinner && fold.IgnoreWinner.Blob != "" {
+		keep[fold.IgnoreWinner.Blob] = true
+	}
+	st, err := s.LoadSync()
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if ownDevice == "" && st.Device != "" {
+		ownDevice = st.Device
+	}
+	if ownDevice == "" || (st.Lamport == 0 && st.PushedOps == 0) {
+		ops, err := s.AllOps()
+		if err != nil {
+			return nil, err
+		}
+		for _, op := range ops {
+			if op.Blob != "" {
+				keep[op.Blob] = true
+			}
+			if op.Base != "" {
+				keep[op.Base] = true
+			}
+		}
+	} else {
+		unpushed, err := s.OwnOpsFrom(ownDevice, st.PushedOps)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		unpushedPaths := make(map[string]bool, len(unpushed))
+		for _, op := range unpushed {
+			if op.Blob != "" {
+				keep[op.Blob] = true
+			}
+			if op.Base != "" {
+				keep[op.Base] = true
+			}
+			if op.Path != "" {
+				unpushedPaths[op.Path] = true
+			}
+		}
+		if len(unpushedPaths) > 0 {
+			ops, err := s.AllOps()
+			if err != nil {
+				return nil, err
+			}
+			for _, op := range ops {
+				if !unpushedPaths[op.Path] {
+					continue
+				}
+				if op.Blob != "" {
+					keep[op.Blob] = true
+				}
+				if op.Base != "" {
+					keep[op.Base] = true
+				}
+			}
+		}
+	}
+	return keep, nil
 }
 
 func (s *Store) PutBlobBytes(b []byte) (string, int64, error) {
@@ -550,10 +569,10 @@ const (
 )
 
 type SyncState struct {
-	Device     string `json:"device,omitempty"`
-	Remote     string `json:"remote,omitempty"`
-	Lamport    int64  `json:"lamport"`
-	PushedOps  int64  `json:"pushed_ops"`       // how many of our own ops the remote has
+	Device    string `json:"device,omitempty"`
+	Remote    string `json:"remote,omitempty"`
+	Lamport   int64  `json:"lamport"`
+	PushedOps int64  `json:"pushed_ops"`       // how many of our own ops the remote has
 	Access    string `json:"access,omitempty"` // "", "read-only", or "no-access"
 	// AccessReason is the hub's own words for the last refusal. Without it every
 	// 403 renders as the same "read-only (pull only)" line, and the hub's most
@@ -595,7 +614,6 @@ func (s *Store) LoadSync() (SyncState, error) {
 func (s *Store) SaveSync(st SyncState) error {
 	return WriteJSONAtomic(filepath.Join(s.dir, "sync.json"), st)
 }
-
 
 // ---- locking ----
 

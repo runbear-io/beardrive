@@ -1930,6 +1930,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/p/{project}/history/summary", proj(PermRead, s.handleHistorySummary))
 	mux.HandleFunc("GET /api/p/{project}/history/emptied", proj(PermRead, s.handleHistoryEmptied))
 	mux.HandleFunc("GET /api/p/{project}/blob", proj(PermRead, s.handleBlob))
+	mux.HandleFunc("POST /api/p/{project}/grep", proj(PermRead, s.handleGrep))
 	// Restore needs a journal to look the version up in, so it exists only
 	// per project — never on the single-volume (DirSource) prefix. Remove
 	// writes to that same journal, so it lives here too.

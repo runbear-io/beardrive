@@ -315,6 +315,10 @@ classDiagram
         <<interface>>
         +Watch(ctx) signal channel
     }
+    class Grepper {
+        <<interface>>
+        +Grep(ctx, GrepRequest) GrepResponse
+    }
     class ConditionalPutter {
         <<interface>>
         +GetVersioned(ctx, key) body, Version
@@ -345,6 +349,7 @@ classDiagram
     note for ConditionalPutter "internal/remote — optional capabilities exposed via exact capability-preserving combinators in remote.Prefixed: gcsBackend (object generations), s3Backend (ETag If-Match / If-None-Match:*), and localBackend (directory flock + SHA-256 content version in local_cas.go) implement ConditionalPutter, RangeGetter, and VersionedRangeGetter; gcsBackend and s3Backend also implement VersionedMetaBackend for atomic bdrive-append-chain metadata alongside conditional writes and generation/ETag-pinned range GETs. Version is OPAQUE and VersionAbsent means &quot;create, and fail if somebody beat me&quot;. appendOps retries a bounded five times, re-reading after each precondition failure and re-stamping seq/lamport."
     note for ConditionalPutter "file:// CAS opens one descriptor, tries LOCK_EX|LOCK_NB immediately and creates a reusable timer only under contention. Cancellation closes an unacquired descriptor without unlocking the external holder. A successful acquisition is checked for cancellation and released once by its owner."
     note for Watcher "internal/remote — optional, in the PutSigner mold: only httpBackend implements it (GET /api/p/id/events). The channel carries NO payload — the daemon's only question is &quot;talk to the remote now?&quot;, and the answer to a burst is one cycle, so the impl coalesces on a buffer of one and can never make the hub's writer block. A closed channel means the path is gone (hub down, proxy timeout, an older hub with no route) and the caller falls back to its interval. Accelerator only: nothing may depend on a signal arriving, because for every object-store backend none ever will. Its stream gets a client WITHOUT httpBackend's 5-minute whole-request timeout (doWith), which would otherwise sever a healthy idle stream on the dot"
+    note for Grepper "internal/remote — optional, in the ReadReporter mold: only httpBackend implements it (POST /api/p/id/grep, handleGrep in webapp/grep.go, PermRead through proj()). A lazy device names the exact paths it does not hold; the hub scans them in order within one page's budget (maxGrepFiles / maxGrepBytes / the match cap, reusing the MCP grep's scanBlob) and answers Scanned, so the client resends the remainder — a search pages and is never cut silently. Paths the caller may not read come back as Missing, the same absence every other door shows"
     note for Backend "internal/remote — impls: localBackend (file://), s3Backend, gcsBackend, httpBackend (https:// hub), Prefixed wrapper"
     note for Backend "Key handling is fallible now: Prefixed.key and localBackend.path RETURN AN ERROR (safeKey / store.UnderRoot) rather than concatenating, so a `..` key cannot walk out of a project's prefix or out of a file:// root — and Prefixed.List re-checks the STRIPPED key on the way out, since the prefix it removes is the only thing that was ever validated. The httpBackend client is origin-bound: the device token is keyed to settings.Server, SameOrigin is the one rule, refuseOffOriginRedirect is its CheckRedirect, a presign target must be https on a trusted origin (directTargetOK), and List drops keys failing journal.SafePath and clamps a negative Size. gcs SignPut now signs Content-Length too. Object carries Modified (S3 LastModified, GCS Updated, file mtime; zero where the backend has none) — RemoteSource.verify reads it to decide when a blob can no longer be rewritten by a presigned URL"
 
@@ -965,6 +970,7 @@ classDiagram
     Backend <|-- VersionedRangeGetter : optional capability
     Backend <|-- VersionedMetaBackend : optional atomic metadata + range
     Backend <|-- Watcher : optional capability
+    Backend <|-- Grepper : optional capability
     Backend <|-- JournalAppender : optional capability (https:// v2 append)
     Backend <|-- JournalTailGetter : optional capability (https:// v2 tail pull)
     Server *-- eventHub : live change fan-out

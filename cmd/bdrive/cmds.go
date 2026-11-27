@@ -173,6 +173,7 @@ list in .bdrive/config.json is never pruned against either.`,
 						link := hookLinkFor(folder, target, h.base)
 						link.paths = h.paths
 						link.secrets = h.secrets
+						link.lazy = h.lazy
 						links = append(links, link)
 					}
 					if vdir, err := config.VolumeDir(proj.ID); err == nil {
