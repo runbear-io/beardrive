@@ -254,3 +254,29 @@ func TestOpenForGrepChargesAFailedManifestRead(t *testing.T) {
 		t.Fatalf("err=%v spent=%v", err, spent != nil)
 	}
 }
+
+// Opening chunk-only content re-reads its manifest; those bytes are part of
+// what the open reports as spent, on success as on failure (bot review P1).
+func TestOpenForGrepChargesTheManifestReFetch(t *testing.T) {
+	ctx := context.Background()
+	be, _ := remote.Open(ctx, "file://"+t.TempDir())
+	v := &volume{source: &RemoteSource{Backend: be}}
+	part := "only chunk\n"
+	x := sha256.Sum256([]byte(part))
+	h := hex.EncodeToString(x[:])
+	be.Put(ctx, "chunks/"+h, strings.NewReader(part), int64(len(part)))
+	man := `{"size":` + fmt.Sprint(len(part)) + `,"chunks":[{"h":"` + h + `","n":` + fmt.Sprint(len(part)) + `}]}`
+	be.Put(ctx, "manifests/"+h, strings.NewReader(man), int64(len(man)))
+	rc, verify, spent, err := openForGrep(ctx, v, "f", FileInfo{Blob: h}, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, rc)
+	if !verify() {
+		t.Fatal("verify")
+	}
+	rc.Close()
+	if want := int64(len(part)) + grepChunkFloor + int64(len(man)); spent() != want {
+		t.Fatalf("spent = %d, want bytes + chunk floor + manifest re-fetch = %d", spent(), want)
+	}
+}
