@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -211,21 +212,29 @@ func (s *Session) Writable(rel string) error {
 	return nil
 }
 
-// Quarantine records that rel's local content sha must not be journaled
-// (store.Quarantine); release removes the entry. The caller holds the volume
-// flock, which orders this against every scan.
+// Quarantine adds sha to the refused contents of rel (store.Quarantine), or
+// with release removes exactly that sha — never another writer's entry for
+// the same path. The caller holds the volume flock, which orders this
+// against every scan.
 func (s *Session) Quarantine(rel, sha string, release bool) error {
 	q, err := s.Store.LoadQuarantine(s.mountID())
 	if err != nil {
 		return err
 	}
+	set := q[rel]
 	if release {
-		if _, ok := q[rel]; !ok {
+		i := slices.Index(set, sha)
+		if i < 0 {
 			return nil
 		}
+		set = slices.Delete(set, i, i+1)
+	} else if !slices.Contains(set, sha) {
+		set = append(set, sha)
+	}
+	if len(set) == 0 {
 		delete(q, rel)
 	} else {
-		q[rel] = sha
+		q[rel] = set
 	}
 	return s.Store.SaveQuarantine(s.mountID(), q)
 }

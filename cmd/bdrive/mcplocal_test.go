@@ -594,3 +594,29 @@ func TestLocalMCPSuccessfulWriteSyncs(t *testing.T) {
 		t.Fatal("a successful write must sync")
 	}
 }
+
+// A later write to a path whose earlier refused bytes are quarantined adds
+// its own entry and releases only its own: when it fails too (or dies before
+// its swap), the earlier refused bytes stay held back (bot review P1).
+func TestLocalMCPRetryKeepsAnEarlierQuarantine(t *testing.T) {
+	m, abs, sha := swapBackFails(t)
+	ctx := context.Background()
+	if _, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha}); err == nil {
+		t.Fatal("first write must be refused")
+	}
+	// Second attempt fails at its own swap (not stuck): releases only itself.
+	mcpBeforeRename = nil
+	swapFn = func(a, b string) error { return os.ErrPermission }
+	out, _ := m.read(ctx, lRead{Path: "notes.md"})
+	cur := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
+	if _, err := m.write(ctx, lWrite{Path: "notes.md", Content: "again\n", SHA: cur}); err == nil {
+		t.Fatal("second write must fail")
+	}
+	m.v.sess.Cycle(ctx)
+	if journaled(t, m, "mine\n") {
+		t.Fatal("the earlier refused write lost its quarantine and synced")
+	}
+	if b, _ := os.ReadFile(abs); string(b) != "mine\n" {
+		t.Fatalf("file = %q", b)
+	}
+}

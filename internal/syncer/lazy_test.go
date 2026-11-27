@@ -396,3 +396,29 @@ func TestQuarantinedContentNeverSyncs(t *testing.T) {
 		t.Fatalf("quarantine not ended by a real edit: %v", q)
 	}
 }
+
+// An unreadable quarantine fails the cycle closed: nothing is scanned or
+// pushed, rather than scanning as if nothing were quarantined.
+func TestQuarantineUnreadableFailsClosed(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	write(t, a.Folder, "notes.md", "v1")
+	cycle(t, a)
+	if err := a.Quarantine("notes.md", sha("refused"), false); err != nil {
+		t.Fatal(err)
+	}
+	write(t, a.Folder, "notes.md", "refused")
+	p := filepath.Join(a.Store.Dir(), "quarantine-"+a.mountID()+".json")
+	if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Cycle(context.Background()); err == nil {
+		t.Fatal("a cycle with an unreadable quarantine must fail")
+	}
+	ops, _ := a.Store.DeviceOps("deva")
+	for _, op := range ops {
+		if op.Blob == sha("refused") {
+			t.Fatal("refused content journaled")
+		}
+	}
+}

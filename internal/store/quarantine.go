@@ -12,13 +12,15 @@ func (s *Store) quarantinePath(mountID string) (string, error) {
 	return s.mountStatePath("quarantine-", mountID)
 }
 
-// LoadQuarantine reads the mount's quarantine; a missing file is empty.
-func (s *Store) LoadQuarantine(mountID string) (map[string]string, error) {
+// LoadQuarantine reads the mount's quarantine: path → the set of refused
+// shas at that path. A missing file is empty; any other failure is an
+// error, and callers fail closed on it.
+func (s *Store) LoadQuarantine(mountID string) (map[string][]string, error) {
 	p, err := s.quarantinePath(mountID)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]string{}
+	out := map[string][]string{}
 	if err := readJSON(p, &out); err != nil {
 		return nil, err
 	}
@@ -27,7 +29,7 @@ func (s *Store) LoadQuarantine(mountID string) (map[string]string, error) {
 
 // SaveQuarantine writes it atomically. Callers hold the volume flock, which
 // is what orders it against a scan.
-func (s *Store) SaveQuarantine(mountID string, q map[string]string) error {
+func (s *Store) SaveQuarantine(mountID string, q map[string][]string) error {
 	p, err := s.quarantinePath(mountID)
 	if err != nil {
 		return err

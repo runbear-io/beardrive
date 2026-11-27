@@ -742,7 +742,7 @@ func (m *localMCP) put(rel string, content []byte, base string) (out string, err
 	var stuck bool
 	err, stuck = m.swapIn(rel, abs, tmp.Name(), base, ours)
 	if !stuck {
-		if qerr := m.v.sess.Quarantine(rel, "", true); qerr != nil && err == nil {
+		if qerr := m.v.sess.Quarantine(rel, ours, true); qerr != nil && err == nil {
 			err = fmt.Errorf("%s was written but stays held back from sync (%v); run the write again", rel, qerr)
 		}
 	}

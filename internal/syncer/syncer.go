@@ -37,6 +37,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -136,7 +137,7 @@ type Session struct {
 	lazy config.Lazy
 	// quarantine is the mount's store.Quarantine, loaded per cycle: local
 	// contents the scan must never journal (see scan).
-	quarantine      map[string]string
+	quarantine      map[string][]string
 	quarantineDirty bool
 }
 
@@ -576,10 +577,13 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 		}
 	}
 	s.lazy = proj.Lazy
-	s.quarantine, s.quarantineDirty = nil, false
-	if q, err := s.Store.LoadQuarantine(s.mountID()); err == nil && len(q) > 0 {
-		s.quarantine = q
+	// Fail CLOSED: an unreadable quarantine is not an empty one, and a
+	// scan without it could journal bytes a writer refused to commit.
+	q, qerr := s.Store.LoadQuarantine(s.mountID())
+	if qerr != nil {
+		return nil, fmt.Errorf("read quarantine: %w", qerr)
 	}
+	s.quarantine, s.quarantineDirty = q, false
 	if s.ExpectedRemote != "" && !config.SameRemote(proj.Remote, s.ExpectedRemote) {
 		return nil, fmt.Errorf("project remote changed (%q -> %q)", s.ExpectedRemote, proj.Remote)
 	}
@@ -1357,8 +1361,8 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		// Bytes a local writer refused to commit (store.Quarantine) are never
 		// journaled while the file still holds them. Not cached either, so
 		// every scan looks again; any other content syncs and ends the entry.
-		if q, held := s.quarantine[rel]; held {
-			if q == sum {
+		if refused, held := s.quarantine[rel]; held {
+			if slices.Contains(refused, sum) {
 				recordRetry(rel)
 				return nil
 			}
