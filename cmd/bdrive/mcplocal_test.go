@@ -306,35 +306,6 @@ func TestLocalMCPRestoreRefusesARacingWrite(t *testing.T) {
 	}
 }
 
-// When the swap back fails, the other version is still put back (by rename),
-// so a refused write never stays at the path (bot review P1).
-func TestLocalMCPSwapBackFailureStillRestores(t *testing.T) {
-	m := testLocalMCP(t)
-	ctx := context.Background()
-	abs := filepath.Join(m.v.root, "notes.md")
-	os.WriteFile(abs, []byte("v1\n"), 0o644)
-	out, _ := m.read(ctx, lRead{Path: "notes.md"})
-	sha := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
-	calls := 0
-	swapFn = func(a, b string) error {
-		calls++
-		if calls == 2 {
-			return os.ErrPermission
-		}
-		return swapFiles(a, b)
-	}
-	mcpBeforeRename = func() { os.WriteFile(abs, []byte("second\n"), 0o644) }
-	defer func() { swapFn, mcpBeforeRename = swapFiles, nil }()
-	_, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha})
-	if err == nil {
-		t.Fatal("must be refused")
-	}
-	// The failed swap back falls back to a rename: their version is at the
-	// path again, and our refused bytes are not.
-	if b, _ := os.ReadFile(abs); string(b) != "second\n" {
-		t.Fatalf("file = %q, want the other writer's version back", b)
-	}
-}
 
 // restore passes put's note about a displaced version through.
 func TestLocalMCPRestoreReportsDisplacedFallback(t *testing.T) {
@@ -526,15 +497,25 @@ func TestLocalMCPSwapHoldsTheVolumeLock(t *testing.T) {
 	}
 }
 
-// The rename fallback for a failed swap back keeps a third save that landed
-// after the swap, instead of replacing it (bot review P1).
-func TestLocalMCPRenameFallbackKeepsAThirdSave(t *testing.T) {
+
+
+
+
+
+// swapBackFails sets notes.md at v1 (journaled), reads its sha, and arranges
+// for a second writer to save just before our swap and for the swap back to
+// fail — the case where our refused bytes are left at the path.
+func swapBackFails(t *testing.T) (*localMCP, string, string) {
 	m := testLocalMCP(t)
-	ctx := context.Background()
 	abs := filepath.Join(m.v.root, "notes.md")
 	os.WriteFile(abs, []byte("v1\n"), 0o644)
-	out, _ := m.read(ctx, lRead{Path: "notes.md"})
+	if _, err := m.v.sess.Cycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m.v.refresh()
+	out, _ := m.read(context.Background(), lRead{Path: "notes.md"})
 	sha := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
+	mcpBeforeRename = func() { os.WriteFile(abs, []byte("second\n"), 0o644) }
 	calls := 0
 	swapFn = func(a, b string) error {
 		calls++
@@ -543,69 +524,57 @@ func TestLocalMCPRenameFallbackKeepsAThirdSave(t *testing.T) {
 		}
 		return swapFiles(a, b)
 	}
-	mcpBeforeRename = func() { os.WriteFile(abs, []byte("second\n"), 0o644) }
-	mcpBeforeSwapBack = func() { os.WriteFile(abs, []byte("third\n"), 0o644) }
-	defer func() { swapFn, mcpBeforeRename, mcpBeforeSwapBack = swapFiles, nil, nil }()
-	if _, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha}); err == nil {
-		t.Fatal("must be refused")
-	}
-	found := false
-	entries, _ := os.ReadDir(m.v.root)
-	for _, e := range entries {
-		if b, _ := os.ReadFile(filepath.Join(m.v.root, e.Name())); string(b) == "third\n" && strings.Contains(e.Name(), "displaced") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("third save lost: %v", entries)
-	}
-	if b, _ := os.ReadFile(abs); string(b) == "mine\n" {
-		t.Fatal("refused bytes left at the path")
-	}
-}
-
-// casRaceFixture: notes.md at v1, read for its sha; a second writer saves
-// right before our swap, so the swap must be undone.
-func casRaceFixture(t *testing.T) (*localMCP, string, string) {
-	m := testLocalMCP(t)
-	abs := filepath.Join(m.v.root, "notes.md")
-	os.WriteFile(abs, []byte("v1\n"), 0o644)
-	out, _ := m.read(context.Background(), lRead{Path: "notes.md"})
-	sha := strings.TrimPrefix(strings.Fields(out)[1], "sha:")
-	mcpBeforeRename = func() { os.WriteFile(abs, []byte("second\n"), 0o644) }
-	calls := 0
-	swapFn = func(a, b string) error {
-		calls++
-		if calls == 2 {
-			return os.ErrPermission // the swap back fails
-		}
-		return swapFiles(a, b)
-	}
-	t.Cleanup(func() {
-		mcpBeforeRename, mcpBeforeSwapBack = nil, nil
-		swapFn, renameFn, copyBackFn = swapFiles, os.Rename, copyInto
-	})
+	t.Cleanup(func() { mcpBeforeRename, mcpBeforeSwapBack, swapFn = nil, nil, swapFiles })
 	return m, abs, sha
 }
 
-// Swap back AND rename both fail: the other version is copied back in place,
-// so the refused bytes never stay at the path (Larkin/bot P1).
-func TestLocalMCPBothRestoreStepsFailCopiesBackInPlace(t *testing.T) {
-	m, abs, sha := casRaceFixture(t)
-	renameFn = func(string, string) error { return os.ErrPermission }
-	if _, err := m.write(context.Background(), lWrite{Path: "notes.md", Content: "mine\n", SHA: sha}); err == nil {
-		t.Fatal("must be refused")
+func journaled(t *testing.T, m *localMCP, content string) bool {
+	t.Helper()
+	want, _ := fileSHAOf(content)
+	ops, _ := m.v.sess.Store.DeviceOps("dev")
+	for _, op := range ops {
+		if op.Blob == want {
+			return true
+		}
 	}
-	if b, _ := os.ReadFile(abs); string(b) != "second\n" {
-		t.Fatalf("file = %q, want the other writer's version", b)
+	return false
+}
+
+// When nothing can put the other version back, nothing more is written over
+// the path (that could destroy a save made since), and the refused bytes are
+// quarantined: no sync cycle journals them — not the next, not after a
+// restart — until the file changes, which then syncs normally (bot review P1).
+func TestLocalMCPFailedSwapBackQuarantinesTheRefusedWrite(t *testing.T) {
+	m, abs, sha := swapBackFails(t)
+	ctx := context.Background()
+	_, err := m.write(ctx, lWrite{Path: "notes.md", Content: "mine\n", SHA: sha})
+	if err == nil || !strings.Contains(err.Error(), "will NOT sync") {
+		t.Fatalf("got %v", err)
+	}
+	matches, _ := filepath.Glob(abs + ".bdrive-mcp-displaced-*")
+	if len(matches) != 1 {
+		t.Fatalf("the other version was not kept: %v", matches)
+	}
+	if b, _ := os.ReadFile(matches[0]); string(b) != "second\n" {
+		t.Fatalf("kept = %q", b)
+	}
+	m.v.sess.Cycle(ctx)
+	restarted := &syncer.Session{Folder: m.v.sess.Folder, Store: m.v.sess.Store, Device: m.v.sess.Device}
+	restarted.Cycle(ctx)
+	if journaled(t, m, "mine\n") {
+		t.Fatal("the refused write was journaled")
+	}
+	os.WriteFile(abs, []byte("merged by hand\n"), 0o644)
+	restarted.Cycle(ctx)
+	if !journaled(t, m, "merged by hand\n") {
+		t.Fatal("a later edit at the quarantined path did not sync")
 	}
 }
 
-// A concurrent save landing while the restore is failing is never
-// overwritten: the path already holds someone else's bytes, not ours.
-func TestLocalMCPConcurrentSaveDuringFailedRestoreIsKept(t *testing.T) {
-	m, abs, sha := casRaceFixture(t)
-	renameFn = func(string, string) error { return os.ErrPermission }
+// A save landing while the swap back fails is never written over: it stays
+// at the path, and because it is not the refused bytes it syncs.
+func TestLocalMCPConcurrentSaveDuringFailedSwapBackIsKeptAndSyncs(t *testing.T) {
+	m, abs, sha := swapBackFails(t)
 	mcpBeforeSwapBack = func() { os.WriteFile(abs, []byte("third\n"), 0o644) }
 	if _, err := m.write(context.Background(), lWrite{Path: "notes.md", Content: "mine\n", SHA: sha}); err == nil {
 		t.Fatal("must be refused")
@@ -613,37 +582,21 @@ func TestLocalMCPConcurrentSaveDuringFailedRestoreIsKept(t *testing.T) {
 	if b, _ := os.ReadFile(abs); string(b) != "third\n" {
 		t.Fatalf("concurrent save overwritten: %q", b)
 	}
-	matches, _ := filepath.Glob(abs + ".bdrive-mcp-displaced-*")
-	if len(matches) != 1 {
-		t.Fatalf("the second version was not kept: %v", matches)
-	}
-	if b, _ := os.ReadFile(matches[0]); string(b) != "second\n" {
-		t.Fatalf("kept = %q", b)
+	m.v.sess.Cycle(context.Background())
+	if !journaled(t, m, "third\n") || journaled(t, m, "mine\n") {
+		t.Fatal("want the concurrent save journaled and the refused bytes not")
 	}
 }
 
-// Every way back fails: the refused bytes are made unreadable, so a sync
-// cycle skips the file and never journals them.
-func TestLocalMCPRefusedBytesNeverSyncWhenNothingRestores(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode-000 file")
-	}
-	m, abs, sha := casRaceFixture(t)
-	renameFn = func(string, string) error { return os.ErrPermission }
-	copyBackFn = func(string, string) error { return os.ErrPermission }
-	defer os.Chmod(abs, 0o644)
-	_, err := m.write(context.Background(), lWrite{Path: "notes.md", Content: "mine\n", SHA: sha})
-	if err == nil || !strings.Contains(err.Error(), "never syncs") {
-		t.Fatalf("got %v", err)
-	}
-	if _, err := m.v.sess.Cycle(context.Background()); err != nil {
+// A successful write releases its quarantine: the bytes sync.
+func TestLocalMCPSuccessfulWriteSyncs(t *testing.T) {
+	m := testLocalMCP(t)
+	ctx := context.Background()
+	if _, err := m.write(ctx, lWrite{Path: "ok.md", Content: "fine\n"}); err != nil {
 		t.Fatal(err)
 	}
-	mine, _ := fileSHAOf("mine\n")
-	ops, _ := m.v.sess.Store.DeviceOps("dev")
-	for _, op := range ops {
-		if op.Blob == mine {
-			t.Fatal("the refused write was journaled")
-		}
+	m.v.sess.Cycle(ctx)
+	if !journaled(t, m, "fine\n") {
+		t.Fatal("a successful write must sync")
 	}
 }

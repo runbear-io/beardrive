@@ -455,8 +455,6 @@ var errNoSwap = errors.New("atomic swap not supported here")
 var (
 	mcpBeforeSwapBack func()
 	mcpBeforeCleanup  func()
-	renameFn          = os.Rename
-	copyBackFn        = copyInto
 	swapFn            = swapFiles
 )
 
@@ -473,60 +471,48 @@ var (
 // third party's save and is kept beside the file. A file that is not on disk
 // is created with link(2), which fails if anything appeared meanwhile. A
 // filesystem with no atomic exchange gets no overwrite at all.
-func (m *localMCP) swapIn(rel, abs, tmp, base, ours string) error {
+func (m *localMCP) swapIn(rel, abs, tmp, base, ours string) (err error, stuck bool) {
 	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
 		now, err := m.nowSHA(rel)
 		if err != nil {
-			return err
+			return err, false
 		}
 		if now != base {
-			return changedErr(rel, now)
+			return changedErr(rel, now), false
 		}
 		if err := os.Link(tmp, abs); err != nil {
 			if errors.Is(err, os.ErrExist) {
-				return fmt.Errorf("%s appeared while you were changing it; nothing was written — read it again", rel)
+				return fmt.Errorf("%s appeared while you were changing it; nothing was written — read it again", rel), false
 			}
-			return err
+			return err, false
 		}
-		return nil
+		return nil, false
 	}
 	switch err := swapFn(tmp, abs); {
 	case errors.Is(err, errNoSwap):
-		return fmt.Errorf("%s: this filesystem cannot replace a file atomically, so overwriting it here could lose a concurrent edit; change it with your own file tools", rel)
+		return fmt.Errorf("%s: this filesystem cannot replace a file atomically, so overwriting it here could lose a concurrent edit; change it with your own file tools", rel), false
 	case err != nil:
-		return err
+		return err, false
 	}
 	prev, _ := fileSHA(tmp)
 	if prev == base {
-		return nil // tmp now holds base; put's cleanup removes it
+		return nil, false // tmp now holds base; put's cleanup moves it aside
 	}
 	if mcpBeforeSwapBack != nil {
 		mcpBeforeSwapBack()
 	}
 	if err := swapFn(tmp, abs); err != nil {
-		// Put their version back by plain rename instead: atomic, and it
-		// removes our refused bytes from abs, so no scan can journal them.
-		// Whatever abs holds right now is hard-linked aside first: if it is
-		// not our bytes, a third writer saved after the swap, and that save
-		// is kept rather than replaced.
-		aside := filepath.Join(filepath.Dir(abs), fmt.Sprintf(".bdrive-tmp-mcp-aside-%d", time.Now().UnixNano()))
-		linked := os.Link(abs, aside) == nil
-		if rerr := renameFn(tmp, abs); rerr != nil {
-			return m.restoreInPlace(rel, abs, tmp, aside, linked, ours, prev, fmt.Errorf("%v / %v", err, rerr))
-		}
-		if linked {
-			if got, _ := fileSHA(aside); got != ours {
-				return fmt.Errorf("%s is being changed by something else right now; nothing was written, and a version saved during the check is at %s", rel, keepDisplaced(abs, aside))
-			}
-			os.Remove(aside)
-		}
-		return changedErr(rel, prev)
+		// No other way back is tried: anything that writes over abs now
+		// (a rename, an in-place copy) could destroy a save made since. Our
+		// refused bytes stay at abs, held back from sync by the quarantine
+		// put recorded before the swap; the other version is kept visibly.
+		return fmt.Errorf("%s changed while you were changing it, and putting the other version back failed (%v). Your refused change is still in %s but will NOT sync until the file changes; the other version is at %s — merge by hand", rel, err, rel, keepDisplaced(abs, tmp)), true
 	}
 	if back, _ := fileSHA(tmp); back != ours {
 		// abs was saved AGAIN between the two swaps: that save is now at tmp.
-		return fmt.Errorf("%s is being changed by something else right now; nothing was written, and a version saved during the check is at %s", rel, keepDisplaced(abs, tmp))
+		return fmt.Errorf("%s is being changed by something else right now; nothing was written, and a version saved during the check is at %s", rel, keepDisplaced(abs, tmp)), false
 	}
-	return changedErr(rel, prev)
+	return changedErr(rel, prev), false
 }
 
 func (m *localMCP) displacedDir() string {
@@ -620,52 +606,6 @@ func (m *localMCP) sweepDisplaced() []string {
 		}
 	}
 	return promoted
-}
-
-// restoreInPlace is the last way back when neither the swap back nor the
-// rename could put the other version at abs. Our refused bytes must not stay
-// there: the next scan would journal and push them. So:
-//
-//   - if abs no longer holds our bytes, a third writer already replaced them;
-//     nothing to undo, and the other version (at tmp) is kept beside it;
-//   - otherwise the other version's bytes are copied INTO abs in place,
-//     which needs neither a rename nor a new directory entry;
-//   - if even that fails, abs is made unreadable (mode 000). The scan skips
-//     an unreadable file and retries it every cycle, so the refused bytes
-//     are never journaled, and the reply says to fix the file by hand.
-func (m *localMCP) restoreInPlace(rel, abs, tmp, aside string, linked bool, ours, prev string, cause error) error {
-	if linked {
-		defer os.Remove(aside)
-	}
-	if now, err := fileSHA(abs); err == nil && now != ours {
-		return fmt.Errorf("%s changed while you were changing it (%v); nothing of yours is in it, and the version it replaced is at %s", rel, cause, keepDisplaced(abs, tmp))
-	}
-	if err := copyBackFn(tmp, abs); err == nil {
-		return changedErr(rel, prev)
-	}
-	kept := keepDisplaced(abs, tmp)
-	if err := os.Chmod(abs, 0); err == nil {
-		return fmt.Errorf("%s changed while you were changing it, and it could not be put back (%v); the other version is at %s. %s now holds your refused change and has been made unreadable so it never syncs — restore it from %s by hand", rel, cause, kept, rel, kept)
-	}
-	return fmt.Errorf("%s changed while you were changing it, and it could not be put back (%v); the other version is at %s, and %s still holds your refused change — fix it by hand before the next sync", rel, cause, kept, rel)
-}
-
-// copyInto overwrites dst's bytes with src's, in place.
-func copyInto(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC, 0)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 // keepDisplaced moves a file a swap displaced to a visible name beside abs.
@@ -784,11 +724,28 @@ func (m *localMCP) put(rel string, content []byte, base string) (out string, err
 	// swapIn briefly puts our bytes at abs before it checks what they
 	// displaced, and a scan in that instant would journal — and push — a
 	// write it is about to refuse and swap back.
+	//
+	// And our bytes are QUARANTINED before they are ever exposed: recorded in
+	// the volume store as content the scan must not journal at rel. The
+	// entry is released only once the outcome is known to be safe — the
+	// swap verified, or our bytes are no longer at abs. If the swap back
+	// fails, or this process dies mid-way, the entry stays, and the refused
+	// bytes never sync, across restarts and whatever the file's permissions.
 	unlock, locked := m.v.sess.Store.LockWithin(30 * time.Second)
 	if !locked {
 		return "", fmt.Errorf("%s: a sync cycle kept this project busy; nothing was written — try again", rel)
 	}
-	err = m.swapIn(rel, abs, tmp.Name(), base, ours)
+	if qerr := m.v.sess.Quarantine(rel, ours, false); qerr != nil {
+		unlock()
+		return "", fmt.Errorf("%s: could not guard the write (%v); nothing was written", rel, qerr)
+	}
+	var stuck bool
+	err, stuck = m.swapIn(rel, abs, tmp.Name(), base, ours)
+	if !stuck {
+		if qerr := m.v.sess.Quarantine(rel, "", true); qerr != nil && err == nil {
+			err = fmt.Errorf("%s was written but stays held back from sync (%v); run the write again", rel, qerr)
+		}
+	}
 	unlock()
 	if err != nil {
 		return "", err

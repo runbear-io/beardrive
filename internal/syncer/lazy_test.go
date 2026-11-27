@@ -360,3 +360,39 @@ func TestLazy_LocalOnlyFileAndNestedProjectAreProtected(t *testing.T) {
 		t.Fatalf("ordinary path: %v", err)
 	}
 }
+
+// Quarantined local content is never journaled — full scan, watcher hint,
+// restart — so a peer never receives it; any other content at the path
+// syncs and ends the quarantine.
+func TestQuarantinedContentNeverSyncs(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	write(t, a.Folder, "notes.md", "v1")
+	cycle(t, a)
+	b := newDevice(t, "devb", be)
+	cycle(t, b)
+	if err := b.Quarantine("notes.md", sha("refused"), false); err != nil {
+		t.Fatal(err)
+	}
+	write(t, b.Folder, "notes.md", "refused")
+	cycle(t, b)
+	if _, err := b.CycleWithScanHint(context.Background(), &ScanHint{Events: []ScanEvent{{Path: "notes.md", Kind: ScanWrite}}}); err != nil {
+		t.Fatal(err)
+	}
+	b2 := &Session{Folder: b.Folder, Store: b.Store, Device: b.Device, Backend: b.Backend}
+	cycle(t, b2)
+	cycle(t, a)
+	if got := read(t, a.Folder, "notes.md"); got != "v1" {
+		t.Fatalf("peer received quarantined content: %q", got)
+	}
+	write(t, b.Folder, "notes.md", "real edit")
+	cycle(t, b2)
+	cycle(t, a)
+	if got := read(t, a.Folder, "notes.md"); got != "real edit" {
+		t.Fatalf("a later real edit did not sync: %q", got)
+	}
+	q, _ := b.Store.LoadQuarantine(b.mountID())
+	if len(q) != 0 {
+		t.Fatalf("quarantine not ended by a real edit: %v", q)
+	}
+}

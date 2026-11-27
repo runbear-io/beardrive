@@ -134,6 +134,10 @@ type Session struct {
 	// lazy is the mount's on-demand policy, re-read from .bdrive/config.json
 	// at the top of every cycle. See lazyUnmaterialized.
 	lazy config.Lazy
+	// quarantine is the mount's store.Quarantine, loaded per cycle: local
+	// contents the scan must never journal (see scan).
+	quarantine      map[string]string
+	quarantineDirty bool
 }
 
 // conflictMarker is in the name of every conflict copy (conflictName).
@@ -572,6 +576,10 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 		}
 	}
 	s.lazy = proj.Lazy
+	s.quarantine, s.quarantineDirty = nil, false
+	if q, err := s.Store.LoadQuarantine(s.mountID()); err == nil && len(q) > 0 {
+		s.quarantine = q
+	}
 	if s.ExpectedRemote != "" && !config.SameRemote(proj.Remote, s.ExpectedRemote) {
 		return nil, fmt.Errorf("project remote changed (%q -> %q)", s.ExpectedRemote, proj.Remote)
 	}
@@ -1131,6 +1139,12 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 // matters even on a cut-short cycle: the scan already journaled local edits,
 // and dropping the cache would make the next scan journal them all again.
 func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, loadedSync store.SyncState, sec *secretLog, cacheDirty bool) error {
+	if s.quarantineDirty {
+		if err := s.Store.SaveQuarantine(s.mountID(), s.quarantine); err != nil {
+			log.Printf("beardrive: could not update the quarantine: %v", err)
+		}
+		s.quarantineDirty = false
+	}
 	if cacheDirty || !s.Store.HasCache(s.mountID()) {
 		if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
 			return err
@@ -1340,6 +1354,17 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		// below means a file touched back to previously-flagged content still
 		// reports. Warn only: nothing here stops the op.
 		sec.scanBlob(s.Store, rel, sum)
+		// Bytes a local writer refused to commit (store.Quarantine) are never
+		// journaled while the file still holds them. Not cached either, so
+		// every scan looks again; any other content syncs and ends the entry.
+		if q, held := s.quarantine[rel]; held {
+			if q == sum {
+				recordRetry(rel)
+				return nil
+			}
+			delete(s.quarantine, rel)
+			s.quarantineDirty = true
+		}
 		if ok && c.Blob == sum {
 			// content unchanged, just touched
 			c.Size, c.MTimeNS, c.Mode, c.Dev, c.Ino = n, mt, mode, dev, ino

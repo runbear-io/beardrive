@@ -384,7 +384,10 @@ journals always are. Its content is fetched only when something reads it.
   first, so a concurrent edit on another device merges instead of forking. MCP
   write/edit is a real compare-and-swap. The new file is swapped in
   atomically and the version it replaced is checked. If someone else saved in
-  between, their version goes back and the write is refused. The replaced file
+  between, their version goes back and the write is refused. Your bytes are held back
+  from sync from the moment they touch the file until the swap is verified, so a
+  refused write never reaches the hub, even if putting the other version back
+  fails or the process dies. The replaced file
   goes to `.bdrive/displaced/`, which never syncs. It is never deleted
   automatically, because a program may still hold it open and write to it.
   If one does, it becomes a visible, syncing `<name>.bdrive-mcp-late-<id>`

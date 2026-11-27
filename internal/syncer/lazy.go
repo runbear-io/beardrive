@@ -210,3 +210,22 @@ func (s *Session) Writable(rel string) error {
 	}
 	return nil
 }
+
+// Quarantine records that rel's local content sha must not be journaled
+// (store.Quarantine); release removes the entry. The caller holds the volume
+// flock, which orders this against every scan.
+func (s *Session) Quarantine(rel, sha string, release bool) error {
+	q, err := s.Store.LoadQuarantine(s.mountID())
+	if err != nil {
+		return err
+	}
+	if release {
+		if _, ok := q[rel]; !ok {
+			return nil
+		}
+		delete(q, rel)
+	} else {
+		q[rel] = sha
+	}
+	return s.Store.SaveQuarantine(s.mountID(), q)
+}
